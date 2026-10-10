@@ -1,0 +1,5 @@
+def main() -> int {
+    let x: int = 1
+    x[0] = 2
+    return 0
+}

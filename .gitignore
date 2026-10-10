@@ -1,0 +1,35 @@
+# CMake and compilation
+/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Generated code
+*.generated.c
+*.generated.s
+*.generated.ll
+
+# Compiled objects
+*.o
+*.obj
+*.exe
+*.so
+*.a
+
+# Logs and temporary files
+*.log
+*.gcda
+*.gcno
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local work and backups
+/clair_work/
+/clair_backups/
+
+# Editor files
+.DS_Store
+*.swp
+*.swo
