@@ -44,4 +44,3 @@ Les validations principales sont réalisées sous Termux ARM64.
 ## Documentation historique
 
 [Clair V0.14](docs/README_V0.14.md)
-# clair
