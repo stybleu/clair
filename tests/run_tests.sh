@@ -490,6 +490,7 @@ printf '%s\n' 'invalid_input_int_arity.cl : OK -> input_int() exige zero argumen
 
 
 bash tests/run_ownership_tests.sh
+bash tests/run_ownership_flow_tests.sh
 
 printf '%s\n' '=================================================='
 printf '%s\n' ' TOUS LES TESTS SONT OK'
