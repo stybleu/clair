@@ -3,10 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum {
+    CLAIR_OWNERSHIP_LEGACY = 0,
+    CLAIR_OWNERSHIP_OWNED,
+    CLAIR_OWNERSHIP_MOVED
+} ClairOwnershipState;
+
 typedef struct {
     char *name;
     const char *type;
     size_t depth;
+    ClairOwnershipState ownership;
+    size_t shared_borrows;
+    int mutable_borrow;
 } VarSymbol;
 
 typedef struct {
@@ -128,11 +137,19 @@ static int is_known_type(const Semantic *s, const char *type) {
     return find_class(s, type) != NULL;
 }
 
-static const char *find_var(const Semantic *s, const char *name) {
+static const VarSymbol *find_var_symbol(
+    const Semantic *s, const char *name
+) {
     for (size_t i = s->var_count; i > 0; i--) {
-        if (strcmp(s->vars[i - 1].name, name) == 0) return s->vars[i - 1].type;
+        if (strcmp(s->vars[i - 1].name, name) == 0)
+            return &s->vars[i - 1];
     }
     return NULL;
+}
+
+static const char *find_var(const Semantic *s, const char *name) {
+    const VarSymbol *v = find_var_symbol(s, name);
+    return v ? v->type : NULL;
 }
 
 static int add_var(Semantic *s, const char *name, const char *type) {
@@ -157,7 +174,14 @@ static int add_var(Semantic *s, const char *name, const char *type) {
     char *copy = malloc(strlen(name) + 1);
     if (!copy) return 0;
     strcpy(copy, name);
-    s->vars[s->var_count++] = (VarSymbol){ copy, type, s->depth };
+    s->vars[s->var_count++] = (VarSymbol){
+        .name = copy,
+        .type = type,
+        .depth = s->depth,
+        .ownership = CLAIR_OWNERSHIP_LEGACY,
+        .shared_borrows = 0,
+        .mutable_borrow = 0
+    };
     return 1;
 }
 
