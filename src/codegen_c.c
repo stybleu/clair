@@ -619,7 +619,12 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 return 1;
             }
 
-            fputs(n->text, f);
+            const char *digits = n->text;
+
+            while (*digits == '0' && digits[1])
+                ++digits;
+
+            fputs(digits, f);
             return 1;
 
         case AST_FLOAT:
@@ -934,6 +939,42 @@ if (strcmp(op, "+") == 0 &&
         }
 
         case AST_UNARY:
+            if (n->text &&
+                strcmp(n->text, "-") == 0 &&
+                n->child_count == 1 &&
+                n->children[0] &&
+                n->children[0]->kind == AST_INTEGER &&
+                n->children[0]->text &&
+                n->type_name) {
+
+                const char *digits =
+                    n->children[0]->text;
+
+                while (*digits == '0' && digits[1])
+                    ++digits;
+
+                if (strcmp(n->type_name, "int") == 0 &&
+                    strcmp(digits,
+                        "9223372036854775808") == 0) {
+
+                    fputs(
+                        "(-9223372036854775807LL - 1LL)",
+                        f);
+                    return 1;
+                }
+
+                if (strcmp(n->type_name, "int128") == 0 &&
+                    strcmp(digits,
+                        "170141183460469231731687303715884105728") == 0) {
+
+                    fputs(
+                        "(-(((__int128)1) << 126) - "
+                        "(((__int128)1) << 126))",
+                        f);
+                    return 1;
+                }
+            }
+
             if (n->type_name &&
                 strcmp(n->type_name, "int128") == 0 &&
                 n->text && strcmp(n->text, "-") == 0 &&

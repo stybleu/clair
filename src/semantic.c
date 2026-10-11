@@ -548,6 +548,14 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 (strcmp(n->type_name, "int128") == 0 ||
                  strcmp(n->type_name, "uint128") == 0))
                 return n->type_name;
+            if (!clair_128_decimal_fits(
+                    n->text,
+                    "9223372036854775807")) {
+                error_type(s,
+                    "64-bit signed integer literal out of range");
+                return NULL;
+            }
+
             set_type(n, "int");
             return n->type_name;
         case AST_FLOAT:
@@ -712,6 +720,28 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return binary_type(s, n);
         case AST_UNARY: {
             if (n->child_count != 1 || !n->text) return NULL;
+
+            if (strcmp(n->text, "-") == 0 &&
+                n->children[0] &&
+                n->children[0]->kind == AST_INTEGER &&
+                (!n->type_name ||
+                 strcmp(n->type_name, "int") == 0)) {
+
+                AstNode *child = n->children[0];
+
+                if (!clair_128_decimal_fits(
+                        child->text,
+                        "9223372036854775808")) {
+                    error_type(s,
+                        "64-bit signed integer literal out of range");
+                    return NULL;
+                }
+
+                set_type(child, "int");
+                set_type(n, "int");
+                return n->type_name;
+            }
+
             const char *operand = expr_type(s, n->children[0]);
             if (!operand) return NULL;
             if (strcmp(n->text, "-") == 0) {

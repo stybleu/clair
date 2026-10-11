@@ -494,3 +494,4 @@ printf '%s\n' '=================================================='
 
 bash tests/run_int128_tests.sh
 bash tests/run_int128_v2_tests.sh
+bash tests/run_int128_v3_1_tests.sh
