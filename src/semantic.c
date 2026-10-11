@@ -786,6 +786,110 @@ static const char *clair_v2_rhs(
     return rhs->type_name;
 }
 
+
+/*
+ * Ownership V3.1: conservative flow-state snapshots.
+ *
+ * A disagreement in ownership states is poisoned as
+ * MOVED until an unconditional assignment restores
+ * the variable. This is intentionally restrictive.
+ */
+typedef struct {
+    ClairOwnershipState ownership;
+    size_t shared_borrows;
+    int mutable_borrow;
+    int v2_may_alias;
+} ClairV3FlowState;
+
+static ClairV3FlowState *clair_v3_flow_capture(
+    Semantic *s, size_t count
+) {
+    if (s->var_count != count) {
+        fprintf(stderr,
+            "semantic error: ownership flow scope mismatch\n");
+        s->had_error = 1;
+        return NULL;
+    }
+
+    ClairV3FlowState *states = calloc(
+        count ? count : 1, sizeof(*states)
+    );
+
+    if (!states) {
+        fprintf(stderr,
+            "semantic error: ownership flow out of memory\n");
+        s->had_error = 1;
+        return NULL;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        states[i].ownership = s->vars[i].ownership;
+        states[i].shared_borrows = s->vars[i].shared_borrows;
+        states[i].mutable_borrow = s->vars[i].mutable_borrow;
+        states[i].v2_may_alias = s->vars[i].v2_may_alias;
+    }
+
+    return states;
+}
+
+static int clair_v3_flow_restore(
+    Semantic *s, size_t count,
+    const ClairV3FlowState *states
+) {
+    if (s->var_count != count) {
+        fprintf(stderr,
+            "semantic error: ownership flow scope mismatch\n");
+        s->had_error = 1;
+        return 0;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        s->vars[i].ownership = states[i].ownership;
+        s->vars[i].shared_borrows = states[i].shared_borrows;
+        s->vars[i].mutable_borrow = states[i].mutable_borrow;
+        s->vars[i].v2_may_alias = states[i].v2_may_alias;
+    }
+
+    return 1;
+}
+
+static int clair_v3_flow_merge(
+    Semantic *s, size_t count,
+    const ClairV3FlowState *left,
+    const ClairV3FlowState *right
+) {
+    if (s->var_count != count) {
+        fprintf(stderr,
+            "semantic error: ownership flow scope mismatch\n");
+        s->had_error = 1;
+        return 0;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        VarSymbol *v = &s->vars[i];
+
+        v->ownership =
+            left[i].ownership == right[i].ownership
+            ? left[i].ownership
+            : CLAIR_OWNERSHIP_MOVED;
+
+        v->v2_may_alias =
+            left[i].v2_may_alias ||
+            right[i].v2_may_alias;
+
+        v->shared_borrows =
+            left[i].shared_borrows > right[i].shared_borrows
+            ? left[i].shared_borrows
+            : right[i].shared_borrows;
+
+        v->mutable_borrow =
+            left[i].mutable_borrow ||
+            right[i].mutable_borrow;
+    }
+
+    return 1;
+}
+
 static int check_stmt(Semantic *s, AstNode *n) {
 
     /*
@@ -1029,9 +1133,58 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 error_type(s, "if condition must be bool");
                 return 0;
             }
-            if (!check_block(s, n->children[1], 1)) return 0;
-            if (n->child_count == 3 && !check_block(s, n->children[2], 1)) return 0;
-            return 1;
+
+            size_t count = s->var_count;
+            ClairV3FlowState *before =
+                clair_v3_flow_capture(s, count);
+            if (!before) return 0;
+
+            if (!check_block(s, n->children[1], 1)) {
+                free(before);
+                return 0;
+            }
+
+            ClairV3FlowState *then_state =
+                clair_v3_flow_capture(s, count);
+
+            if (!then_state) {
+                free(before);
+                return 0;
+            }
+
+            if (!clair_v3_flow_restore(s, count, before)) {
+                free(then_state);
+                free(before);
+                return 0;
+            }
+
+            ClairV3FlowState *else_state = before;
+
+            if (n->child_count == 3) {
+                if (!check_block(s, n->children[2], 1)) {
+                    free(then_state);
+                    free(before);
+                    return 0;
+                }
+
+                else_state = clair_v3_flow_capture(s, count);
+
+                if (!else_state) {
+                    free(then_state);
+                    free(before);
+                    return 0;
+                }
+            }
+
+            int ok = clair_v3_flow_merge(
+                s, count, then_state, else_state
+            );
+
+            if (else_state != before) free(else_state);
+            free(then_state);
+            free(before);
+
+            return ok;
         }
         case AST_WHILE: {
             const char *cond = expr_type(s, n->children[0]);
@@ -1039,10 +1192,38 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 error_type(s, "while condition must be bool");
                 return 0;
             }
-            return check_block(s, n->children[1], 1);
+
+            size_t count = s->var_count;
+            ClairV3FlowState *before =
+                clair_v3_flow_capture(s, count);
+
+            if (!before) return 0;
+
+            if (!check_block(s, n->children[1], 1)) {
+                free(before);
+                return 0;
+            }
+
+            ClairV3FlowState *after =
+                clair_v3_flow_capture(s, count);
+
+            if (!after) {
+                free(before);
+                return 0;
+            }
+
+            int ok = clair_v3_flow_merge(
+                s, count, before, after
+            );
+
+            free(after);
+            free(before);
+
+            return ok;
         }
         case AST_FOR: {
             size_t argc = n->child_count - 1;
+
             for (size_t i = 0; i < argc; i++) {
                 const char *type = expr_type(s, n->children[i]);
                 if (!type || strcmp(type, "int") != 0) {
@@ -1050,9 +1231,42 @@ static int check_stmt(Semantic *s, AstNode *n) {
                     return 0;
                 }
             }
+
+            size_t count = s->var_count;
+            ClairV3FlowState *before =
+                clair_v3_flow_capture(s, count);
+
+            if (!before) return 0;
+
             enter_scope(s);
-            int ok = add_var(s, n->text, "int") && check_block(s, n->children[n->child_count - 1], 0);
+
+            int ok = add_var(s, n->text, "int") &&
+                check_block(
+                    s, n->children[n->child_count - 1], 0
+                );
+
             leave_scope(s);
+
+            if (!ok) {
+                free(before);
+                return 0;
+            }
+
+            ClairV3FlowState *after =
+                clair_v3_flow_capture(s, count);
+
+            if (!after) {
+                free(before);
+                return 0;
+            }
+
+            ok = clair_v3_flow_merge(
+                s, count, before, after
+            );
+
+            free(after);
+            free(before);
+
             return ok;
         }
         case AST_BREAK:
