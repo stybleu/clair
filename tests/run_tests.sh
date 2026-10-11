@@ -488,6 +488,9 @@ fi
 grep -Fq 'input_int() expects 0 arguments, got 1' build/invalid_input_int_arity.stderr
 printf '%s\n' 'invalid_input_int_arity.cl : OK -> input_int() exige zero argument'
 
+
+bash tests/run_ownership_tests.sh
+
 printf '%s\n' '=================================================='
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='
