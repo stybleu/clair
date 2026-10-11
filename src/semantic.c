@@ -23,6 +23,14 @@ static int set_type(AstNode *node, const char *type) {
     return ast_set_type(node, type, strlen(type));
 }
 
+
+static int clair_is_128_scalar(const char *type) {
+    return type &&
+        (strcmp(type, "int128") == 0 ||
+         strcmp(type, "uint128") == 0 ||
+         strcmp(type, "float128") == 0);
+}
+
 static int is_numeric(const char *type) {
     return type && (strcmp(type, "int") == 0 || strcmp(type, "float") == 0);
 }
@@ -327,6 +335,42 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     const char *left = expr_type(s, n->children[0]);
     const char *right = expr_type(s, n->children[1]);
     if (!left || !right) return NULL;
+
+
+    if (clair_is_128_scalar(left) ||
+        clair_is_128_scalar(right)) {
+
+        if (!clair_is_128_scalar(left) ||
+            !clair_is_128_scalar(right) ||
+            strcmp(left, right) != 0) {
+            error_type(s,
+                "128-bit operands must have identical types");
+            return NULL;
+        }
+
+        const char *op = n->text;
+
+        if (strcmp(op, "+") == 0 ||
+            strcmp(op, "-") == 0 ||
+            strcmp(op, "*") == 0 ||
+            strcmp(op, "/") == 0) {
+            set_type(n, left);
+            return n->type_name;
+        }
+
+        if (strcmp(op, "==") == 0 ||
+            strcmp(op, "!=") == 0 ||
+            strcmp(op, "<") == 0 ||
+            strcmp(op, "<=") == 0 ||
+            strcmp(op, ">") == 0 ||
+            strcmp(op, ">=") == 0) {
+            set_type(n, "bool");
+            return n->type_name;
+        }
+
+        error_type(s, "unsupported 128-bit binary operator");
+        return NULL;
+    }
 
     if (strcmp(n->text, "and") == 0 || strcmp(n->text, "or") == 0) {
         if (strcmp(left, "bool") != 0 || strcmp(right, "bool") != 0) {

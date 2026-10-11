@@ -493,3 +493,4 @@ printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='
 
 bash tests/run_int128_tests.sh
+bash tests/run_int128_v2_tests.sh

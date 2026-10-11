@@ -781,6 +781,106 @@ static int emit_expr(FILE *f, const AstNode *n) {
             if (n->child_count != 2 || !n->text) return 0;
             const char *op = n->text;
 
+            const char *left_type =
+                n->children[0]->type_name;
+            const char *right_type =
+                n->children[1]->type_name;
+
+            if (left_type && right_type &&
+                strcmp(left_type, right_type) == 0 &&
+                (strcmp(left_type, "int128") == 0 ||
+                 strcmp(left_type, "uint128") == 0 ||
+                 strcmp(left_type, "float128") == 0)) {
+
+                int signed128 =
+                    strcmp(left_type, "int128") == 0;
+                int floating128 =
+                    strcmp(left_type, "float128") == 0;
+
+                int arithmetic =
+                    strcmp(op, "+") == 0 ||
+                    strcmp(op, "-") == 0 ||
+                    strcmp(op, "*") == 0 ||
+                    strcmp(op, "/") == 0;
+
+                if (arithmetic && !floating128) {
+                    const char *ctype = signed128 ?
+                        "__int128" : "unsigned __int128";
+
+                    fprintf(f,
+                        "({ %s __clair_v2_a = (", ctype);
+
+                    if (!emit_expr(f, n->children[0]))
+                        return 0;
+
+                    fprintf(f,
+                        "); %s __clair_v2_b = (", ctype);
+
+                    if (!emit_expr(f, n->children[1]))
+                        return 0;
+
+                    fputs("); ", f);
+
+                    if (strcmp(op, "/") == 0) {
+                        fputs(
+                            "if (__clair_v2_b == 0", f);
+
+                        if (signed128) {
+                            fputs(
+                                " || (__clair_v2_a == "
+                                "(-(((__int128)1 << 126)) - "
+                                "((__int128)1 << 126)) && "
+                                "__clair_v2_b == -1)", f);
+                        }
+
+                        fputs(
+                            ") { "
+                            "fputs(\"clair runtime error: "
+                            "128-bit division\\n\", stderr); "
+                            "exit(1); } "
+                            "(__clair_v2_a / __clair_v2_b); })",
+                            f);
+
+                        return 1;
+                    }
+
+                    const char *builtin =
+                        strcmp(op, "+") == 0 ? "add" :
+                        strcmp(op, "-") == 0 ? "sub" :
+                        "mul";
+
+                    fprintf(f,
+                        "%s __clair_v2_result; "
+                        "if (__builtin_%s_overflow("
+                        "__clair_v2_a, __clair_v2_b, "
+                        "&__clair_v2_result)) { ",
+                        ctype, builtin);
+
+                    fputs(
+                        "fputs(\"clair runtime error: "
+                        "128-bit overflow\\n\", stderr); "
+                        "exit(1); } "
+                        "__clair_v2_result; })", f);
+
+                    return 1;
+                }
+
+                fputc('(', f);
+
+                if (!emit_expr(f, n->children[0]))
+                    return 0;
+
+                fprintf(f, " %s ", op);
+
+                if (!emit_expr(f, n->children[1]))
+                    return 0;
+
+                fputc(')', f);
+                return 1;
+            }
+
+
+
 
             if (strcmp(op, "/") == 0 &&
                 n->type_name &&
