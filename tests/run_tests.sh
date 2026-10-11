@@ -27,6 +27,11 @@ if ! bash tests/run_simd_v4_shadow.sh; then
     exit 1
 fi
 
+if ! bash tests/run_simd_v4_safety.sh; then
+    echo "SIMD V4 SAFETY FAILED"
+    exit 1
+fi
+
 if ! bash tests/run_int_div_checked.sh; then
     echo "Integer division regression failed" >&2
     exit 1
