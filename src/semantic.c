@@ -120,6 +120,9 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
+    if (strcmp(type, "int128") == 0 ||
+        strcmp(type, "uint128") == 0 ||
+        strcmp(type, "float128") == 0) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
         (is_list_type(type) || is_dict_type(type))) {
@@ -394,7 +397,95 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     return NULL;
 }
 
+
+static int clair_128_decimal_fits(
+    const char *digits,
+    const char *limit
+) {
+    if (!digits || !*digits) return 0;
+
+    for (const char *p = digits; *p; ++p) {
+        if (*p < '0' || *p > '9') return 0;
+    }
+
+    while (*digits == '0' && digits[1])
+        ++digits;
+
+    size_t actual = strlen(digits);
+    size_t maximum = strlen(limit);
+
+    if (actual != maximum)
+        return actual < maximum;
+
+    return strcmp(digits, limit) <= 0;
+}
+
+static int clair_128_literal_check(
+    Semantic *s,
+    AstNode *node,
+    const char *limit
+) {
+    if (!clair_128_decimal_fits(node->text, limit)) {
+        fprintf(stderr,
+            "semantic error: 128-bit integer literal out of range\n");
+        s->had_error = 1;
+        return 0;
+    }
+    return 1;
+}
+
 static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expected) {
+
+    if (n && expected) {
+        int signed128 = strcmp(expected, "int128") == 0;
+        int unsigned128 = strcmp(expected, "uint128") == 0;
+        int floating128 = strcmp(expected, "float128") == 0;
+
+        if (n->kind == AST_INTEGER &&
+            (signed128 || unsigned128)) {
+
+            const char *limit = signed128
+                ? "170141183460469231731687303715884105727"
+                : "340282366920938463463374607431768211455";
+
+            if (!clair_128_literal_check(s, n, limit))
+                return NULL;
+
+            set_type(n, expected);
+            return n->type_name;
+        }
+
+        if (n->kind == AST_FLOAT && floating128) {
+            set_type(n, "float128");
+            return n->type_name;
+        }
+
+        if (n->kind == AST_UNARY && n->text &&
+            strcmp(n->text, "-") == 0 &&
+            n->child_count == 1) {
+
+            AstNode *child = n->children[0];
+
+            if (signed128 && child->kind == AST_INTEGER) {
+                if (!clair_128_literal_check(
+                        s, child,
+                        "170141183460469231731687303715884105728"))
+                    return NULL;
+
+                set_type(child, "int128");
+                set_type(n, "int128");
+                return n->type_name;
+            }
+
+            if (floating128 && child->kind == AST_FLOAT) {
+                set_type(child, "float128");
+                set_type(n, "float128");
+                return n->type_name;
+            }
+        }
+    }
+
+
     if (n && n->kind == AST_LIST && is_list_type(expected)) {
         return check_list_literal_as(s, n, expected);
     }
@@ -409,9 +500,16 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
     switch (n->kind) {
         case AST_INTEGER:
+            if (n->type_name &&
+                (strcmp(n->type_name, "int128") == 0 ||
+                 strcmp(n->type_name, "uint128") == 0))
+                return n->type_name;
             set_type(n, "int");
             return n->type_name;
         case AST_FLOAT:
+            if (n->type_name &&
+                strcmp(n->type_name, "float128") == 0)
+                return n->type_name;
             set_type(n, "float");
             return n->type_name;
         case AST_BOOL:
@@ -744,7 +842,10 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *type = expr_type(s, n->children[0]);
             if (!type) return 0;
             if (strcmp(type, "int") != 0 && strcmp(type, "float") != 0 &&
-                strcmp(type, "bool") != 0 && strcmp(type, "string") != 0) {
+                strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 &&
+                strcmp(type, "int128") != 0 &&
+                strcmp(type, "uint128") != 0 &&
+                strcmp(type, "float128") != 0) {
                 error_type(s, "print() received an unsupported type");
                 return 0;
             }

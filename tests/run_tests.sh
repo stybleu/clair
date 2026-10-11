@@ -491,3 +491,5 @@ printf '%s\n' 'invalid_input_int_arity.cl : OK -> input_int() exige zero argumen
 printf '%s\n' '=================================================='
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='
+
+bash tests/run_int128_tests.sh

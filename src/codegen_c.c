@@ -29,6 +29,11 @@ static const char *c_type_name(const char *clair_type) {
     static char class_type[512];
 
     if (!clair_type) return NULL;
+    if (strcmp(clair_type, "int128") == 0) return "__int128";
+    if (strcmp(clair_type, "uint128") == 0)
+        return "unsigned __int128";
+    if (strcmp(clair_type, "float128") == 0)
+        return "long double";
     if (strcmp(clair_type, "int") == 0) return "int64_t";
     if (strcmp(clair_type, "float") == 0) return "double";
     if (strcmp(clair_type, "bool") == 0) return "bool";
@@ -583,11 +588,45 @@ static int emit_param_list(FILE *f, const AstNode *fn) {
 static int emit_expr(FILE *f, const AstNode *n) {
     switch (n->kind) {
         case AST_INTEGER:
+            if (n->type_name &&
+                (strcmp(n->type_name, "int128") == 0 ||
+                 strcmp(n->type_name, "uint128") == 0)) {
+
+                int signed_type =
+                    strcmp(n->type_name, "int128") == 0;
+
+                if (signed_type)
+                    fputs("((__int128)(", f);
+                else
+                    fputc('(', f);
+
+                size_t count = strlen(n->text);
+
+                for (size_t i = 0; i < count; ++i)
+                    fputc('(', f);
+
+                fputs("(unsigned __int128)0", f);
+
+                for (size_t i = 0; i < count; ++i) {
+                    char digit = n->text[i];
+                    if (digit < '0' || digit > '9')
+                        return 0;
+                    fprintf(f, " * 10 + %c)", digit);
+                }
+
+                fputc(')', f);
+                if (signed_type) fputc(')', f);
+                return 1;
+            }
+
             fputs(n->text, f);
             return 1;
 
         case AST_FLOAT:
             fputs(n->text, f);
+            if (n->type_name &&
+                strcmp(n->type_name, "float128") == 0)
+                fputc('L', f);
             return 1;
 
         case AST_BOOL:
@@ -794,7 +833,22 @@ if (strcmp(op, "+") == 0 &&
             return 1;
         }
 
-        case AST_UNARY: {
+        case AST_UNARY:
+            if (n->type_name &&
+                strcmp(n->type_name, "int128") == 0 &&
+                n->text && strcmp(n->text, "-") == 0 &&
+                n->child_count == 1 &&
+                n->children[0] &&
+                n->children[0]->kind == AST_INTEGER &&
+                n->children[0]->text &&
+                strcmp(n->children[0]->text,
+                    "170141183460469231731687303715884105728") == 0) {
+                fputs(
+                    "(-(((__int128)1) << 126) - "
+                    "(((__int128)1) << 126))", f);
+                return 1;
+            }
+ {
             if (n->child_count != 1 || !n->text) return 0;
             const char *op = strcmp(n->text, "not") == 0 ? "!" : n->text;
             fputc('(', f);
@@ -1152,7 +1206,54 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
         case AST_PRINT: {
             const AstNode *value = n->children[0];
             if (!value->type_name) return 0;
-            if (strcmp(value->type_name, "string") == 0) {
+            if (strcmp(value->type_name, "int128") == 0 ||
+                strcmp(value->type_name, "uint128") == 0) {
+
+                int signed_type =
+                    strcmp(value->type_name, "int128") == 0;
+
+                if (signed_type)
+                    fputs("{ __int128 __clair_v = ", f);
+                else
+                    fputs("{ unsigned __int128 __clair_v = ", f);
+
+                if (!emit_expr(f, value)) return 0;
+
+                if (signed_type) {
+                    fputs(
+                        "; unsigned __int128 __clair_mag = "
+                        "(__clair_v < 0) ? "
+                        "((unsigned __int128)(-(__clair_v + 1)) + 1) : "
+                        "(unsigned __int128)__clair_v;\n", f);
+                } else {
+                    fputs(
+                        "; unsigned __int128 __clair_mag = __clair_v;\n",
+                        f);
+                }
+
+                fputs(
+                    "char __clair_digits[40]; "
+                    "size_t __clair_count = 0;\n"
+                    "do { "
+                    "__clair_digits[__clair_count++] = "
+                    "(char)('0' + (__clair_mag % 10)); "
+                    "__clair_mag /= 10; "
+                    "} while (__clair_mag);\n", f);
+
+                if (signed_type)
+                    fputs(
+                        "if (__clair_v < 0) putchar('-');\n", f);
+
+                fputs(
+                    "while (__clair_count) "
+                    "putchar(__clair_digits[--__clair_count]);\n"
+                    "putchar('\\n'); }\n", f);
+
+            } else if (strcmp(value->type_name, "float128") == 0) {
+                fputs("printf(\"%.36Lg\\n\", (long double)(", f);
+                if (!emit_expr(f, value)) return 0;
+                fputs("));\n", f);
+            } else if (strcmp(value->type_name, "string") == 0) {
                 fputs("puts(", f);
                 if (!emit_expr(f, value)) return 0;
                 fputs(");\n", f);
