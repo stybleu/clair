@@ -16,6 +16,7 @@ typedef struct {
     ClairOwnershipState ownership;
     size_t shared_borrows;
     int mutable_borrow;
+    int v2_may_alias;
 } VarSymbol;
 
 typedef struct {
@@ -147,6 +148,8 @@ static const VarSymbol *find_var_symbol(
     return NULL;
 }
 
+static int clair_v2_is_move(const AstNode *n);
+
 static const char *find_var(const Semantic *s, const char *name) {
     const VarSymbol *v = find_var_symbol(s, name);
     return v ? v->type : NULL;
@@ -180,7 +183,8 @@ static int add_var(Semantic *s, const char *name, const char *type) {
         .depth = s->depth,
         .ownership = CLAIR_OWNERSHIP_LEGACY,
         .shared_borrows = 0,
-        .mutable_borrow = 0
+        .mutable_borrow = 0,
+        .v2_may_alias = 1
     };
     return 1;
 }
@@ -193,6 +197,57 @@ static void leave_scope(Semantic *s) {
         s->var_count--;
     }
     if (s->depth > 0) s->depth--;
+}
+
+
+/*
+ * Ownership V2.4: conservative escape analysis.
+ */
+static VarSymbol *clair_v2_var(
+    Semantic *s, const char *name
+);
+
+static int clair_v24_note_escape(
+    Semantic *s, AstNode *expr
+) {
+    if (!expr) return 1;
+
+    if (expr->kind == AST_IDENTIFIER && expr->text) {
+        VarSymbol *v = clair_v2_var(s, expr->text);
+
+        if (v && v->type &&
+            strcmp(v->type, "list[int]") == 0) {
+
+            if (v->ownership == CLAIR_OWNERSHIP_MOVED) {
+                fprintf(stderr,
+                    "semantic error: ownership V2.4: "
+                    "use after move of '%s'\n",
+                    expr->text);
+                s->had_error = 1;
+                return 0;
+            }
+
+            if (v->ownership == CLAIR_OWNERSHIP_OWNED) {
+                fprintf(stderr,
+                    "semantic error: ownership V2.4: "
+                    "cannot export owner '%s' "
+                    "without borrow\n",
+                    expr->text);
+                s->had_error = 1;
+                return 0;
+            }
+
+            v->v2_may_alias = 1;
+        }
+    }
+
+    for (size_t i = 0; i < expr->child_count; i++) {
+        if (!clair_v24_note_escape(
+                s, expr->children[i]))
+            return 0;
+    }
+
+    return 1;
 }
 
 static const char *expr_type(Semantic *s, AstNode *n);
@@ -506,10 +561,47 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 s->had_error = 1;
                 return NULL;
             }
+            const VarSymbol *symbol =
+                find_var_symbol(s, n->text);
+            if (symbol &&
+                symbol->ownership == CLAIR_OWNERSHIP_MOVED) {
+                fprintf(stderr,
+                    "semantic error: use after move of '%s'\n",
+                    n->text);
+                s->had_error = 1;
+                return NULL;
+            }
             set_type(n, type);
             return n->type_name;
         }
         case AST_CALL: {
+
+            /*
+             * Unknown calls may retain list references.
+             * len() does not retain its argument.
+             * move() has separate validation.
+             */
+            if (!clair_v2_is_move(n) &&
+                (!n->text ||
+                 strcmp(n->text, "len") != 0)) {
+
+                for (size_t i = 0;
+                     i < n->child_count; i++) {
+
+                    if (!clair_v24_note_escape(
+                            s, n->children[i]))
+                        return NULL;
+                }
+            }
+
+
+            if (clair_v2_is_move(n)) {
+                fprintf(stderr,
+                    "semantic error: move() must be a direct "
+                    "initializer or assignment\n");
+                s->had_error = 1;
+                return NULL;
+            }
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) {
                     fprintf(stderr, "semantic error: input_int() expects 0 arguments, got %zu\n", n->child_count);
@@ -623,10 +715,102 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
 static int check_block(Semantic *s, AstNode *block, int create_scope);
 
+
+static VarSymbol *clair_v2_var(Semantic *s, const char *name) {
+    for (size_t i = s->var_count; i > 0; --i) {
+        VarSymbol *v = &s->vars[i - 1];
+        if (strcmp(v->name, name) == 0) return v;
+    }
+    return NULL;
+}
+
+static int clair_v2_is_move(const AstNode *n) {
+    return n && n->kind == AST_CALL &&
+           n->text && strcmp(n->text, "move") == 0;
+}
+
+static const char *clair_v2_rhs(
+    Semantic *s, AstNode *rhs,
+    const char *expected, const char *destination
+) {
+    if (!clair_v2_is_move(rhs))
+        return expr_type_expected(s, rhs, expected);
+
+    if (s->depth != 1 || rhs->child_count != 1 ||
+        !rhs->children[0] ||
+        rhs->children[0]->kind != AST_IDENTIFIER) {
+        fprintf(stderr,
+            "semantic error: move() requires one identifier "
+            "in a direct function-level assignment\n");
+        s->had_error = 1;
+        return NULL;
+    }
+
+    AstNode *arg = rhs->children[0];
+    VarSymbol *v = clair_v2_var(s, arg->text);
+
+    if (!v || v->ownership == CLAIR_OWNERSHIP_MOVED) {
+        fprintf(stderr,
+            "semantic error: move() source is undefined or moved\n");
+        s->had_error = 1;
+        return NULL;
+    }
+
+
+    if (v->v2_may_alias) {
+        fprintf(stderr,
+            "semantic error: move() requires unaliased source '%s'\n",
+            arg->text);
+        s->had_error = 1;
+        return NULL;
+    }
+
+    if (!is_list_type(v->type) ||
+        strcmp(v->type, "list[int]") != 0 ||
+        strcmp(destination, arg->text) == 0 ||
+        !assignable(expected, v->type)) {
+        fprintf(stderr,
+            "semantic error: move() requires a compatible "
+            "list[int] and a distinct destination\n");
+        s->had_error = 1;
+        return NULL;
+    }
+
+    if (!set_type(arg, v->type) ||
+        !set_type(rhs, v->type)) {
+        s->had_error = 1;
+        return NULL;
+    }
+
+    v->ownership = CLAIR_OWNERSHIP_MOVED;
+    return rhs->type_name;
+}
+
 static int check_stmt(Semantic *s, AstNode *n) {
+
+    /*
+     * Ownership V2.1:
+     * Mutating a moved list through its original
+     * identifier is forbidden.
+     */
+    if ((n->kind == AST_INDEX_ASSIGN ||
+         n->kind == AST_LIST_APPEND) && n->text) {
+        const VarSymbol *v =
+            find_var_symbol(s, n->text);
+
+        if (v &&
+            v->ownership == CLAIR_OWNERSHIP_MOVED) {
+            fprintf(stderr,
+                "semantic error: use after move of '%s'\n",
+                n->text);
+            s->had_error = 1;
+            return 0;
+        }
+    }
+
     switch (n->kind) {
         case AST_LET: {
-            const char *actual = expr_type_expected(s, n->children[0], n->type_name);
+            const char *actual = clair_v2_rhs(s, n->children[0], n->type_name, n->text);
             if (!actual) return 0;
             if (!assignable(n->type_name, actual)) {
                 fprintf(stderr, "semantic error: cannot initialize %s '%s' with %s\n",
@@ -634,7 +818,34 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 s->had_error = 1;
                 return 0;
             }
-            return add_var(s, n->text, n->type_name);
+            AstNode *rhs = n->children[0];
+            if (strcmp(n->type_name, "list[int]") == 0 &&
+                rhs->kind == AST_IDENTIFIER) {
+                VarSymbol *source = clair_v2_var(s, rhs->text);
+                if (source &&
+                    source->ownership == CLAIR_OWNERSHIP_OWNED) {
+                    fprintf(stderr,
+                        "semantic error: cannot copy exclusive move owner '%s'\n",
+                        rhs->text);
+                    s->had_error = 1;
+                    return 0;
+                }
+                if (source) source->v2_may_alias = 1;
+            }
+
+            if (!add_var(s, n->text, n->type_name))
+                return 0;
+
+            VarSymbol *dst = clair_v2_var(s, n->text);
+            if (dst && strcmp(n->type_name, "list[int]") == 0)
+                dst->v2_may_alias =
+                    !(clair_v2_is_move(rhs) ||
+                      rhs->kind == AST_LIST);
+
+            if (clair_v2_is_move(rhs))
+                dst->ownership = CLAIR_OWNERSHIP_OWNED;
+
+            return 1;
         }
         case AST_ASSIGN: {
             const char *expected = find_var(s, n->text);
@@ -643,16 +854,54 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 s->had_error = 1;
                 return 0;
             }
-            const char *actual = expr_type_expected(s, n->children[0], expected);
+            const char *actual = clair_v2_rhs(s, n->children[0], expected, n->text);
             if (!actual || !assignable(expected, actual)) {
                 fprintf(stderr, "semantic error: cannot assign %s to %s variable '%s'\n",
                         actual ? actual : "invalid", expected, n->text);
                 s->had_error = 1;
                 return 0;
             }
+            AstNode *rhs = n->children[0];
+            VarSymbol *dst = clair_v2_var(s, n->text);
+
+            if (dst && strcmp(expected, "list[int]") == 0) {
+                if (rhs->kind == AST_IDENTIFIER) {
+                    VarSymbol *source = clair_v2_var(s, rhs->text);
+                    if (source &&
+                        source->ownership == CLAIR_OWNERSHIP_OWNED) {
+                        fprintf(stderr,
+                            "semantic error: cannot copy exclusive move owner '%s'\n",
+                            rhs->text);
+                        s->had_error = 1;
+                        return 0;
+                    }
+                    if (source) source->v2_may_alias = 1;
+                }
+                dst->v2_may_alias =
+                    (s->depth != dst->depth) ||
+                    !(clair_v2_is_move(rhs) ||
+                      rhs->kind == AST_LIST);
+            }
+
+            if (dst)
+                dst->ownership =
+                    clair_v2_is_move(rhs)
+                    ? CLAIR_OWNERSHIP_OWNED
+                    : CLAIR_OWNERSHIP_LEGACY;
+
             return 1;
         }
         case AST_MEMBER_ASSIGN: {
+
+            /*
+             * A field may retain a reference.
+             */
+            if (n->child_count == 2 &&
+                !clair_v24_note_escape(
+                    s, n->children[1]))
+                return 0;
+
+
             if (n->child_count != 2 || !n->text) return 0;
             const char *base = expr_type(s, n->children[0]);
             const AstNode *cls = base ? find_class(s, base) : NULL;

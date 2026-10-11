@@ -703,6 +703,10 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_CALL:
+            if (n->text && strcmp(n->text, "move") == 0) {
+                if (n->child_count != 1) return 0;
+                return emit_expr(f, n->children[0]);
+            }
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) return 0;
                 fputs("clair_rt_input_int()", f);
