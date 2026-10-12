@@ -93,7 +93,16 @@ static const char *dict_type_for_value(const char *type) {
 static int assignable(const char *dst, const char *src) {
     if (!dst || !src) return 0;
     if (strcmp(dst, src) == 0) return 1;
-    return strcmp(dst, "float") == 0 && strcmp(src, "int") == 0;
+    if (strcmp(dst, "int128") == 0 &&
+        strcmp(src, "int") == 0)
+        return 1;
+
+    if (strcmp(dst, "float128") == 0 &&
+        strcmp(src, "float") == 0)
+        return 1;
+
+    return strcmp(dst, "float") == 0 &&
+           strcmp(src, "int") == 0;
 }
 
 static void error_type(Semantic *s, const char *message) {
@@ -330,10 +339,61 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
 }
 
 
+
+static const char *expr_type_expected(
+    Semantic *s,
+    AstNode *n,
+    const char *expected
+);
+
+static int clair_v32_numeric_literal(
+    const AstNode *n
+) {
+    if (!n) return 0;
+
+    if (n->kind == AST_INTEGER ||
+        n->kind == AST_FLOAT)
+        return 1;
+
+    return n->kind == AST_UNARY &&
+           n->text &&
+           strcmp(n->text, "-") == 0 &&
+           n->child_count == 1 &&
+           n->children[0] &&
+           (n->children[0]->kind == AST_INTEGER ||
+            n->children[0]->kind == AST_FLOAT);
+}
+
 static const char *binary_type(Semantic *s, AstNode *n) {
     if (n->child_count != 2 || !n->text) return NULL;
-    const char *left = expr_type(s, n->children[0]);
-    const char *right = expr_type(s, n->children[1]);
+    AstNode *lhs = n->children[0];
+    AstNode *rhs = n->children[1];
+
+    const char *left = NULL;
+    const char *right = NULL;
+
+    if (clair_v32_numeric_literal(lhs) &&
+        !clair_v32_numeric_literal(rhs)) {
+
+        right = expr_type(s, rhs);
+        if (!right) return NULL;
+
+        left = clair_is_128_scalar(right)
+            ? expr_type_expected(s, lhs, right)
+            : expr_type(s, lhs);
+
+    } else {
+        left = expr_type(s, lhs);
+        if (!left) return NULL;
+
+        right = (
+            clair_is_128_scalar(left) &&
+            clair_v32_numeric_literal(rhs)
+        )
+            ? expr_type_expected(s, rhs, left)
+            : expr_type(s, rhs);
+    }
+
     if (!left || !right) return NULL;
 
 
@@ -745,7 +805,9 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             const char *operand = expr_type(s, n->children[0]);
             if (!operand) return NULL;
             if (strcmp(n->text, "-") == 0) {
-                if (!is_numeric(operand)) {
+                if (!is_numeric(operand) &&
+                    strcmp(operand, "int128") != 0 &&
+                    strcmp(operand, "float128") != 0) {
                     error_type(s, "unary '-' requires an int or float operand");
                     return NULL;
                 }

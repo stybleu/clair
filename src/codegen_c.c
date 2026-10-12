@@ -939,6 +939,35 @@ if (strcmp(op, "+") == 0 &&
         }
 
         case AST_UNARY:
+
+            if (n->text &&
+                strcmp(n->text, "-") == 0 &&
+                n->type_name &&
+                strcmp(n->type_name, "int128") == 0 &&
+                n->child_count == 1 &&
+                n->children[0] &&
+                n->children[0]->kind != AST_INTEGER) {
+
+                fputs(
+                    "({ __int128 __clair_v32_neg = (",
+                    f);
+
+                if (!emit_expr(f, n->children[0]))
+                    return 0;
+
+                fputs(
+                    "); if (__clair_v32_neg == "
+                    "(-(((__int128)1 << 126)) - "
+                    "((__int128)1 << 126))) { "
+                    "fputs(\"clair runtime error: "
+                    "128-bit overflow\\n\", stderr); "
+                    "exit(1); } "
+                    "-__clair_v32_neg; })",
+                    f);
+
+                return 1;
+            }
+
             if (n->text &&
                 strcmp(n->text, "-") == 0 &&
                 n->child_count == 1 &&
