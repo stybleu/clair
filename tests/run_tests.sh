@@ -496,3 +496,4 @@ bash tests/run_int128_tests.sh
 bash tests/run_int128_v2_tests.sh
 bash tests/run_int128_v3_1_tests.sh
 bash tests/run_int128_v3_2_tests.sh
+bash tests/run_int128_v4_2_tests.sh

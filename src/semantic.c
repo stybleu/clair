@@ -696,6 +696,69 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+
+            if (n->text &&
+                (strcmp(n->text, "int") == 0 ||
+                 strcmp(n->text, "int128") == 0 ||
+                 strcmp(n->text, "uint128") == 0 ||
+                 strcmp(n->text, "float128") == 0)) {
+
+                if (n->child_count != 1) {
+                    fprintf(stderr,
+                        "semantic error: numeric conversion '%s' "
+                        "expects 1 argument, got %zu\n",
+                        n->text, n->child_count);
+                    s->had_error = 1;
+                    return NULL;
+                }
+
+                const char *dst = n->text;
+
+                const char *src = expr_type_expected(
+                    s, n->children[0], dst);
+
+                if (!src) return NULL;
+
+                int allowed = 0;
+
+                if (strcmp(dst, "int") == 0) {
+                    allowed =
+                        strcmp(src, "int") == 0 ||
+                        strcmp(src, "int128") == 0 ||
+                        strcmp(src, "uint128") == 0;
+
+                } else if (strcmp(dst, "int128") == 0) {
+                    allowed =
+                        strcmp(src, "int") == 0 ||
+                        strcmp(src, "int128") == 0 ||
+                        strcmp(src, "uint128") == 0;
+
+                } else if (strcmp(dst, "uint128") == 0) {
+                    allowed =
+                        strcmp(src, "int") == 0 ||
+                        strcmp(src, "int128") == 0 ||
+                        strcmp(src, "uint128") == 0;
+
+                } else if (strcmp(dst, "float128") == 0) {
+                    allowed =
+                        strcmp(src, "int") == 0 ||
+                        strcmp(src, "float") == 0 ||
+                        strcmp(src, "float128") == 0;
+                }
+
+                if (!allowed) {
+                    fprintf(stderr,
+                        "semantic error: unsupported numeric "
+                        "conversion from %s to %s\n",
+                        src, dst);
+                    s->had_error = 1;
+                    return NULL;
+                }
+
+                set_type(n, dst);
+                return n->type_name;
+            }
+
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) {
                     fprintf(stderr, "semantic error: input_int() expects 0 arguments, got %zu\n", n->child_count);

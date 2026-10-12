@@ -747,6 +747,87 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_CALL:
+
+            if (n->text &&
+                (strcmp(n->text, "int") == 0 ||
+                 strcmp(n->text, "int128") == 0 ||
+                 strcmp(n->text, "uint128") == 0 ||
+                 strcmp(n->text, "float128") == 0)) {
+
+                if (n->child_count != 1 ||
+                    !n->children[0] ||
+                    !n->children[0]->type_name ||
+                    !n->type_name)
+                    return 0;
+
+                const char *src =
+                    n->children[0]->type_name;
+                const char *dst = n->type_name;
+
+                const char *src_c = c_type_name(src);
+                const char *dst_c = c_type_name(dst);
+
+                if (!src_c || !dst_c) return 0;
+
+                const char *guard = NULL;
+
+                if (strcmp(dst, "int") == 0 &&
+                    strcmp(src, "int128") == 0) {
+                    guard =
+                        "__clair_cast_value < "
+                        "(-9223372036854775807LL - 1LL) || "
+                        "__clair_cast_value > "
+                        "9223372036854775807LL";
+
+                } else if (strcmp(dst, "int") == 0 &&
+                           strcmp(src, "uint128") == 0) {
+                    guard =
+                        "__clair_cast_value > "
+                        "9223372036854775807ULL";
+
+                } else if (strcmp(dst, "int128") == 0 &&
+                           strcmp(src, "uint128") == 0) {
+                    guard =
+                        "__clair_cast_value > "
+                        "(((unsigned __int128)-1) >> 1)";
+
+                } else if (strcmp(dst, "uint128") == 0 &&
+                           (strcmp(src, "int") == 0 ||
+                            strcmp(src, "int128") == 0)) {
+                    guard = "__clair_cast_value < 0";
+                }
+
+                if (guard) {
+                    fprintf(f, "({ %s __clair_cast_value = (",
+                            src_c);
+
+                    if (!emit_expr(f, n->children[0]))
+                        return 0;
+
+                    fprintf(f, "); if (%s) { ", guard);
+
+                    fputs(
+                        "fputs(\"clair runtime error: "
+                        "numeric cast out of range\\n\", stderr); "
+                        "exit(1); } ",
+                        f);
+
+                    fprintf(f,
+                        "(%s)__clair_cast_value; })",
+                        dst_c);
+
+                    return 1;
+                }
+
+                fprintf(f, "((%s)(", dst_c);
+
+                if (!emit_expr(f, n->children[0]))
+                    return 0;
+
+                fputs("))", f);
+                return 1;
+            }
+
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) return 0;
                 fputs("clair_rt_input_int()", f);

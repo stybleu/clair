@@ -60,6 +60,12 @@ static AstNode *parse_call_after_name(Parser *p, Token name) {
 static AstNode *parse_atom(Parser *p) {
     Token t = p->current;
 
+    if (t.kind == TOKEN_INT) {
+        next(p);
+        return parse_call_after_name(p, t);
+    }
+
+
     if (t.kind == TOKEN_INTEGER) {
         next(p);
         return ast_new(AST_INTEGER, t.start, t.length);
