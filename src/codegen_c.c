@@ -867,6 +867,39 @@ static int emit_expr(FILE *f, const AstNode *n) {
             if (n->child_count != 2 || !n->text) return 0;
             const char *op = n->text;
 
+            if (n->type_name &&
+                strcmp(n->type_name, "int") == 0 &&
+                n->children[0] && n->children[1] &&
+                n->children[0]->type_name &&
+                n->children[1]->type_name &&
+                strcmp(n->children[0]->type_name, "int") == 0 &&
+                strcmp(n->children[1]->type_name, "int") == 0 &&
+                (strcmp(op, "+") == 0 ||
+                 strcmp(op, "-") == 0 ||
+                 strcmp(op, "*") == 0)) {
+
+                const char *builtin =
+                    strcmp(op, "+") == 0 ? "add" :
+                    strcmp(op, "-") == 0 ? "sub" : "mul";
+
+                fputs("({ int64_t __clair_v43_lhs = (", f);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs("); int64_t __clair_v43_rhs = (", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+
+                fprintf(f,
+                    "); int64_t __clair_v43_result; "
+                    "if (__builtin_%s_overflow("
+                    "__clair_v43_lhs, __clair_v43_rhs, "
+                    "&__clair_v43_result)) { "
+                    "fputs(\"clair runtime error: "
+                    "int64 overflow\\n\", stderr); "
+                    "exit(1); } __clair_v43_result; })",
+                    builtin);
+                return 1;
+            }
+
+
             const char *left_type =
                 n->children[0]->type_name;
             const char *right_type =
@@ -1020,6 +1053,23 @@ if (strcmp(op, "+") == 0 &&
         }
 
         case AST_UNARY:
+
+            if (n->text && strcmp(n->text, "-") == 0 &&
+                n->type_name && strcmp(n->type_name, "int") == 0 &&
+                n->child_count == 1 && n->children[0] &&
+                n->children[0]->type_name &&
+                strcmp(n->children[0]->type_name, "int") == 0 &&
+                n->children[0]->kind != AST_INTEGER) {
+
+                fputs("({ int64_t __clair_v43_value = (", f);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs("); if (__clair_v43_value == "
+                      "(-9223372036854775807LL - 1LL)) { "
+                      "fputs(\"clair runtime error: "
+                      "int64 overflow\\n\", stderr); "
+                      "exit(1); } -__clair_v43_value; })", f);
+                return 1;
+            }
 
             if (n->text &&
                 strcmp(n->text, "-") == 0 &&
