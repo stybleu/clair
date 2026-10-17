@@ -5,7 +5,7 @@ Son compilateur est écrit en C et utilise Clang.
 
 ## Fonctionnalités
 
-- Types int, float, bool et string
+- Types (int, float 64 et 128bit), bool et string
 - Fonctions, conditions et boucles
 - Listes et dictionnaires typés
 - Classes et objets
