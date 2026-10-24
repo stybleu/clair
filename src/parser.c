@@ -533,6 +533,47 @@ static AstNode *parse_for_statement(Parser *p) {
     Token name = p->current;
     if (!expect(p, TOKEN_IDENTIFIER, "loop variable")) return NULL;
     if (!expect(p, TOKEN_IN, "in")) return NULL;
+
+    if (p->current.kind != TOKEN_RANGE) {
+        /* for v in list { ... } : the list expression is evaluated once */
+        AstNode *iterable = parse_expression(p);
+        if (!iterable) return NULL;
+        if (!expect(p, TOKEN_LBRACE, "'{'")) {
+            ast_free(iterable);
+            return NULL;
+        }
+        p->loop_depth++;
+        AstNode *body = parse_block(p);
+        p->loop_depth--;
+        if (!body) {
+            ast_free(iterable);
+            return NULL;
+        }
+        if (!expect(p, TOKEN_RBRACE, "'}'")) {
+            ast_free(iterable);
+            ast_free(body);
+            return NULL;
+        }
+        AstNode *n = ast_new(AST_FOR_EACH, name.start, name.length);
+        if (!n) {
+            ast_free(iterable);
+            ast_free(body);
+            return NULL;
+        }
+        if (!ast_add_child(n, iterable)) {
+            ast_free(iterable);
+            ast_free(body);
+            ast_free(n);
+            return NULL;
+        }
+        if (!ast_add_child(n, body)) {
+            ast_free(body);
+            ast_free(n);
+            return NULL;
+        }
+        return n;
+    }
+
     if (!expect(p, TOKEN_RANGE, "range")) return NULL;
     if (!expect(p, TOKEN_LPAREN, "'('") ) return NULL;
 

@@ -7,7 +7,7 @@ Son compilateur est écrit en C et utilise Clang.
 
 - Types int, float, bool et string
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
-- Fonctions, conditions et boucles
+- Fonctions, conditions et boucles, dont `for v in liste` comme en Python
 - Listes et dictionnaires typés
 - Matrices `matrix[float]` et `matrix[int]` : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
@@ -51,7 +51,7 @@ n'est alors plus détecté) :
 bash tools/rapport_code_machine.sh
 ```
 
-Compare sept programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %.
+Compare huit programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide.
 
 ## Tests
 
@@ -68,6 +68,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.24](docs/README_V0.24.md) : `for v in liste`, rapport mesuré sur un seul cœur
 - [Clair V0.23](docs/README_V0.23.md) : doubles boucles vérifiées une seule fois, option `--sans-verif`
 - [Clair V0.22](docs/README_V0.22.md) : boucles `while` rapides, rapport du code machine plus fiable
 - [Clair V0.21](docs/README_V0.21.md) : matrices à largeur fixe vectorisées (apprentissage XOR)

@@ -1063,6 +1063,28 @@ static int check_stmt(Semantic *s, AstNode *n) {
             leave_scope(s);
             return ok;
         }
+        case AST_FOR_EACH: {
+            /* the list is evaluated before the loop variable exists */
+            const char *list = expr_type(s, n->children[0]);
+            if (!list) return 0;
+            const char *element = list_element_type(list);
+            if (!element) {
+                char message[160];
+                if (is_matrix_type(list)) {
+                    snprintf(message, sizeof(message),
+                             "for ... in needs a list, got %s: use for i in range(rows(m))", list);
+                } else {
+                    snprintf(message, sizeof(message), "for ... in needs a list, got %s", list);
+                }
+                error_type(s, message);
+                return 0;
+            }
+            if (!set_type(n, list)) return 0;
+            enter_scope(s);
+            int ok = add_var(s, n->text, element) && check_block(s, n->children[1], 0);
+            leave_scope(s);
+            return ok;
+        }
         case AST_EXPR_STMT:
             /* A call used as a statement; its result, if any, is discarded. */
             return n->child_count == 1 && expr_type(s, n->children[0]) != NULL;
@@ -1241,6 +1263,7 @@ static void mangle_node(AstNode *n) {
         case AST_MATRIX_SET:
         case AST_LIST_APPEND:
         case AST_FOR:
+        case AST_FOR_EACH:
         case AST_PARAM:
         case AST_FIELD:
         case AST_MEMBER:

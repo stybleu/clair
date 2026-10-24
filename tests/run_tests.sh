@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.23 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.24 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -601,6 +601,17 @@ if ./build/test_sans_verif_mod >build/sans_verif_mod.stdout 2>build/sans_verif_m
 fi
 grep -Fq 'Clair runtime error: modulo by zero' build/sans_verif_mod.stderr
 printf '%s\n' '--sans-verif : OK -> meme resultat, aucune verification de bornes, division par zero toujours verifiee'
+
+./build/clair tests/for_each.cl -o build/test_for_each
+out_for_each="$(./build/test_for_each)"
+expected_for_each="$(printf '31\n1.5\nClair\nest\nrapide\n2\n12\n180\n961\n10\n8\n8\n15\n100\n30\n4\n5\n2\n0\n3\n6\n50')"
+[ "$out_for_each" = "$expected_for_each" ]
+grep -Fq 'int64_t v = clair_items_v[clair_k_v];' build/test_for_each.generated.c
+grep -Fq 'int64_t v = ((int64_t *)grow->data)[clair_k_v];' build/test_for_each.generated.c
+printf '%s\n' 'for_each.cl : OK -> for v in liste, comme Python (liste qui grandit, liste remplacee, break, continue)'
+expect_compile_error invalid_for_each_type "for ... in needs a list, got int"
+expect_compile_error invalid_for_each_matrix "for ... in needs a list, got matrix[float]: use for i in range(rows(m))"
+expect_compile_error invalid_for_each_element "operator '+' requires two numbers or two strings"
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

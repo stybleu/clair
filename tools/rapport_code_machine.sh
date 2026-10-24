@@ -3,6 +3,8 @@
 # in C: was the hot loop vectorized in each version, and how fast are they.
 # Clair and C are run alternately 5 times and the best time of each is kept,
 # so both are measured under the same conditions (a phone slows down when hot).
+# Every run is pinned to the same core, the fastest one (tools/pin_core.c):
+# otherwise the phone may give the fast core to one program and not the other.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,6 +27,17 @@ seconds() {
     awk -v s="$start" -v e="$end" 'BEGIN { printf "%.4f", e - s }'
 }
 
+# Same core for every run, when the system lets us choose it.
+PIN=()
+CORE_INFO="coeur non choisi (epinglage refuse)"
+if clang -O2 "$ROOT/tools/pin_core.c" -o "$WORK/pin_core" 2> "$WORK/pin_core.log" &&
+   best=$("$WORK/pin_core" best 2>> "$WORK/pin_core.log") &&
+   "$WORK/pin_core" "${best%% *}" true 2>> "$WORK/pin_core.log"; then
+    PIN=("$WORK/pin_core" "${best%% *}")
+    CORE_INFO=$(awk -v c="${best%% *}" -v k="${best##* }" \
+        'BEGIN { printf "coeur %d", c; if (k > 0) printf " (%.2f GHz)", k / 1e6; printf " pour Clair et C" }')
+fi
+
 min_of() { awk -v a="$1" -v b="$2" 'BEGIN { print (b == "" || a < b) ? a : b }'; }
 
 # "oui" when the function's machine code contains SIMD instructions
@@ -36,9 +49,10 @@ vectorized() {
 
 version=$(clang --version | head -n 1 | sed -E 's/.*clang version ([0-9.]+).*/clang \1/')
 printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$version"
+printf '%s\n' "$CORE_INFO"
 printf '%-9s %-11s %-7s %-7s %s\n' "programme" "$SIMD_NAME Cl/C" "Clair" "C" "ecart"
 
-for name in collatz dot axpy while matmul matrice reseau; do
+for name in collatz dot axpy while forin matmul matrice reseau; do
     # hot function: "// noyau: name" in the program, otherwise its first def
     kernel=$(grep -m 1 -oE '^// noyau: [A-Za-z_]+' "$BENCH/$name.cl" | cut -d' ' -f3)
     [ -n "$kernel" ] || kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
@@ -66,8 +80,8 @@ for name in collatz dot axpy while matmul matrice reseau; do
 
     t_clair=""; t_ref=""
     for _ in $(seq "$ROUNDS"); do
-        t_clair=$(min_of "$(seconds "$WORK/$name")" "$t_clair")
-        t_ref=$(min_of "$(seconds "$WORK/${name}_ref")" "$t_ref")
+        t_clair=$(min_of "$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/$name")" "$t_clair")
+        t_ref=$(min_of "$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/${name}_ref")" "$t_ref")
     done
     gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
     printf '%-9s %-11s %-7s %-7s %s%s\n' "$name" "$v_clair/$v_ref" \

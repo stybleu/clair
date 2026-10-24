@@ -318,7 +318,7 @@ static void compute_safe_functions(const AstNode *program) {
 /* Is `name` assigned or declared anywhere inside `n`? */
 static int name_changes_in(const AstNode *n, const char *name) {
     if (!n) return 0;
-    if ((n->kind == AST_ASSIGN || n->kind == AST_LET || n->kind == AST_FOR) &&
+    if ((n->kind == AST_ASSIGN || n->kind == AST_LET || n->kind == AST_FOR || n->kind == AST_FOR_EACH) &&
         n->text && strcmp(n->text, name) == 0) {
         return 1;
     }
@@ -332,7 +332,7 @@ static int has_nested_loop(const AstNode *n) {
     if (!n) return 0;
     for (size_t i = 0; i < n->child_count; i++) {
         const AstNode *c = n->children[i];
-        if (c->kind == AST_FOR || c->kind == AST_WHILE) return 1;
+        if (c->kind == AST_FOR || c->kind == AST_WHILE || c->kind == AST_FOR_EACH) return 1;
         if (has_nested_loop(c)) return 1;
     }
     return 0;
@@ -887,7 +887,7 @@ static const AstNode *nest_find_inner(const AstNode *n, size_t *count) {
     const AstNode *found = NULL;
     for (size_t i = 0; i < n->child_count; i++) {
         const AstNode *c = n->children[i];
-        if (c->kind == AST_FOR || c->kind == AST_WHILE) {
+        if (c->kind == AST_FOR || c->kind == AST_WHILE || c->kind == AST_FOR_EACH) {
             (*count)++;
             found = c;
             continue;   /* its own body is checked by the caller */
@@ -1202,6 +1202,17 @@ static int stack_list_expr_uses_are_safe(
         }
 
         /*
+         * Safe read:
+         *
+         *     for v in values { ... }
+         */
+        if (parent &&
+            parent->kind == AST_FOR_EACH &&
+            child_index == 0) {
+            return 1;
+        }
+
+        /*
          * Safe observation:
          *
          *     len(values)
@@ -1341,6 +1352,29 @@ static int stack_list_stmt_uses_are_safe(
                 decl,
                 name,
                 body_visible
+            );
+        }
+
+        case AST_FOR_EACH: {
+            if (!n->text || n->child_count != 2) {
+                return 0;
+            }
+
+            /* The list is evaluated before the loop variable enters scope. */
+            if (!stack_list_expr_uses_are_safe(
+                    n->children[0],
+                    name,
+                    visible,
+                    n,
+                    0)) {
+                return 0;
+            }
+
+            return stack_list_block_uses_are_safe(
+                n->children[1],
+                decl,
+                name,
+                strcmp(n->text, name) == 0 ? 0 : visible
             );
         }
 
@@ -2125,6 +2159,22 @@ static int emit_write_target(FILE *f, const AstNode *n, size_t plain_children) {
     return emit_operand(f, n->children[plain_children], PREC_POSTFIX, 0);
 }
 
+/* Is the variable `name` read or assigned somewhere in `n`? (for v in xs { } with v unused) */
+static int name_mentioned_in(const AstNode *n, const char *name) {
+    if (!n) return 0;
+    if ((n->kind == AST_IDENTIFIER || n->kind == AST_ASSIGN) && n->text && strcmp(n->text, name) == 0) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (name_mentioned_in(n->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+/* A variable or a chain of fields (xs, self.items, net.layer.w): reading it twice gives the same list. */
+static int is_access_path(const AstNode *e) {
+    while (e && e->kind == AST_MEMBER && e->child_count == 1 && e->text) e = e->children[0];
+    return e && e->kind == AST_IDENTIFIER && e->text;
+}
+
 /* Can evaluating `n` stop the program or run user code (calls, bounds, division)? */
 static int node_may_fail(const AstNode *n) {
     if (!n) return 0;
@@ -2903,6 +2953,92 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             fputs("}\n", f);
             indent(f, depth);
             fputs("}\n", f);
+            return 1;
+        }
+
+        case AST_FOR_EACH: {
+            /*
+             * for v in xs { ... }  —  Python semantics: xs is evaluated once,
+             * v takes xs[0], xs[1], ... while the index is below len(xs).
+             */
+            if (!n->text || n->child_count != 2 || !n->type_name) return 0;
+            const char *elem = list_element_c_type(n->type_name);
+            if (!elem) return 0;
+            const AstNode *list = n->children[0], *body = n->children[1];
+            const char *v = n->text;
+            const char *gap = elem[strlen(elem) - 1] == '*' ? "" : " ";   /* "double v" / "const char *v" */
+
+            if (!tree_may_grow_lists(body)) {
+                /*
+                 * Nothing in the body can append to a list: the length and the
+                 * data pointer cannot change, so they are read once and every
+                 * element is in range by construction (no check at all).
+                 */
+                fputs("{\n", f);
+                if (!is_access_path(list)) {
+                    indent(f, depth + 1);
+                    fprintf(f, "ClairList clair_list_%s = ", v);
+                    if (!emit_expr(f, list)) return 0;
+                    fputs(";\n", f);
+                }
+                int used = name_mentioned_in(body, v);
+                if (used) {
+                    indent(f, depth + 1);
+                    fprintf(f, "%s%s*clair_items_%s = (%s%s*)", elem, gap, v, elem, gap);
+                    if (is_access_path(list)) { if (!emit_operand(f, list, PREC_POSTFIX, 0)) return 0; }
+                    else fprintf(f, "clair_list_%s", v);
+                    fputs("->data;\n", f);
+                }
+                indent(f, depth + 1);
+                fprintf(f, "int64_t clair_count_%s = (int64_t)", v);
+                if (is_access_path(list)) { if (!emit_operand(f, list, PREC_POSTFIX, 0)) return 0; }
+                else fprintf(f, "clair_list_%s", v);
+                fputs("->len;\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "for (int64_t clair_k_%s = 0; clair_k_%s < clair_count_%s; clair_k_%s++) {\n", v, v, v, v);
+                if (used) {
+                    indent(f, depth + 2);
+                    fprintf(f, "%s%s%s = clair_items_%s[clair_k_%s];\n", elem, gap, v, v, v);
+                }
+                if (!emit_block(f, body, depth + 2)) return 0;
+                indent(f, depth + 1);
+                fputs("}\n", f);
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
+
+            /*
+             * The body may append (possibly to xs itself): like Python, the
+             * length and the data are read again at every step.
+             */
+            int direct = list->kind == AST_IDENTIFIER && list->text && strcmp(list->text, v) != 0 &&
+                         !name_changes_in(body, list->text);
+            int d = depth;
+            if (!direct) {
+                fputs("{\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "ClairList clair_list_%s = ", v);
+                if (!emit_expr(f, list)) return 0;
+                fputs(";\n", f);
+                d = depth + 1;
+                indent(f, d);
+            }
+            char *name = direct ? str_dup(list->text) : str_fmt("clair_list_%s", v);
+            if (!name) return 0;
+            fprintf(f, "for (int64_t clair_k_%s = 0; clair_k_%s < (int64_t)%s->len; clair_k_%s++) {\n", v, v, name, v);
+            if (name_mentioned_in(body, v)) {
+                indent(f, d + 1);
+                fprintf(f, "%s%s%s = ((%s%s*)%s->data)[clair_k_%s];\n", elem, gap, v, elem, gap, name, v);
+            }
+            free(name);
+            if (!emit_block(f, body, d + 1)) return 0;
+            indent(f, d);
+            fputs("}\n", f);
+            if (!direct) {
+                indent(f, depth);
+                fputs("}\n", f);
+            }
             return 1;
         }
 

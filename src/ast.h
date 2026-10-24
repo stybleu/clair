@@ -15,6 +15,7 @@ typedef enum {
     AST_IF,
     AST_WHILE,
     AST_FOR,
+    AST_FOR_EACH,       /* for v in list { } ; text: v, type_name: the list type ; children: list, body */
     AST_BREAK,
     AST_CONTINUE,
     AST_ASSIGN,
