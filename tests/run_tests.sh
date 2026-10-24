@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.20 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.21 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -568,6 +568,7 @@ printf '%s\n' 'field_writes.cl : OK -> obj.items[i] = x, obj.w[i][j] = x, obj.it
 out_xor_training="$(./build/test_xor_training)"
 expected_xor_training="$(printf '3\n97\n97\n4\n1')"
 [ "$out_xor_training" = "$expected_xor_training" ]
+grep -Fq 'if (clair_cols_self__w1 == 2) {' build/test_xor_training.generated.c
 printf '%s\n' 'xor_training.cl : OK -> reseau de neurones entraine sur XOR par descente de gradient'
 
 ./build/clair tests/input_int.cl -o build/test_input_int

@@ -197,6 +197,21 @@ static FastAccess fast_access[FAST_MAX];
 static size_t fast_access_count = 0;
 static int fast_access_active = 0;
 
+/* Inside a copy specialised for a known row width, clair_cols_<base> is printed as that width. */
+typedef struct { const char *base; int64_t width; } WidthOverride;
+static WidthOverride width_override[FAST_MAX];
+static size_t width_override_count = 0;
+
+static void emit_cols(FILE *f, const char *base) {
+    for (size_t i = 0; i < width_override_count; i++) {
+        if (strcmp(width_override[i].base, base) == 0) {
+            fprintf(f, "%lld", (long long)width_override[i].width);
+            return;
+        }
+    }
+    fprintf(f, "clair_cols_%s", base);
+}
+
 static const char *fast_access_base(const AstNode *n) {
     if (!fast_access_active) return NULL;
     for (size_t i = 0; i < fast_access_count; i++) {
@@ -647,6 +662,27 @@ static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, c
     }
 
     for (size_t i = 0; i < n->child_count; i++) fast_plan_collect(plan, n->children[i], v, body);
+}
+
+/*
+ * When every access to matrix `base` in the loop uses a constant column
+ * (m[i][0], m[i][1]) the loop likely walks a fixed-width matrix (2-D points,
+ * RGB...).  Returns that width (largest column + 1), or 0.
+ */
+static int64_t fast_plan_const_width(const FastPlan *plan, const char *base) {
+    int64_t width = 0;
+    for (size_t i = 0; i < plan->access_count; i++) {
+        const FastAccess *a = &plan->accesses[i];
+        if (strcmp(a->base, base) != 0) continue;
+        const AstNode *col = NULL;
+        if (a->node->kind == AST_MATRIX_SET) col = a->node->children[1];
+        else if (a->node->kind == AST_INDEX && a->node->children[0]->kind == AST_INDEX) col = a->node->children[1];
+        else return 0;
+        int64_t k;
+        if (!const_int_value(col, &k) || k < 0 || k > 64) return 0;
+        if (k + 1 > width) width = k + 1;
+    }
+    return width;
 }
 
 /* Builds the plan for one `for` loop; returns 0 when the loop must stay checked only. */
@@ -1357,7 +1393,8 @@ static int emit_expr(FILE *f, const AstNode *n) {
                     int64_t col0;
                     fprintf(f, "clair_data_%s[", fast_base);
                     if (!emit_operand(f, row->children[1], PREC_MULTIPLICATIVE, 0)) return 0;
-                    fprintf(f, " * clair_cols_%s", fast_base);
+                    fputs(" * ", f);
+                    emit_cols(f, fast_base);
                     if (!(const_int_value(n->children[1], &col0) && col0 == 0)) {
                         fputs(" + ", f);
                         if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
@@ -1901,7 +1938,8 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                 int64_t col0;
                 fprintf(f, "clair_data_%s[", fast_base);
                 if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
-                fprintf(f, " * clair_cols_%s", fast_base);
+                fputs(" * ", f);
+                emit_cols(f, fast_base);
                 if (!(const_int_value(n->children[1], &col0) && col0 == 0)) {
                     fputs(" + ", f);
                     if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
@@ -2278,16 +2316,54 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                         }
                     }
 
-                    EMIT_FOR_HEADER(inner + 1);
                     for (size_t i = 0; i < plan.access_count; i++) fast_access[i] = plan.accesses[i];
                     fast_access_count = plan.access_count;
+
+                    /* fixed-width matrices: one more copy with the width as a constant */
+                    width_override_count = 0;
+                    for (size_t i = 0; i < plan.base_count; i++) {
+                        if (!is_matrix_type(plan.base_types[i])) continue;
+                        int64_t w = fast_plan_const_width(&plan, plan.bases[i]);
+                        if (w > 0) width_override[width_override_count++] = (WidthOverride){ plan.bases[i], w };
+                    }
+                    int ok = 1;
+                    int fast_depth = inner + 1;
+                    if (width_override_count > 0) {
+                        indent(f, inner + 1);
+                        fputs("if (", f);
+                        for (size_t i = 0; i < width_override_count; i++) {
+                            if (i != 0) fputs(" && ", f);
+                            fprintf(f, "clair_cols_%s == %lld", width_override[i].base,
+                                    (long long)width_override[i].width);
+                        }
+                        fputs(") {\n", f);
+                        indent(f, inner + 2);
+                        fputs("/* row width known: Clang can vectorize like hand-written C */\n", f);
+                        EMIT_FOR_HEADER(inner + 2);
+                        fast_access_active = 1;
+                        ok = emit_block(f, body, inner + 3);
+                        fast_access_active = 0;
+                        width_override_count = 0;
+                        if (!ok) return 0;
+                        indent(f, inner + 2);
+                        fputs("}\n", f);
+                        indent(f, inner + 1);
+                        fputs("} else {\n", f);
+                        fast_depth = inner + 2;
+                    }
+
+                    EMIT_FOR_HEADER(fast_depth);
                     fast_access_active = 1;
-                    int ok = emit_block(f, body, inner + 2);
+                    ok = emit_block(f, body, fast_depth + 1);
                     fast_access_active = 0;
-                    fast_access_count = 0;
                     if (!ok) return 0;
-                    indent(f, inner + 1);
+                    indent(f, fast_depth);
                     fputs("}\n", f);
+                    if (fast_depth != inner + 1) {
+                        indent(f, inner + 1);
+                        fputs("}\n", f);
+                    }
+                    fast_access_count = 0;
 
                     indent(f, inner);
                     fputs("} else {\n", f);
