@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.22 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.23 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -578,6 +578,29 @@ expected_while_fast_path="$(printf '55\n3\n7.5\n24\n6\n6\n15\n40\n3')"
 grep -Fq 'while (i < clair_stop_i) {' build/test_while_fast_path.generated.c
 printf '%s\n' 'while_fast_path.cl : OK -> boucles while rapides, continue, break, borne modifiee, matrice'
 expect_runtime_error while_fast_path_bounds '-1\n1' 'Clair runtime error: list index -1 out of bounds for length 3'
+
+./build/clair tests/nest_fast_path.cl -o build/test_nest_fast_path
+out_nest_fast_path="$(./build/test_nest_fast_path)"
+expected_nest_fast_path="$(printf '6\n12\n38\n0\n13\n11\n18')"
+[ "$out_nest_fast_path" = "$expected_nest_fast_path" ]
+grep -Fq 'clair_rt_affine2_ok(b, 0, n, 0, n, 1, 0, n)' build/test_nest_fast_path.generated.c
+printf '%s\n' 'nest_fast_path.cl : OK -> double boucle verifiee une seule fois (produit de matrices)'
+expect_runtime_error nest_fast_path_bounds '0\n1\n2' 'Clair runtime error: list index 4 out of bounds for length 4'
+
+./build/clair tests/loop_fast_path.cl -o build/test_sans_verif --sans-verif
+[ "$(./build/test_sans_verif)" = "$expected_loop_fast_path" ]
+head -n 1 build/test_sans_verif.generated.c | grep -Fq -- '--sans-verif'
+if grep -Fq 'clair_rt_affine' build/test_sans_verif.generated.c; then
+    printf '%s\n' 'sans_verif : ECHEC -> verifications encore presentes' >&2
+    exit 1
+fi
+./build/clair tests/mod_zero_runtime.cl -o build/test_sans_verif_mod --sans-verif
+if ./build/test_sans_verif_mod >build/sans_verif_mod.stdout 2>build/sans_verif_mod.stderr; then
+    printf '%s\n' 'sans_verif : ECHEC -> modulo par zero non detecte' >&2
+    exit 1
+fi
+grep -Fq 'Clair runtime error: modulo by zero' build/sans_verif_mod.stderr
+printf '%s\n' '--sans-verif : OK -> meme resultat, aucune verification de bornes, division par zero toujours verifiee'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

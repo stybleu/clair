@@ -68,13 +68,19 @@ static int run_clang(const char *cpath, const char *output) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4 || strcmp(argv[2], "-o") != 0) {
-        fprintf(stderr, "usage: %s input.cl -o output\n", argv[0]);
+    const char *input = NULL, *output = NULL;
+    int unchecked = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
+        else if (strcmp(argv[i], "--sans-verif") == 0 || strcmp(argv[i], "--unchecked") == 0) unchecked = 1;
+        else if (!input && argv[i][0] != '-') input = argv[i];
+        else { input = NULL; break; }
+    }
+    if (!input || !output) {
+        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif]\n", argv[0]);
         return 2;
     }
-
-    const char *input = argv[1];
-    const char *output = argv[3];
+    codegen_set_unchecked(unchecked);
 
     char *source = read_file(input);
     if (!source) {

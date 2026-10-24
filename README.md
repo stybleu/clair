@@ -15,6 +15,8 @@ Son compilateur est écrit en C et utilise Clang.
 - Exemple complet : réseau de neurones entraîné sur XOR (`tests/xor_training.cl`)
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
 - Boucles rapides (`for` et `while`) : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
+- Doubles boucles (produit de matrices) vérifiées une seule fois avant la boucle extérieure
+- Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
 - Optimisations SIMD ARM64 NEON
@@ -34,6 +36,13 @@ cmake --build build -j2
 ```sh
 ./build/clair hello.cl -o hello
 ./hello
+```
+
+Pour un long calcul déjà testé, `--sans-verif` enlève les vérifications de bornes (un indice faux
+n'est alors plus détecté) :
+
+```sh
+./build/clair calcul.cl -o calcul --sans-verif
 ```
 
 ## Rapport du code machine
@@ -59,6 +68,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.23](docs/README_V0.23.md) : doubles boucles vérifiées une seule fois, option `--sans-verif`
 - [Clair V0.22](docs/README_V0.22.md) : boucles `while` rapides, rapport du code machine plus fiable
 - [Clair V0.21](docs/README_V0.21.md) : matrices à largeur fixe vectorisées (apprentissage XOR)
 - [Clair V0.20](docs/README_V0.20.md) : écriture dans les champs, boucles rapides sur `self.w`, apprentissage de XOR

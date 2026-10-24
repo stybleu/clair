@@ -88,6 +88,11 @@ static const char *dict_value_c_type(const char *dict_type) {
 
 static const AstNode *codegen_program = NULL;
 
+/* --sans-verif: lists and matrices are accessed without bounds checks */
+static int unchecked_mode = 0;
+
+void codegen_set_unchecked(int unchecked) { unchecked_mode = unchecked; }
+
 /* ------------------------------------------------------------------ */
 /* Small string helper (used to build the bounds pre-checks).         */
 /* ------------------------------------------------------------------ */
@@ -460,7 +465,8 @@ typedef struct {
     const char *base;       /* name used in clair_data_<base> */
     const char *list_type;
     char *c0;
-    char *c1;
+    char *c1;       /* coefficient of the loop variable */
+    char *c2;       /* coefficient of the inner loop variable (double loops), or NULL */
     int dim;        /* 0: list index, 1: matrix row index, 2: matrix column index */
 } BoundsCheck;
 
@@ -475,15 +481,21 @@ typedef struct {
     size_t base_count;
     char *owned[FAST_MAX * 2];         /* strings built for field chains */
     size_t owned_count;
+    const AstNode *inner_loop;         /* double loop: the inner for, whose range is checked too */
 } FastPlan;
+
+/* Set while emitting the unchecked copy of a double loop: its inner loop needs no plan of its own. */
+static int fast_suppress = 0;
 
 static void fast_plan_free(FastPlan *plan) {
     for (size_t i = 0; i < plan->check_count; i++) {
         free(plan->checks[i].c0);
         free(plan->checks[i].c1);
+        free(plan->checks[i].c2);
     }
     for (size_t i = 0; i < plan->owned_count; i++) free(plan->owned[i]);
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+    plan->inner_loop = NULL;
 }
 
 static const char *fast_plan_expr(const FastPlan *plan, const char *base) {
@@ -493,15 +505,17 @@ static const char *fast_plan_expr(const FastPlan *plan, const char *base) {
     return base;
 }
 
-static void fast_plan_add_check(FastPlan *plan, const char *base, const char *type, char *c0, char *c1, int dim) {
+static void fast_plan_add_check(FastPlan *plan, const char *base, const char *type,
+                                char *c0, char *c1, char *c2, int dim) {
     for (size_t i = 0; i < plan->check_count; i++) {
         BoundsCheck *b = &plan->checks[i];
-        if (b->dim == dim && strcmp(b->base, base) == 0 && strcmp(b->c0, c0) == 0 && strcmp(b->c1, c1) == 0) {
-            free(c0); free(c1);
+        if (b->dim == dim && strcmp(b->base, base) == 0 && strcmp(b->c0, c0) == 0 && strcmp(b->c1, c1) == 0 &&
+            ((!b->c2 && !c2) || (b->c2 && c2 && strcmp(b->c2, c2) == 0))) {
+            free(c0); free(c1); free(c2);
             return;
         }
     }
-    plan->checks[plan->check_count++] = (BoundsCheck){ base, type, c0, c1, dim };
+    plan->checks[plan->check_count++] = (BoundsCheck){ base, type, c0, c1, c2, dim };
 }
 
 static void fast_plan_add_base(FastPlan *plan, const char *base, const char *expr, const char *type) {
@@ -515,26 +529,26 @@ static void fast_plan_add_base(FastPlan *plan, const char *base, const char *exp
 
 /* m[r][c]: both indices proven in range, the access becomes data[r * cols + c] */
 static void fast_plan_add_matrix(FastPlan *plan, const AstNode *node, const char *base, const char *expr,
-                                 const char *type, char *r0, char *r1, char *k0, char *k1) {
+                                 const char *type, char *r0, char *r1, char *r2, char *k0, char *k1, char *k2) {
     if (plan->access_count >= FAST_MAX || plan->check_count + 2 > FAST_MAX || plan->base_count >= FAST_MAX) {
-        free(r0); free(r1); free(k0); free(k1);
+        free(r0); free(r1); free(r2); free(k0); free(k1); free(k2);
         return;
     }
     plan->accesses[plan->access_count++] = (FastAccess){ node, base };
     fast_plan_add_base(plan, base, expr, type);
-    fast_plan_add_check(plan, base, type, r0, r1, 1);
-    fast_plan_add_check(plan, base, type, k0, k1, 2);
+    fast_plan_add_check(plan, base, type, r0, r1, r2, 1);
+    fast_plan_add_check(plan, base, type, k0, k1, k2, 2);
 }
 
 static void fast_plan_add(FastPlan *plan, const AstNode *node, const char *base, const char *expr,
-                          const char *list_type, char *c0, char *c1) {
+                          const char *list_type, char *c0, char *c1, char *c2) {
     if (plan->access_count >= FAST_MAX || plan->check_count >= FAST_MAX || plan->base_count >= FAST_MAX) {
-        free(c0); free(c1);
+        free(c0); free(c1); free(c2);
         return;
     }
     plan->accesses[plan->access_count++] = (FastAccess){ node, base };
     fast_plan_add_base(plan, base, expr, list_type);
-    fast_plan_add_check(plan, base, list_type, c0, c1, 0);
+    fast_plan_add_check(plan, base, list_type, c0, c1, c2, 0);
 }
 
 /* Does the loop body call a function that may reassign an object field? */
@@ -625,7 +639,7 @@ static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, c
                            : (!name_changes_in(body, n->text) && strcmp(n->text, v) != 0 &&
                               (name = expr = n->text) != NULL);
         char *c0, *c1;
-        if (ok && affine_split(index, v, body, &c0, &c1)) fast_plan_add(plan, n, name, expr, list_type, c0, c1);
+        if (ok && affine_split(index, v, body, &c0, &c1)) fast_plan_add(plan, n, name, expr, list_type, c0, c1, NULL);
     }
 
     /* matrix read m[r][c] or write m[r][c] = value */
@@ -654,7 +668,7 @@ static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, c
         char *r0, *r1, *k0, *k1;
         if (ok && affine_split(row_index, v, body, &r0, &r1)) {
             if (affine_split(col_index, v, body, &k0, &k1)) {
-                fast_plan_add_matrix(plan, n, name, expr, mtype, r0, r1, k0, k1);
+                fast_plan_add_matrix(plan, n, name, expr, mtype, r0, r1, NULL, k0, k1, NULL);
             } else {
                 free(r0); free(r1);
             }
@@ -688,6 +702,8 @@ static int64_t fast_plan_const_width(const FastPlan *plan, const char *base) {
 /* Builds the plan for one `for` loop; returns 0 when the loop must stay checked only. */
 static int fast_plan_for(const AstNode *loop, FastPlan *plan) {
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+    plan->inner_loop = NULL;
+    if (fast_suppress) return 0;
     if (!loop || loop->kind != AST_FOR || !loop->text) return 0;
     if (loop->child_count != 2 && loop->child_count != 3) return 0;  /* step must be 1 */
 
@@ -745,6 +761,8 @@ static int while_counter_pattern(const AstNode *loop, const char **var, const As
 
 static int fast_plan_while(const AstNode *loop, FastPlan *plan, const char **var, const AstNode **stop) {
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+    plan->inner_loop = NULL;
+    if (fast_suppress) return 0;
     if (!while_counter_pattern(loop, var, stop)) return 0;
     const AstNode *body = loop->children[1];
     if (has_nested_loop(body)) return 0;
@@ -755,13 +773,288 @@ static int fast_plan_while(const AstNode *loop, FastPlan *plan, const char **var
     return 1;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Double loops: one bounds proof for  for k { ...; for j { ... } }   */
+/* ------------------------------------------------------------------ */
+
+/* x op y on coefficient strings ("0" is zero), folding literals. */
+static char *coef_add(const char *a, const char *b, int subtract) {
+    char *folded = fold_strings(a, subtract ? '-' : '+', b);
+    if (folded) return folded;
+    if (str_is_zero(b)) return str_dup(a);
+    char *pb = paren_if_needed(b);
+    char *r = str_is_zero(a) ? (subtract ? str_fmt("-%s", pb) : str_dup(b))
+                             : str_fmt("%s %s %s", a, subtract ? "-" : "+", pb);
+    free(pb);
+    return r;
+}
+
+static char *coef_mul(const char *k, const char *x) {
+    char *folded = fold_strings(k, '*', x);
+    if (folded) return folded;
+    if (str_is_zero(k) || str_is_zero(x)) return str_dup("0");
+    if (str_is_one(k)) return str_dup(x);
+    if (str_is_one(x)) return str_dup(k);
+    char *pk = paren_if_needed(k), *px = paren_if_needed(x);
+    char *r = str_fmt("%s * %s", pk, px);
+    free(pk); free(px);
+    return r;
+}
+
+static void coef_free3(char *c[3]) { for (int i = 0; i < 3; i++) { free(c[i]); c[i] = NULL; } }
+
+/*
+ * Splits an index into c[0] + c[1] * k + c[2] * j with coefficients that do
+ * not change in the outer loop body (same rules as affine_split).
+ */
+static int affine2_split(const AstNode *e, const char *k, const char *j, const AstNode *body, char *c[3]) {
+    c[0] = c[1] = c[2] = NULL;
+    if (!e || !e->type_name || strcmp(e->type_name, "int") != 0) return 0;
+
+    int64_t lit;
+    if (const_int_value(e, &lit)) {
+        if (lit == INT64_MIN) return 0;
+        c[0] = str_fmt("%lld", (long long)lit); c[1] = str_dup("0"); c[2] = str_dup("0");
+        return 1;
+    }
+    if (e->kind == AST_IDENTIFIER && e->text) {
+        if (strcmp(e->text, k) == 0) { c[0] = str_dup("0"); c[1] = str_dup("1"); c[2] = str_dup("0"); return 1; }
+        if (strcmp(e->text, j) == 0) { c[0] = str_dup("0"); c[1] = str_dup("0"); c[2] = str_dup("1"); return 1; }
+        if (name_changes_in(body, e->text)) return 0;
+        c[0] = str_dup(e->text); c[1] = str_dup("0"); c[2] = str_dup("0");
+        return 1;
+    }
+    if (e->kind == AST_UNARY && e->text && strcmp(e->text, "-") == 0 && e->child_count == 1) {
+        char *a[3];
+        if (!affine2_split(e->children[0], k, j, body, a)) return 0;
+        for (int i = 0; i < 3; i++) c[i] = coef_add("0", a[i], 1);
+        coef_free3(a);
+        return 1;
+    }
+    if (e->kind == AST_BINARY && e->text && e->child_count == 2) {
+        int add = strcmp(e->text, "+") == 0, sub = strcmp(e->text, "-") == 0, mul = strcmp(e->text, "*") == 0;
+        if (!add && !sub && !mul) return 0;
+        char *a[3], *b[3];
+        if (!affine2_split(e->children[0], k, j, body, a)) return 0;
+        if (!affine2_split(e->children[1], k, j, body, b)) { coef_free3(a); return 0; }
+        int ok = 1;
+        if (add || sub) {
+            for (int i = 0; i < 3; i++) c[i] = coef_add(a[i], b[i], sub);
+        } else if (str_is_zero(a[1]) && str_is_zero(a[2])) {
+            for (int i = 0; i < 3; i++) c[i] = coef_mul(a[0], b[i]);
+        } else if (str_is_zero(b[1]) && str_is_zero(b[2])) {
+            for (int i = 0; i < 3; i++) c[i] = coef_mul(b[0], a[i]);
+        } else {
+            ok = 0;   /* k * j is not affine */
+        }
+        coef_free3(a); coef_free3(b);
+        if (!ok || !c[0] || !c[1] || !c[2]) { coef_free3(c); return 0; }
+        return 1;
+    }
+    return 0;
+}
+
+/* A range bound the outer loop cannot change and that cannot fail: literals, stable names, len/rows/cols. */
+static int nest_bound_is_invariant(const AstNode *e, const char *k, const AstNode *body) {
+    if (!e) return 1;   /* omitted start: 0 */
+    int64_t lit;
+    if (const_int_value(e, &lit)) return 1;
+    if (e->kind == AST_IDENTIFIER && e->text) return strcmp(e->text, k) != 0 && !name_changes_in(body, e->text);
+    if (e->kind == AST_CALL && e->text && e->child_count == 1 &&
+        (strcmp(e->text, "len") == 0 || strcmp(e->text, "@rows") == 0 || strcmp(e->text, "@cols") == 0)) {
+        const AstNode *arg = e->children[0];
+        if (arg->kind == AST_IDENTIFIER) return strcmp(arg->text, k) != 0 && !name_changes_in(body, arg->text);
+        if (arg->kind == AST_MEMBER) {
+            if (tree_calls_field_writer(body)) return 0;
+            const AstNode *cur = arg;
+            while (cur->kind == AST_MEMBER && cur->child_count == 1) {
+                if (tree_assigns_field(body, cur->text)) return 0;
+                cur = cur->children[0];
+            }
+            return cur->kind == AST_IDENTIFIER && strcmp(cur->text, k) != 0 && !name_changes_in(body, cur->text);
+        }
+        return 0;
+    }
+    if (e->kind == AST_BINARY && e->text && e->child_count == 2 &&
+        (strcmp(e->text, "+") == 0 || strcmp(e->text, "-") == 0 || strcmp(e->text, "*") == 0)) {
+        return nest_bound_is_invariant(e->children[0], k, body) && nest_bound_is_invariant(e->children[1], k, body);
+    }
+    return 0;
+}
+
+static const AstNode *nest_find_inner(const AstNode *n, size_t *count) {
+    const AstNode *found = NULL;
+    for (size_t i = 0; i < n->child_count; i++) {
+        const AstNode *c = n->children[i];
+        if (c->kind == AST_FOR || c->kind == AST_WHILE) {
+            (*count)++;
+            found = c;
+            continue;   /* its own body is checked by the caller */
+        }
+        const AstNode *deeper = nest_find_inner(c, count);
+        if (deeper) found = deeper;
+    }
+    return found;
+}
+
+static void nest_collect(FastPlan *plan, const AstNode *n, const char *k, const char *j,
+                         const AstNode *outer_body, int inside) {
+    if (!n) return;
+    if (!inside && n == plan->inner_loop) {
+        const AstNode *inner_body = n->children[n->child_count - 1];
+        nest_collect(plan, inner_body, k, j, outer_body, 1);
+        return;
+    }
+    if (!inside) {
+        /* statements of the outer body: indices in k only, like a simple loop */
+        const AstNode *index = NULL, *base_node = NULL;
+        const char *list_type = NULL;
+        if (n->kind == AST_INDEX && n->child_count == 2 && is_list_type(n->children[0]->type_name)) {
+            base_node = n->children[0]; list_type = base_node->type_name; index = n->children[1];
+        } else if (n->kind == AST_INDEX_ASSIGN && is_list_type(n->type_name) &&
+                   ((n->child_count == 2 && n->text) || (n->child_count == 3 && !n->text))) {
+            list_type = n->type_name; index = n->children[0]; base_node = n->text ? NULL : n->children[2];
+        }
+        if (list_type) {
+            const char *name = NULL, *expr = NULL;
+            int ok = base_node ? fast_base_of(plan, base_node, k, outer_body, &name, &expr)
+                               : (!name_changes_in(outer_body, n->text) && (name = expr = n->text) != NULL);
+            char *c0, *c1;
+            if (ok && affine_split(index, k, outer_body, &c0, &c1)) fast_plan_add(plan, n, name, expr, list_type, c0, c1, NULL);
+        }
+        const AstNode *row = NULL, *col = NULL, *mnode = NULL;
+        const char *mtype = NULL;
+        if (n->kind == AST_INDEX && n->child_count == 2 && n->children[0]->kind == AST_INDEX &&
+            is_matrix_row_type(n->children[0]->type_name)) {
+            mnode = n->children[0]->children[0]; mtype = mnode->type_name;
+            row = n->children[0]->children[1]; col = n->children[1];
+        } else if (n->kind == AST_MATRIX_SET && is_matrix_type(n->type_name) &&
+                   ((n->child_count == 3 && n->text) || (n->child_count == 4 && !n->text))) {
+            mnode = n->text ? NULL : n->children[3]; mtype = n->type_name;
+            row = n->children[0]; col = n->children[1];
+        }
+        if (mtype) {
+            const char *name = NULL, *expr = NULL;
+            int ok = mnode ? fast_base_of(plan, mnode, k, outer_body, &name, &expr)
+                           : (!name_changes_in(outer_body, n->text) && (name = expr = n->text) != NULL);
+            char *r0, *r1, *k0, *k1;
+            if (ok && affine_split(row, k, outer_body, &r0, &r1)) {
+                if (affine_split(col, k, outer_body, &k0, &k1)) fast_plan_add_matrix(plan, n, name, expr, mtype, r0, r1, NULL, k0, k1, NULL);
+                else { free(r0); free(r1); }
+            }
+        }
+    } else {
+        /* statements of the inner loop: indices in k and j */
+        const AstNode *index = NULL, *base_node = NULL;
+        const char *list_type = NULL;
+        if (n->kind == AST_INDEX && n->child_count == 2 && is_list_type(n->children[0]->type_name)) {
+            base_node = n->children[0]; list_type = base_node->type_name; index = n->children[1];
+        } else if (n->kind == AST_INDEX_ASSIGN && is_list_type(n->type_name) &&
+                   ((n->child_count == 2 && n->text) || (n->child_count == 3 && !n->text))) {
+            list_type = n->type_name; index = n->children[0]; base_node = n->text ? NULL : n->children[2];
+        }
+        if (list_type) {
+            const char *name = NULL, *expr = NULL;
+            int ok = base_node ? fast_base_of(plan, base_node, k, outer_body, &name, &expr)
+                               : (!name_changes_in(outer_body, n->text) && strcmp(n->text, j) != 0 &&
+                                  (name = expr = n->text) != NULL);
+            if (ok && base_node && base_node->kind == AST_IDENTIFIER && strcmp(base_node->text, j) == 0) ok = 0;
+            char *c[3];
+            if (ok && affine2_split(index, k, j, outer_body, c)) fast_plan_add(plan, n, name, expr, list_type, c[0], c[1], c[2]);
+        }
+        const AstNode *row = NULL, *col = NULL, *mnode = NULL;
+        const char *mtype = NULL;
+        if (n->kind == AST_INDEX && n->child_count == 2 && n->children[0]->kind == AST_INDEX &&
+            is_matrix_row_type(n->children[0]->type_name)) {
+            mnode = n->children[0]->children[0]; mtype = mnode->type_name;
+            row = n->children[0]->children[1]; col = n->children[1];
+        } else if (n->kind == AST_MATRIX_SET && is_matrix_type(n->type_name) &&
+                   ((n->child_count == 3 && n->text) || (n->child_count == 4 && !n->text))) {
+            mnode = n->text ? NULL : n->children[3]; mtype = n->type_name;
+            row = n->children[0]; col = n->children[1];
+        }
+        if (mtype) {
+            const char *name = NULL, *expr = NULL;
+            int ok = mnode ? fast_base_of(plan, mnode, k, outer_body, &name, &expr)
+                           : (!name_changes_in(outer_body, n->text) && strcmp(n->text, j) != 0 &&
+                              (name = expr = n->text) != NULL);
+            if (ok && mnode && mnode->kind == AST_IDENTIFIER && strcmp(mnode->text, j) == 0) ok = 0;
+            char *r[3], *q[3];
+            if (ok && affine2_split(row, k, j, outer_body, r)) {
+                if (affine2_split(col, k, j, outer_body, q)) fast_plan_add_matrix(plan, n, name, expr, mtype, r[0], r[1], r[2], q[0], q[1], q[2]);
+                else coef_free3(r);
+            }
+        }
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (n->children[i] == plan->inner_loop && inside) continue;
+        nest_collect(plan, n->children[i], k, j, outer_body, inside);
+    }
+}
+
+/*
+ * for k in range(a, b) { ...; for j in range(c, d) { ... } }
+ * One proof before the outer loop covers every access of both loops, so the
+ * inner loop runs without any check at all (its range must not depend on k).
+ */
+static int fast_plan_nest(const AstNode *loop, FastPlan *plan) {
+    plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+    plan->inner_loop = NULL;
+    if (fast_suppress) return 0;
+    if (!loop || loop->kind != AST_FOR || !loop->text) return 0;
+    if (loop->child_count != 2 && loop->child_count != 3) return 0;
+    const char *k = loop->text;
+    const AstNode *body = loop->children[loop->child_count - 1];
+
+    size_t loops = 0;
+    const AstNode *inner = nest_find_inner(body, &loops);
+    if (loops != 1 || !inner || inner->kind != AST_FOR || !inner->text) return 0;
+    if (inner->child_count != 2 && inner->child_count != 3) return 0;      /* inner step 1 */
+    const char *j = inner->text;
+    const AstNode *inner_body = inner->children[inner->child_count - 1];
+    if (has_nested_loop(inner_body)) return 0;
+    if (strcmp(j, k) == 0) return 0;
+    if (tree_may_grow_lists(body)) return 0;
+    if (name_changes_in(body, k)) return 0;
+    if (name_changes_in(inner_body, j)) return 0;
+
+    size_t argc = inner->child_count - 1;
+    const AstNode *start = argc == 1 ? NULL : inner->children[0];
+    const AstNode *stop = inner->children[argc == 1 ? 0 : 1];
+    if (!nest_bound_is_invariant(start, k, body) || !nest_bound_is_invariant(stop, k, body)) return 0;
+
+    plan->inner_loop = inner;
+    nest_collect(plan, body, k, j, body, 0);
+
+    int inner_accesses = 0;
+    for (size_t i = 0; i < plan->check_count; i++) if (plan->checks[i].c2) inner_accesses = 1;
+    if (!inner_accesses) { fast_plan_free(plan); return 0; }
+    return 1;
+}
+
+static int program_has_nest_loop(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_FOR) {
+        FastPlan plan;
+        int ok = fast_plan_nest(n, &plan);
+        fast_plan_free(&plan);
+        if (ok) return 1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (program_has_nest_loop(n->children[i])) return 1;
+    }
+    return 0;
+}
+
 static int program_has_fast_loop(const AstNode *n) {
     if (!n) return 0;
     if (n->kind == AST_FOR || n->kind == AST_WHILE) {
         FastPlan plan;
         const char *var;
         const AstNode *stop;
-        int ok = n->kind == AST_FOR ? fast_plan_for(n, &plan) : fast_plan_while(n, &plan, &var, &stop);
+        int ok = n->kind == AST_FOR ? (fast_plan_nest(n, &plan) || fast_plan_for(n, &plan))
+                                    : fast_plan_while(n, &plan, &var, &stop);
         fast_plan_free(&plan);
         if (ok) return 1;
     }
@@ -2275,8 +2568,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                         depth++;
                         indent(f, depth);
                     }
-                    fputs("if (", f);
-                    for (size_t i = 0; i < plan.check_count; i++) {
+                    if (unchecked_mode) fputs("{\n", f);
+                    else fputs("if (", f);
+                    for (size_t i = 0; i < plan.check_count && !unchecked_mode; i++) {
                         BoundsCheck *b = &plan.checks[i];
                         if (i != 0) {
                             fputs(" &&\n", f);
@@ -2291,7 +2585,7 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                         if (b->dim == 2) fprintf(f, ", %s->cols", bexpr);
                         fputc(')', f);
                     }
-                    fputs(") {\n", f);
+                    if (!unchecked_mode) fputs(") {\n", f);
                     for (size_t i = 0; i < plan.base_count; i++) {
                         int matrix = is_matrix_type(plan.base_types[i]);
                         const char *elem = matrix ? matrix_element_c_type(plan.base_types[i])
@@ -2321,17 +2615,22 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                     if (!ok) return 0;
                     indent(f, depth + 1);
                     fputs("}\n", f);
-                    indent(f, depth);
-                    fputs("} else {\n", f);
-                    indent(f, depth + 1);
-                    fputs("while (", f);
-                    if (!emit_expr(f, n->children[0])) return 0;
-                    fputs(") {\n", f);
-                    if (!emit_block(f, n->children[1], depth + 2)) return 0;
-                    indent(f, depth + 1);
-                    fputs("}\n", f);
-                    indent(f, depth);
-                    fputs("}\n", f);
+                    if (unchecked_mode) {
+                        indent(f, depth);
+                        fputs("}\n", f);
+                    } else {
+                        indent(f, depth);
+                        fputs("} else {\n", f);
+                        indent(f, depth + 1);
+                        fputs("while (", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputs(") {\n", f);
+                        if (!emit_block(f, n->children[1], depth + 2)) return 0;
+                        indent(f, depth + 1);
+                        fputs("}\n", f);
+                        indent(f, depth);
+                        fputs("}\n", f);
+                    }
                     if (!stop_const) {
                         depth--;
                         indent(f, depth);
@@ -2377,7 +2676,8 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                      strcmp(stop_node->text, var) != 0);
 
                 FastPlan plan;
-                int fast = step == 1 && fast_plan_for(n, &plan);
+                int fast = step == 1 && (fast_plan_nest(n, &plan) || fast_plan_for(n, &plan));
+                const AstNode *nest_inner = fast ? plan.inner_loop : NULL;
                 int need_block = !start_simple || !stop_simple;
 
                 char *start_text = NULL, *stop_text = NULL;
@@ -2424,27 +2724,38 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                 if (fast) {
                     /* bounds of every listed access, proven once for the whole range */
                     LINE_INDENT(inner);
-                    fputs("if (", f);
-                    for (size_t i = 0; i < plan.check_count; i++) {
+                    if (unchecked_mode) fputs("{\n", f);
+                    else fputs("if (", f);
+                    for (size_t i = 0; i < plan.check_count && !unchecked_mode; i++) {
                         BoundsCheck *b = &plan.checks[i];
                         if (i != 0) {
                             fputs(" &&\n", f);
                             indent(f, inner + 1);
                         }
                         const char *bexpr = fast_plan_expr(&plan, b->base);
-                        if (b->dim == 0) fprintf(f, "clair_rt_affine_ok(%s, %s, %s, ", bexpr, b->c0, b->c1);
-                        else fprintf(f, "clair_rt_affine_in(%s, %s, ", b->c0, b->c1);
+                        const char *two = b->c2 ? "2" : "";
+                        if (b->dim == 0) fprintf(f, "clair_rt_affine%s_ok(%s, %s, %s, ", two, bexpr, b->c0, b->c1);
+                        else fprintf(f, "clair_rt_affine%s_in(%s, %s, ", two, b->c0, b->c1);
                         if (start_text) fputs(start_text, f);
                         else if (!start_node) fputs("0", f);
                         else if (!emit_expr(f, start_node)) return 0;
                         fputs(", ", f);
                         if (stop_text) fputs(stop_text, f);
                         else if (!emit_expr(f, stop_node)) return 0;
+                        if (b->c2) {
+                            /* inner loop: its coefficient and its range */
+                            size_t iargc = nest_inner->child_count - 1;
+                            fprintf(f, ", %s, ", b->c2);
+                            if (iargc == 1) fputs("0", f);
+                            else if (!emit_expr(f, nest_inner->children[0])) return 0;
+                            fputs(", ", f);
+                            if (!emit_expr(f, nest_inner->children[iargc == 1 ? 0 : 1])) return 0;
+                        }
                         if (b->dim == 1) fprintf(f, ", %s->rows", bexpr);
                         if (b->dim == 2) fprintf(f, ", %s->cols", bexpr);
                         fputc(')', f);
                     }
-                    fputs(") {\n", f);
+                    if (!unchecked_mode) fputs(") {\n", f);
 
                     for (size_t i = 0; i < plan.base_count; i++) {
                         int matrix = is_matrix_type(plan.base_types[i]);
@@ -2484,7 +2795,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                         fputs("/* row width known: Clang can vectorize like hand-written C */\n", f);
                         EMIT_FOR_HEADER(inner + 2);
                         fast_access_active = 1;
+                        fast_suppress = nest_inner != NULL;
                         ok = emit_block(f, body, inner + 3);
+                        fast_suppress = 0;
                         fast_access_active = 0;
                         width_override_count = 0;
                         if (!ok) return 0;
@@ -2497,7 +2810,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
 
                     EMIT_FOR_HEADER(fast_depth);
                     fast_access_active = 1;
+                    fast_suppress = nest_inner != NULL;
                     ok = emit_block(f, body, fast_depth + 1);
+                    fast_suppress = 0;
                     fast_access_active = 0;
                     if (!ok) return 0;
                     indent(f, fast_depth);
@@ -2508,14 +2823,19 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                     }
                     fast_access_count = 0;
 
-                    indent(f, inner);
-                    fputs("} else {\n", f);
-                    EMIT_FOR_HEADER(inner + 1);
-                    if (!emit_block(f, body, inner + 2)) return 0;
-                    indent(f, inner + 1);
-                    fputs("}\n", f);
-                    indent(f, inner);
-                    fputs("}\n", f);
+                    if (unchecked_mode) {
+                        indent(f, inner);
+                        fputs("}\n", f);
+                    } else {
+                        indent(f, inner);
+                        fputs("} else {\n", f);
+                        EMIT_FOR_HEADER(inner + 1);
+                        if (!emit_block(f, body, inner + 2)) return 0;
+                        indent(f, inner + 1);
+                        fputs("}\n", f);
+                        indent(f, inner);
+                        fputs("}\n", f);
+                    }
                     fast_plan_free(&plan);
                 } else {
                     EMIT_FOR_HEADER(inner);
@@ -2906,7 +3226,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
     int uses_input_int = node_uses_call_named(program, "input_int");
     compute_safe_functions(program);
 
-    fputs("/* Generated by the Clair compiler. */\n", f);
+    fputs(unchecked_mode ? "/* Generated by the Clair compiler (--sans-verif: no bounds checks). */\n"
+                         : "/* Generated by the Clair compiler. */\n", f);
     fputs(
         "#include <inttypes.h>\n"
         "#include <stdbool.h>\n"
@@ -3076,6 +3397,14 @@ int codegen_c_file(const AstNode *program, const char *path) {
             };
             for (size_t k = 0; k < 4; k++) {
                 if (!node_indexes_list_type(program, kinds[k][0])) continue;
+                if (unchecked_mode) {
+                    fprintf(f,
+                        "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
+                        "    return (%s *)list->data + index;  /* --sans-verif */\n"
+                        "}\n\n",
+                        kinds[k][2], kinds[k][1], kinds[k][2]);
+                    continue;
+                }
                 fprintf(f,
                     "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
                     "    if (!list || index < 0 || (uint64_t)index >= list->len) clair_rt_index_error(list, index, list ? list->len : 0);\n"
@@ -3228,14 +3557,17 @@ int codegen_c_file(const AstNode *program, const char *path) {
             if (!node_uses_matrix_kind(program, mkinds[k][0])) continue;
             fprintf(f,
                 "static inline %s *clair_rt_matrix_at_%s_checked(ClairMatrix m, int64_t i, int64_t j) {\n"
-                "    if ((uint64_t)i >= (uint64_t)m->rows || (uint64_t)j >= (uint64_t)m->cols) clair_rt_matrix_index_error(m, i, j);\n"
+                "%s"
                 "    return (%s *)m->data + (i * m->cols + j);\n"
                 "}\n\n",
-                mkinds[k][2], mkinds[k][1], mkinds[k][2]);
+                mkinds[k][2], mkinds[k][1],
+                unchecked_mode ? "    /* --sans-verif: no bounds check */\n"
+                               : "    if ((uint64_t)i >= (uint64_t)m->rows || (uint64_t)j >= (uint64_t)m->cols) clair_rt_matrix_index_error(m, i, j);\n",
+                mkinds[k][2]);
         }
     }
 
-    if (program_has_fast_loop(program)) {
+    if (program_has_fast_loop(program) && !unchecked_mode) {
         fputs(
             "/* True when c0 + c1 * i stays in [0, limit) for every i in [first, stop). */\n"
             "static inline bool clair_rt_affine_in(int64_t c0, int64_t c1, int64_t first, int64_t stop, int64_t limit) {\n"
@@ -3248,6 +3580,39 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "}\n\n",
             f
         );
+        if (program_has_nest_loop(program)) {
+            fputs(
+                "/* Smallest and largest c * v for v in [first, last], or false on overflow. */\n"
+                "static inline bool clair_rt_term_range(int64_t c, int64_t first, int64_t last, int64_t *lo, int64_t *hi) {\n"
+                "    int64_t a, b;\n"
+                "    if (__builtin_mul_overflow(c, first, &a) || __builtin_mul_overflow(c, last, &b)) return false;\n"
+                "    *lo = a < b ? a : b;\n"
+                "    *hi = a < b ? b : a;\n"
+                "    return true;\n"
+                "}\n\n"
+                "/* True when c0 + ck * k + cj * j stays in [0, limit) for every k in [k0, k1) and j in [j0, j1). */\n"
+                "static inline bool clair_rt_affine2_in(int64_t c0, int64_t ck, int64_t k0, int64_t k1,\n"
+                "                                       int64_t cj, int64_t j0, int64_t j1, int64_t limit) {\n"
+                "    if (k0 >= k1 || j0 >= j1) return true;\n"
+                "    int64_t klo, khi, jlo, jhi, lo, hi;\n"
+                "    if (!clair_rt_term_range(ck, k0, k1 - 1, &klo, &khi) || !clair_rt_term_range(cj, j0, j1 - 1, &jlo, &jhi)) return false;\n"
+                "    if (__builtin_add_overflow(klo, jlo, &lo) || __builtin_add_overflow(lo, c0, &lo)) return false;\n"
+                "    if (__builtin_add_overflow(khi, jhi, &hi) || __builtin_add_overflow(hi, c0, &hi)) return false;\n"
+                "    return lo >= 0 && hi < limit;\n"
+                "}\n\n",
+                f
+            );
+            if (node_uses_list(program)) {
+                fputs(
+                    "static inline bool clair_rt_affine2_ok(ClairList list, int64_t c0, int64_t ck, int64_t k0, int64_t k1,\n"
+                    "                                       int64_t cj, int64_t j0, int64_t j1) {\n"
+                    "    return list && list->len <= (size_t)INT64_MAX &&\n"
+                    "           clair_rt_affine2_in(c0, ck, k0, k1, cj, j0, j1, (int64_t)list->len);\n"
+                    "}\n\n",
+                    f
+                );
+            }
+        }
         if (node_uses_list(program)) {
             fputs(
                 "/* True when list[c0 + c1 * i] is in bounds for every i in [first, stop). */\n"
