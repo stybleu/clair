@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.17 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.18 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -529,6 +529,19 @@ expect_runtime_error() {
 
 expect_runtime_error loop_fast_path_bounds '0\n1\n2\n3\n4' 'list index 4 out of bounds for length 4'
 expect_runtime_error loop_fast_path_overflow '0\n5\n1' 'list index 4611686018427387904 out of bounds for length 2'
+
+./build/clair tests/math_builtins.cl -o build/test_math_builtins
+out_math_builtins="$(./build/test_math_builtins)"
+expected_math_builtins="$(printf '4\n1.4142135623731\n1024\n-3\n3\n7\n2.5\n3\n9.5\n7\n-7\n3.5\n1\n2\n-2\n2\n1.5\n1000\n2.5\n0.5\n0.665240955774822\n0\n2\n4\n5\n4')"
+[ "$out_math_builtins" = "$expected_math_builtins" ]
+grep -Fq 'clair_data_y[i] = sqrt(clair_data_x[i]);' build/test_math_builtins.generated.c
+printf '%s\n' 'math_builtins.cl : OK -> sqrt, exp, tanh, pow, abs, min, max, int(), float(), %, 1e-3, sigmoid, softmax'
+
+expect_compile_error invalid_math_arity "sqrt() expects 1 argument(s), got 2"
+expect_compile_error invalid_math_type "argument 1 of sqrt() expects int or float, got string"
+expect_compile_error invalid_mod_type "operator '%' requires int or float operands"
+expect_runtime_error mod_zero_runtime '1' 'Clair runtime error: modulo by zero'
+expect_runtime_error int_range_runtime '' 'Clair runtime error: int() argument out of range'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

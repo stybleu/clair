@@ -319,6 +319,67 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
 }
 
 
+/*
+ * Built-in math functions and conversions.  A user function with the same
+ * name wins (checked by the caller first), as in Python where a def shadows
+ * a builtin.  Accepted calls are renamed "@name" so code generation can tell
+ * them apart from user functions.
+ *
+ * Returns 1 when `n` is a valid builtin call, -1 when it is a builtin used
+ * wrongly (error already reported), 0 when the name is not a builtin.
+ */
+static int check_builtin_call(Semantic *s, AstNode *n) {
+    static const char *const float_unary[] = {
+        "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
+        "sinh", "cosh", "tanh", "floor", "ceil", NULL
+    };
+    static const char *const float_binary[] = { "pow", "atan2", "hypot", NULL };
+
+    const char *name = n->text;
+    size_t want = 0;
+    int kind = 0; /* 1 float unary, 2 float binary, 3 abs, 4 min/max, 5 int(), 6 float() */
+    for (size_t i = 0; float_unary[i]; i++) if (strcmp(name, float_unary[i]) == 0) { kind = 1; want = 1; }
+    for (size_t i = 0; float_binary[i]; i++) if (strcmp(name, float_binary[i]) == 0) { kind = 2; want = 2; }
+    if (strcmp(name, "abs") == 0) { kind = 3; want = 1; }
+    if (strcmp(name, "min") == 0 || strcmp(name, "max") == 0) { kind = 4; want = 2; }
+    if (strcmp(name, "int") == 0) { kind = 5; want = 1; }
+    if (strcmp(name, "float") == 0) { kind = 6; want = 1; }
+    if (!kind) return 0;
+
+    if (n->child_count != want) {
+        fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, want, n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+
+    const char *args[2] = { NULL, NULL };
+    for (size_t i = 0; i < want; i++) {
+        args[i] = expr_type(s, n->children[i]);
+        if (!args[i]) return -1;
+        int ok = is_numeric(args[i]) || (kind == 5 && strcmp(args[i], "bool") == 0);
+        if (!ok) {
+            fprintf(stderr, "semantic error: argument %zu of %s() expects int or float, got %s\n",
+                    i + 1, name, args[i]);
+            s->had_error = 1;
+            return -1;
+        }
+    }
+
+    const char *result = "float";
+    if (kind == 3) result = args[0];
+    if (kind == 4) result = (strcmp(args[0], "int") == 0 && strcmp(args[1], "int") == 0) ? "int" : "float";
+    if (kind == 5) result = "int";
+
+    char *renamed = malloc(strlen(name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, name);
+    free(n->text);
+    n->text = renamed;
+    set_type(n, result);
+    return 1;
+}
+
 static const char *binary_type(Semantic *s, AstNode *n) {
     if (n->child_count != 2 || !n->text) return NULL;
     const char *left = expr_type(s, n->children[0]);
@@ -355,6 +416,15 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         strcmp(n->text, "/") == 0) {
         if (!is_numeric(left) || !is_numeric(right)) {
             error_type(s, "arithmetic operators '-', '*' and '/' require int or float operands");
+            return NULL;
+        }
+        set_type(n, (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) ? "float" : "int");
+        return n->type_name;
+    }
+
+    if (strcmp(n->text, "%") == 0) {
+        if (!is_numeric(left) || !is_numeric(right)) {
+            error_type(s, "operator '%' requires int or float operands");
             return NULL;
         }
         set_type(n, (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) ? "float" : "int");
@@ -486,6 +556,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+            if (n->text && n->text[0] == '@') return n->type_name;  /* builtin already checked */
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) {
                     fprintf(stderr, "semantic error: input_int() expects 0 arguments, got %zu\n", n->child_count);
@@ -540,6 +611,9 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             const AstNode *fn = find_function(s, n->text);
             if (!fn) {
+                int builtin = check_builtin_call(s, n);
+                if (builtin == 1) return n->type_name;
+                if (builtin == -1) return NULL;
                 fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);
                 s->had_error = 1;
                 return NULL;

@@ -119,17 +119,32 @@ static int const_int_value(const AstNode *n, int64_t *out) {
         if (strcmp(n->text, "+") == 0) { *out = (int64_t)(ua + ub); return 1; }
         if (strcmp(n->text, "-") == 0) { *out = (int64_t)(ua - ub); return 1; }
         if (strcmp(n->text, "*") == 0) { *out = (int64_t)(ua * ub); return 1; }
-        return 0; /* division keeps its runtime check (division by zero) */
+        /* / and % fold only when they cannot fail; otherwise the runtime check stays */
+        if (b != 0 && b != -1 && strcmp(n->text, "/") == 0) { *out = a / b; return 1; }
+        if (b != 0 && b != -1 && strcmp(n->text, "%") == 0) { *out = a % b; return 1; }
+        return 0;
     }
 
     return 0;
 }
 
-/* Integer division by a constant other than 0 and -1 can never fail. */
+/* Integer / or % by a constant other than 0 and -1 can never fail. */
 static int int_div_is_safe(const AstNode *n) {
     int64_t d;
-    return n->kind == AST_BINARY && n->text && strcmp(n->text, "/") == 0 && n->child_count == 2 &&
+    return n->kind == AST_BINARY && n->text &&
+           (strcmp(n->text, "/") == 0 || strcmp(n->text, "%") == 0) && n->child_count == 2 &&
            const_int_value(n->children[1], &d) && d != 0 && d != -1;
+}
+
+static int is_int_type(const char *t) { return t && strcmp(t, "int") == 0; }
+
+/* Builtins that can never stop the program (only int(float) can). */
+static int builtin_cannot_fail(const AstNode *call) {
+    if (!call->text || call->text[0] != '@') return 0;
+    if (strcmp(call->text, "@int") == 0)
+        return call->child_count == 1 && !(call->children[0]->type_name &&
+                                           strcmp(call->children[0]->type_name, "float") == 0);
+    return 1;
 }
 
 static void emit_int_literal(FILE *f, int64_t v) {
@@ -482,7 +497,10 @@ static int expr_prec(const AstNode *n) {
         case AST_INDEX:
             return fast_access_base(n) ? PREC_POSTFIX : PREC_UNARY;  /* `*accessor(...)` */
         case AST_CALL:
-            return (n->text && strcmp(n->text, "len") == 0) ? PREC_UNARY : PREC_POSTFIX;  /* cast */
+            if (n->text && strcmp(n->text, "len") == 0) return PREC_UNARY;    /* (int64_t)x->len */
+            if (n->text && strcmp(n->text, "@float") == 0) return PREC_UNARY; /* (double)x */
+            if (n->text && strcmp(n->text, "@int") == 0 && builtin_cannot_fail(n)) return PREC_UNARY;
+            return PREC_POSTFIX;
         case AST_UNARY:
             if (const_int_value(n, &k) && k >= 0) return PREC_POSTFIX;
             return PREC_UNARY;
@@ -496,8 +514,9 @@ static int expr_prec(const AstNode *n) {
             if (strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 ||
                 strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) return PREC_RELATIONAL;
             if (strcmp(op, "+") == 0 && is_string_type(lt) && is_string_type(rt)) return PREC_POSTFIX;
-            if (strcmp(op, "/") == 0 && n->type_name && strcmp(n->type_name, "int") == 0 &&
-                !int_div_is_safe(n)) return PREC_POSTFIX;
+            if ((strcmp(op, "/") == 0 || strcmp(op, "%") == 0) && is_int_type(n->type_name) &&
+                !int_div_is_safe(n)) return PREC_POSTFIX;                  /* checked helper call */
+            if (strcmp(op, "%") == 0 && !is_int_type(n->type_name)) return PREC_POSTFIX;  /* fmod() */
             if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) return PREC_ADDITIVE;
             return PREC_MULTIPLICATIVE;
         }
@@ -1186,6 +1205,35 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_CALL:
+            if (n->text && n->text[0] == '@') {
+                const char *name = n->text + 1;
+                const char *t0 = n->child_count > 0 ? n->children[0]->type_name : NULL;
+                if (strcmp(name, "float") == 0) {
+                    fputs("(double)", f);
+                    return emit_operand(f, n->children[0], PREC_UNARY, 0);
+                }
+                if (strcmp(name, "int") == 0) {
+                    if (t0 && strcmp(t0, "float") == 0) {
+                        fputs("clair_rt_float_to_int(", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputc(')', f);
+                        return 1;
+                    }
+                    fputs("(int64_t)", f);
+                    return emit_operand(f, n->children[0], PREC_UNARY, 0);
+                }
+                const char *c_name = name;
+                if (strcmp(name, "abs") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_abs_i64" : "fabs";
+                if (strcmp(name, "min") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_min_i64" : "fmin";
+                if (strcmp(name, "max") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_max_i64" : "fmax";
+                fprintf(f, "%s(", c_name);
+                for (size_t i = 0; i < n->child_count; i++) {
+                    if (i != 0) fputs(", ", f);
+                    if (!emit_expr(f, n->children[i])) return 0;
+                }
+                fputc(')', f);
+                return 1;
+            }
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) return 0;
                 fputs("clair_rt_input_int()", f);
@@ -1225,6 +1273,23 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 return 1;
             }
 
+
+            if (strcmp(op, "%") == 0) {
+                if (!is_int_type(n->type_name)) {
+                    fputs("fmod(", f);
+                } else if (int_div_is_safe(n)) {
+                    if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
+                    fputs(" % ", f);
+                    return emit_operand(f, n->children[1], PREC_MULTIPLICATIVE, 1);
+                } else {
+                    fputs("clair_rt_int_mod_checked(", f);
+                }
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputc(')', f);
+                return 1;
+            }
 
             if (strcmp(op, "/") == 0 &&
                 n->type_name &&
@@ -1428,10 +1493,10 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth);
 /* Can evaluating `n` stop the program or run user code (calls, bounds, division)? */
 static int node_may_fail(const AstNode *n) {
     if (!n) return 0;
-    if (n->kind == AST_CALL && !(n->text && strcmp(n->text, "len") == 0)) return 1;
+    if (n->kind == AST_CALL && !(n->text && strcmp(n->text, "len") == 0) && !builtin_cannot_fail(n)) return 1;
     if (n->kind == AST_INDEX) return 1;
-    if (n->kind == AST_BINARY && n->text && strcmp(n->text, "/") == 0 &&
-        n->type_name && strcmp(n->type_name, "int") == 0 && !int_div_is_safe(n)) return 1;
+    if (n->kind == AST_BINARY && n->text && (strcmp(n->text, "/") == 0 || strcmp(n->text, "%") == 0) &&
+        is_int_type(n->type_name) && !int_div_is_safe(n)) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (node_may_fail(n->children[i])) return 1;
     }
@@ -2220,6 +2285,38 @@ static int node_uses_int_division(const AstNode *n) {
     return 0;
 }
 
+static int node_uses_int_mod(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 &&
+        is_int_type(n->type_name) && !int_div_is_safe(n)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_int_mod(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+static int node_uses_int_builtin(const AstNode *n, const char *name) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && strcmp(n->text, name) == 0 && is_int_type(n->type_name)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_int_builtin(n->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+static int node_uses_math(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && n->text[0] == '@' &&
+        strcmp(n->text, "@int") != 0 && strcmp(n->text, "@float") != 0 &&
+        !(is_int_type(n->type_name) &&
+          (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
+    if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !is_int_type(n->type_name)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_math(n->children[i])) return 1;
+    }
+    return 0;
+}
+
 static int node_indexes_list_type(const AstNode *n, const char *list_type) {
     if (!n) return 0;
     if (n->kind == AST_INDEX && n->child_count == 2 && n->children[0]->type_name &&
@@ -2261,7 +2358,39 @@ int codegen_c_file(const AstNode *program, const char *path) {
         f
     );
     if (uses_input_int) fputs("#include <errno.h>\n", f);
+    if (node_uses_math(program)) fputs("#include <math.h>\n", f);
     fputc('\n', f);
+
+    if (node_uses_int_mod(program)) {
+        fputs(
+            "static int64_t clair_rt_int_mod_checked(int64_t a, int64_t b) {\n"
+            "    if (b == 0) {\n"
+            "        fputs(\"Clair runtime error: modulo by zero\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    return b == -1 ? 0 : a % b;  /* INT64_MIN % -1 would trap in C */\n"
+            "}\n\n",
+            f
+        );
+    }
+    if (node_uses_int_builtin(program, "@abs"))
+        fputs("static inline int64_t clair_rt_abs_i64(int64_t x) { return x < 0 ? -x : x; }\n\n", f);
+    if (node_uses_int_builtin(program, "@min"))
+        fputs("static inline int64_t clair_rt_min_i64(int64_t a, int64_t b) { return a < b ? a : b; }\n\n", f);
+    if (node_uses_int_builtin(program, "@max"))
+        fputs("static inline int64_t clair_rt_max_i64(int64_t a, int64_t b) { return a > b ? a : b; }\n\n", f);
+    if (node_uses_call_named(program, "@int")) {
+        fputs(
+            "static int64_t clair_rt_float_to_int(double x) {\n"
+            "    if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) {  /* also rejects NaN */\n"
+            "        fputs(\"Clair runtime error: int() argument out of range\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    return (int64_t)x;  /* truncates toward zero, like Python int() */\n"
+            "}\n\n",
+            f
+        );
+    }
 
     if (node_uses_int_division(program)) {
         fputs(

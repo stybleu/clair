@@ -77,13 +77,25 @@ Token lexer_next(Lexer *l) {
     }
 
     if (isdigit((unsigned char)c)) {
+        int is_float = 0;
         while (isdigit((unsigned char)peek(l))) advance(l);
         if (peek(l) == '.' && isdigit((unsigned char)peek_next(l))) {
+            is_float = 1;
             advance(l);
             while (isdigit((unsigned char)peek(l))) advance(l);
-            return make_token(TOKEN_FLOAT_LITERAL, l->source + start_pos, l->pos - start_pos, line, column);
         }
-        return make_token(TOKEN_INTEGER, l->source + start_pos, l->pos - start_pos, line, column);
+        /* scientific notation: 1e-3, 6.02e23 */
+        if (peek(l) == 'e' || peek(l) == 'E') {
+            size_t look = l->pos + 1;
+            if (l->source[look] == '+' || l->source[look] == '-') look++;
+            if (isdigit((unsigned char)l->source[look])) {
+                is_float = 1;
+                while (l->pos < look) advance(l);
+                while (isdigit((unsigned char)peek(l))) advance(l);
+            }
+        }
+        return make_token(is_float ? TOKEN_FLOAT_LITERAL : TOKEN_INTEGER,
+                          l->source + start_pos, l->pos - start_pos, line, column);
     }
 
     if (c == '"') {
@@ -112,6 +124,7 @@ Token lexer_next(Lexer *l) {
         case '+': return make_token(TOKEN_PLUS, l->source + start_pos, 1, line, column);
         case '*': return make_token(TOKEN_STAR, l->source + start_pos, 1, line, column);
         case '/': return make_token(TOKEN_SLASH, l->source + start_pos, 1, line, column);
+        case '%': return make_token(TOKEN_PERCENT, l->source + start_pos, 1, line, column);
         case '=':
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_EQUAL_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_EQUAL, l->source + start_pos, 1, line, column);
@@ -145,7 +158,7 @@ const char *token_kind_name(TokenKind kind) {
         case TOKEN_COLON: return ":"; case TOKEN_COMMA: return ","; case TOKEN_DOT: return "."; case TOKEN_ARROW: return "->"; case TOKEN_EQUAL: return "=";
         case TOKEN_EQUAL_EQUAL: return "=="; case TOKEN_BANG_EQUAL: return "!="; case TOKEN_LESS: return "<";
         case TOKEN_LESS_EQUAL: return "<="; case TOKEN_GREATER: return ">"; case TOKEN_GREATER_EQUAL: return ">=";
-        case TOKEN_PLUS: return "+"; case TOKEN_MINUS: return "-"; case TOKEN_STAR: return "*"; case TOKEN_SLASH: return "/";
+        case TOKEN_PLUS: return "+"; case TOKEN_MINUS: return "-"; case TOKEN_STAR: return "*"; case TOKEN_SLASH: return "/"; case TOKEN_PERCENT: return "%";
         case TOKEN_ERROR: return "error";
     }
     return "unknown";

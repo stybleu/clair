@@ -6,6 +6,7 @@ Son compilateur est écrit en C et utilise Clang.
 ## Fonctionnalités
 
 - Types int, float, bool et string
+- Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
 - Fonctions, conditions et boucles
 - Listes et dictionnaires typés
 - Classes et objets, avec méthodes (`self`)
@@ -55,6 +56,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.18](docs/README_V0.18.md) : fonctions mathématiques, conversions, `%`, notation scientifique
 - [Clair V0.17](docs/README_V0.17.md) : boucles rapides, C lisible, rapport du code machine
 - [Clair V0.16](docs/README_V0.16.md) : méthodes, appels en instruction, mutation chaînée
 - [Clair V0.14](docs/README_V0.14.md) : classes (documentation historique)

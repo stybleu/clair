@@ -42,9 +42,11 @@ static int run_clang(const char *cpath, const char *output) {
             "-Wall",
             "-Wextra",
             "-Wno-unused-function",
+            "-fno-math-errno",   /* Clair never reads errno: lets Clang vectorize sqrt() and friends */
             (char *)cpath,
             "-o",
             (char *)output,
+            "-lm",
             NULL
         };
         execvp("clang", args);

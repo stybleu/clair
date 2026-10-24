@@ -150,6 +150,16 @@ static AstNode *parse_atom(Parser *p) {
         return ast_new(AST_IDENTIFIER, t.start, t.length);
     }
 
+    /* conversions int(x) and float(x) */
+    if ((t.kind == TOKEN_INT || t.kind == TOKEN_FLOAT) ) {
+        next(p);
+        if (p->current.kind == TOKEN_LPAREN) return parse_call_after_name(p, t);
+        fprintf(stderr, "parse error at %zu:%zu: expected '(' after %s\n",
+                t.line, t.column, token_kind_name(t.kind));
+        p->had_error = 1;
+        return NULL;
+    }
+
     if (t.kind == TOKEN_LPAREN) {
         next(p);
         AstNode *e = parse_expression(p);
@@ -287,7 +297,8 @@ static AstNode *parse_factor(Parser *p) {
     AstNode *left = parse_unary(p);
     if (!left) return NULL;
 
-    while (p->current.kind == TOKEN_STAR || p->current.kind == TOKEN_SLASH) {
+    while (p->current.kind == TOKEN_STAR || p->current.kind == TOKEN_SLASH ||
+           p->current.kind == TOKEN_PERCENT) {
         Token op = p->current;
         next(p);
 
