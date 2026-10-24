@@ -1,6 +1,7 @@
 #ifndef CLAIR_AST_H
 #define CLAIR_AST_H
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum {
     AST_PROGRAM,
@@ -53,5 +54,12 @@ AstNode *ast_new(AstKind kind, const char *text, size_t text_len);
 int ast_add_child(AstNode *parent, AstNode *child);
 int ast_set_type(AstNode *node, const char *type_name, size_t type_len);
 void ast_free(AstNode *node);
+
+/*
+ * Integer literal text (decimal digits, optionally after a '-') to `words`
+ * 64-bit words, least significant first, two's complement.  Returns 1 when
+ * the value fits in a signed integer of 64 * words bits (words <= 16).
+ */
+int clair_decimal_to_words(const char *text, uint64_t *out, int words);
 
 #endif

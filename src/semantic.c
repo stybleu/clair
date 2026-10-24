@@ -27,6 +27,24 @@ static int is_numeric(const char *type) {
     return type && (strcmp(type, "int") == 0 || strcmp(type, "float") == 0);
 }
 
+/* Big integers: int128, int256, int512, int1024 (bits), 0 for any other type. */
+static int big_bits(const char *type) {
+    if (!type) return 0;
+    if (strcmp(type, "int128") == 0) return 128;
+    if (strcmp(type, "int256") == 0) return 256;
+    if (strcmp(type, "int512") == 0) return 512;
+    if (strcmp(type, "int1024") == 0) return 1024;
+    return 0;
+}
+
+static int is_big(const char *type) { return big_bits(type) != 0; }
+
+/* int counts as a 64-bit integer when big integers are mixed */
+static int int_bits(const char *type) {
+    if (type && strcmp(type, "int") == 0) return 64;
+    return big_bits(type);
+}
+
 static int is_list_type(const char *type) {
     return type && (
         strcmp(type, "list[int]") == 0 ||
@@ -136,6 +154,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
+    if (is_big(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
         (is_list_type(type) || is_dict_type(type) || is_matrix_type(type))) {
@@ -373,6 +392,9 @@ static int check_matrix_builtin(Semantic *s, AstNode *n) {
     return 1;
 }
 
+static int is_int_literal(const AstNode *n);
+static const char *type_int_literal(Semantic *s, AstNode *n, const char *type);
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -381,6 +403,34 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_binary[] = { "pow", "atan2", "hypot", NULL };
 
     const char *name = n->text;
+
+    /* int128(x) ... int1024(x): from int or another big integer, checked when narrowing */
+    if (is_big(name)) {
+        if (n->child_count != 1) {
+            fprintf(stderr, "semantic error: %s() expects 1 argument(s), got %zu\n", name, n->child_count);
+            s->had_error = 1;
+            return -1;
+        }
+        AstNode *arg = n->children[0];
+        const char *t = is_int_literal(arg) ? type_int_literal(s, arg, name) : expr_type(s, arg);
+        if (!t) return -1;
+        if (!int_bits(t)) {
+            fprintf(stderr, "semantic error: argument 1 of %s() expects an integer, got %s\n", name, t);
+            s->had_error = 1;
+            return -1;
+        }
+        char *type = malloc(strlen(name) + 1);
+        char *renamed = malloc(sizeof("@convert"));
+        if (!type || !renamed) { free(type); free(renamed); return -1; }
+        strcpy(type, name);
+        strcpy(renamed, "@convert");
+        free(n->text);
+        n->text = renamed;
+        int ok = set_type(n, type);
+        free(type);
+        return ok ? 1 : -1;
+    }
+
     size_t want = 0;
     int kind = 0; /* 1 float unary, 2 float binary, 3 abs, 4 min/max, 5 int(), 6 float() */
     for (size_t i = 0; float_unary[i]; i++) if (strcmp(name, float_unary[i]) == 0) { kind = 1; want = 1; }
@@ -401,6 +451,15 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     for (size_t i = 0; i < want; i++) {
         args[i] = expr_type(s, n->children[i]);
         if (!args[i]) return -1;
+        if ((kind == 5 || kind == 6) && is_big(args[i])) {
+            /* int(x) is checked (the value must fit), float(x) rounds to the nearest float */
+            char *renamed = malloc(sizeof("@convert"));
+            if (!renamed) return -1;
+            strcpy(renamed, "@convert");
+            free(n->text);
+            n->text = renamed;
+            return set_type(n, kind == 5 ? "int" : "float") ? 1 : -1;
+        }
         int ok = is_numeric(args[i]) || (kind == 5 && strcmp(args[i], "bool") == 0);
         if (!ok) {
             fprintf(stderr, "semantic error: argument %zu of %s() expects int or float, got %s\n",
@@ -425,11 +484,121 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     return 1;
 }
 
+/* 12345 or -12345 written directly in the program */
+static int is_int_literal(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_INTEGER) return 1;
+    return n->kind == AST_UNARY && n->text && strcmp(n->text, "-") == 0 && n->child_count == 1 &&
+           n->children[0]->kind == AST_INTEGER;
+}
+
+/*
+ * Gives an integer literal its type (int or a big integer) after checking
+ * that the value fits.  For a big integer, -123 becomes a single literal.
+ */
+static const char *type_int_literal(Semantic *s, AstNode *n, const char *type) {
+    int negative = n->kind == AST_UNARY;
+    AstNode *digits = negative ? n->children[0] : n;
+    if (!digits->text) return NULL;
+    size_t len = strlen(digits->text);
+    char *text = malloc(len + 2);
+    if (!text) return NULL;
+    snprintf(text, len + 2, "%s%s", negative ? "-" : "", digits->text);
+
+    int bits = int_bits(type);
+    uint64_t words[16];
+    if (!bits || !clair_decimal_to_words(text, words, bits / 64)) {
+        if (strcmp(type, "int") == 0) {
+            fprintf(stderr, "semantic error: integer %s is too large for int "
+                            "(64 bits): use int128, int256, int512 or int1024\n", text);
+        } else {
+            fprintf(stderr, "semantic error: integer %s is too large for %s\n", text, type);
+        }
+        s->had_error = 1;
+        free(text);
+        return NULL;
+    }
+
+    if (negative && is_big(type)) {
+        /* one literal "-123": the C code builds the value directly */
+        ast_free(digits);
+        free(n->children);
+        n->children = NULL;
+        n->child_count = n->child_capacity = 0;
+        n->kind = AST_INTEGER;
+        free(n->text);
+        n->text = text;
+    } else {
+        free(text);
+        if (negative && !set_type(digits, type)) return NULL;
+    }
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
+/* Turns `n` in place into @convert(n): a value changing to a wider (or, explicitly, narrower) type. */
+static int wrap_convert(AstNode *n, const char *type) {
+    AstNode *inner = malloc(sizeof(*inner));
+    char *name = malloc(sizeof("@convert"));
+    if (!inner || !name) { free(inner); free(name); return 0; }
+    *inner = *n;
+    memset(n, 0, sizeof(*n));
+    n->kind = AST_CALL;
+    strcpy(name, "@convert");
+    n->text = name;
+    if (!ast_add_child(n, inner)) return 0;
+    return set_type(n, type);
+}
+
+/* + - * / % and comparisons when one operand is a big integer */
+static const char *big_binary_type(Semantic *s, AstNode *n, const char *left, const char *right) {
+    const char *op = n->text;
+    if (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) {
+        fprintf(stderr, "semantic error: operator '%s' cannot mix %s and %s: convert with float(x)\n",
+                op, left, right);
+        s->had_error = 1;
+        return NULL;
+    }
+    if (!int_bits(left) || !int_bits(right)) {
+        fprintf(stderr, "semantic error: operator '%s' expects numbers, got %s and %s\n", op, left, right);
+        s->had_error = 1;
+        return NULL;
+    }
+    const char *type = int_bits(left) >= int_bits(right) ? left : right;
+    if (strcmp(left, type) != 0 && !wrap_convert(n->children[0], type)) return NULL;
+    if (strcmp(right, type) != 0 && !wrap_convert(n->children[1], type)) return NULL;
+
+    if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0 ||
+        strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+        return set_type(n, type) ? n->type_name : NULL;
+    }
+    if (strcmp(op, "==") == 0 || strcmp(op, "!=") == 0 || strcmp(op, "<") == 0 ||
+        strcmp(op, "<=") == 0 || strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) {
+        return set_type(n, "bool") ? n->type_name : NULL;
+    }
+    fprintf(stderr, "semantic error: operator '%s' is not supported for %s\n", op, type);
+    s->had_error = 1;
+    return NULL;
+}
+
 static const char *binary_type(Semantic *s, AstNode *n) {
     if (n->child_count != 2 || !n->text) return NULL;
-    const char *left = expr_type(s, n->children[0]);
-    const char *right = expr_type(s, n->children[1]);
+    AstNode *lhs = n->children[0], *rhs = n->children[1];
+    const char *left, *right;
+    /* a literal next to a big integer takes its type (it may be too large for int) */
+    if (is_int_literal(lhs) && !is_int_literal(rhs)) {
+        right = expr_type(s, rhs);
+        if (!right) return NULL;
+        left = is_big(right) ? type_int_literal(s, lhs, right) : expr_type(s, lhs);
+    } else if (is_int_literal(rhs) && !is_int_literal(lhs)) {
+        left = expr_type(s, lhs);
+        if (!left) return NULL;
+        right = is_big(left) ? type_int_literal(s, rhs, left) : expr_type(s, rhs);
+    } else {
+        left = expr_type(s, lhs);
+        right = expr_type(s, rhs);
+    }
     if (!left || !right) return NULL;
+    if (is_big(left) || is_big(right)) return big_binary_type(s, n, left, right);
 
     if (strcmp(n->text, "and") == 0 || strcmp(n->text, "or") == 0) {
         if (strcmp(left, "bool") != 0 || strcmp(right, "bool") != 0) {
@@ -537,7 +706,19 @@ static const char *check_matrix_make(Semantic *s, AstNode *n, const char *matrix
     return n->type_name;
 }
 
+static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char *expected);
+
 static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expected) {
+    if (is_big(expected) && is_int_literal(n)) return type_int_literal(s, n, expected);
+    const char *actual = expr_type_expected_plain(s, n, expected);
+    /* int -> int256, int128 -> int1024 ...: widening never loses anything */
+    if (actual && is_big(expected) && int_bits(actual) && int_bits(actual) < int_bits(expected)) {
+        return wrap_convert(n, expected) ? n->type_name : NULL;
+    }
+    return actual;
+}
+
+static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char *expected) {
     if (n && n->kind == AST_CALL && n->text && strcmp(n->text, "matrix") == 0 &&
         is_matrix_type(expected) && !find_function(s, "matrix")) {
         return check_matrix_make(s, n, expected);
@@ -556,8 +737,8 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
     switch (n->kind) {
         case AST_INTEGER:
-            set_type(n, "int");
-            return n->type_name;
+            if (is_big(n->type_name)) return n->type_name;   /* typed by its context */
+            return type_int_literal(s, n, "int");
         case AST_FLOAT:
             set_type(n, "float");
             return n->type_name;
@@ -809,9 +990,14 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return binary_type(s, n);
         case AST_UNARY: {
             if (n->child_count != 1 || !n->text) return NULL;
+            if (is_int_literal(n)) return type_int_literal(s, n, "int");   /* -9223372036854775808 fits */
             const char *operand = expr_type(s, n->children[0]);
             if (!operand) return NULL;
             if (strcmp(n->text, "-") == 0) {
+                if (is_big(operand)) {
+                    set_type(n, operand);
+                    return n->type_name;
+                }
                 if (!is_numeric(operand)) {
                     error_type(s, "unary '-' requires an int or float operand");
                     return NULL;
@@ -1025,7 +1211,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *type = expr_type(s, n->children[0]);
             if (!type) return 0;
             if (strcmp(type, "int") != 0 && strcmp(type, "float") != 0 &&
-                strcmp(type, "bool") != 0 && strcmp(type, "string") != 0) {
+                strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 && !is_big(type)) {
                 error_type(s, "print() received an unsupported type");
                 return 0;
             }

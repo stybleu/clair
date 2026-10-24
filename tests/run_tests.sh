@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.25 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.26 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -621,6 +621,17 @@ grep -Fq 'if (clair_rt_matmul_ok(a, b, c, a->rows, b->cols, a->cols)) {' build/t
 grep -Fq 'if (clair_rt_matmul_list_ok(a, k, b, n, c, n, m, n, k)) {' build/test_matmul_blocks.generated.c
 printf '%s\n' 'matmul_blocks.cl : OK -> produit de matrices en blocs, identique au bit pres, repli si c = a'
 expect_runtime_error matmul_blocks_bounds '7' 'Clair runtime error: matrix index [0][2] out of bounds for shape 2x2'
+
+./build/clair tests/big_integers.cl -o build/test_big_integers
+[ "$(./build/test_big_integers)" = "$(cat tests/big_integers.expected)" ]
+grep -Fq 'r = clair_i1024_mul(r, clair_i1024_from_i64(i));' build/test_big_integers.generated.c
+printf '%s\n' 'big_integers.cl : OK -> int128, int256, int512, int1024 : 100!, fibonacci(300), 2^1000, classes, conversions'
+expect_runtime_error big_overflow_runtime '1' 'Clair runtime error: int128 overflow'
+expect_runtime_error big_div_zero_runtime '2' 'Clair runtime error: division by zero'
+expect_runtime_error big_narrow_runtime '123456789012345678' 'Clair runtime error: int() argument out of range'
+expect_compile_error invalid_int_literal_too_large "integer 9223372036854775808 is too large for int (64 bits): use int128, int256, int512 or int1024"
+expect_compile_error invalid_big_literal_too_large "integer 170141183460469231731687303715884105728 is too large for int128"
+expect_compile_error invalid_big_float_mix "operator '+' cannot mix int256 and float: convert with float(x)"
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

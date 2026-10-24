@@ -6,6 +6,7 @@ Son compilateur est écrit en C et utilise Clang.
 ## Fonctionnalités
 
 - Types int, float, bool et string
+- Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres), dépassements détectés
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
 - Fonctions, conditions et boucles, dont `for v in liste` comme en Python
 - Listes et dictionnaires typés
@@ -69,6 +70,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.26](docs/README_V0.26.md) : grands entiers int128 à int1024, nombres trop grands pour int refusés
 - [Clair V0.25](docs/README_V0.25.md) : produit de matrices en blocs, rapport en temps médian
 - [Clair V0.24](docs/README_V0.24.md) : `for v in liste`, rapport mesuré sur un seul cœur
 - [Clair V0.23](docs/README_V0.23.md) : doubles boucles vérifiées une seule fois, option `--sans-verif`
