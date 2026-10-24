@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.19 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.20 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -499,7 +499,7 @@ expect_compile_error invalid_method_duplicate "duplicate method 'Counter.reset'"
 expect_compile_error invalid_method_field_conflict "method 'Counter.count' conflicts with a field of the same name"
 expect_compile_error invalid_method_on_non_object "method call 'foo' expects a class object, got int"
 expect_compile_error invalid_method_field_call "'Counter.count' is a field, not a method"
-expect_compile_error invalid_append_on_field "append() needs a list variable"
+expect_compile_error invalid_append_on_call "append() needs a list variable or field"
 expect_compile_error invalid_assignment_target "invalid assignment target"
 
 ./build/clair tests/c_name_collisions.cl -o build/test_c_name_collisions
@@ -556,6 +556,19 @@ expect_compile_error invalid_matrix_value "matrix[float] element assignment expe
 expect_compile_error invalid_matrix_len "len() of a matrix is ambiguous: use rows(m) or cols(m)"
 expect_runtime_error matrix_bounds_runtime '0\n1\n2' 'Clair runtime error: matrix index [2][0] out of bounds for shape 2x2'
 expect_runtime_error matrix_negative_runtime '' 'Clair runtime error: matrix() size cannot be negative'
+
+./build/clair tests/field_writes.cl -o build/test_field_writes
+out_field_writes="$(./build/test_field_writes)"
+expected_field_writes="$(printf '3\n0.5\n8.5\n14.5\n2\n2\n7\n9\n42\n3\n0\n1')"
+[ "$out_field_writes" = "$expected_field_writes" ]
+grep -Fq 's = s + clair_data_self__w[i * clair_cols_self__w + j] * clair_data_x[j];' build/test_field_writes.generated.c
+printf '%s\n' 'field_writes.cl : OK -> obj.items[i] = x, obj.w[i][j] = x, obj.items.append(x), boucles rapides sur self.w'
+
+./build/clair tests/xor_training.cl -o build/test_xor_training
+out_xor_training="$(./build/test_xor_training)"
+expected_xor_training="$(printf '3\n97\n97\n4\n1')"
+[ "$out_xor_training" = "$expected_xor_training" ]
+printf '%s\n' 'xor_training.cl : OK -> reseau de neurones entraine sur XOR par descente de gradient'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

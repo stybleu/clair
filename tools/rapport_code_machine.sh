@@ -34,19 +34,21 @@ best_of_3() {
 
 printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$(clang --version | head -n 1 | sed 's/ (.*//')"
 
-for name in collatz dot axpy matmul matrice; do
-    kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
+for name in collatz dot axpy matmul matrice reseau; do
+    # hot function: "// noyau: name" in the program, otherwise its first def
+    kernel=$(grep -m 1 -oE '^// noyau: [A-Za-z_]+' "$BENCH/$name.cl" | cut -d' ' -f3)
+    [ -n "$kernel" ] || kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
 
     if ! "$ROOT/build/clair" "$BENCH/$name.cl" -o "$WORK/$name" > "$WORK/$name.log" 2>&1; then
         printf '%-8s : ECHEC de compilation Clair\n' "$name"
         continue
     fi
-    clang -std=c11 -O2 -fwrapv "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" -lm 2>> "$WORK/$name.log"
 
     # Keep the hot function out of line so its machine code can be read alone.
     sed -E "s/^static ([a-z0-9_]+) clair_fn_${kernel}\(/static __attribute__((noinline)) \1 clair_fn_${kernel}(/" \
         "$WORK/$name.generated.c" > "$WORK/$name.noinline.c"
-    clang -std=c11 -O2 -fwrapv -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
     vec=$(awk -v f="clair_fn_${kernel}" '$0 ~ "^"f":" {p=1} p {print} p && /\.size|^\.Lfunc_end/ {exit}' "$WORK/$name.s" |
           grep -cE "$SIMD_RE")
     if [ "$vec" -gt 0 ]; then vtxt="oui"; else vtxt="non"; fi

@@ -234,7 +234,52 @@ static int tree_may_grow_lists(const AstNode *n) {
     return 0;
 }
 
+/*
+ * Functions that may rebind an object field (`obj.f = x`), directly or
+ * through calls.  A loop that reads self.w[i][j] can only hoist self->w
+ * when nothing it calls can do that.
+ */
+static const char *field_writer_fn[SAFE_FN_MAX];
+static size_t field_writer_count = 0;
+
+static int fn_writes_fields(const char *name) {
+    if (field_writer_count >= SAFE_FN_MAX) return 1;
+    for (size_t i = 0; i < field_writer_count; i++) {
+        if (strcmp(field_writer_fn[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int tree_may_rebind_fields(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_MEMBER_ASSIGN) return 1;
+    if (n->kind == AST_CALL && n->text && n->text[0] != '@' &&
+        strcmp(n->text, "len") != 0 && strcmp(n->text, "input_int") != 0 &&
+        fn_writes_fields(n->text)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (tree_may_rebind_fields(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+static void compute_field_writers(const AstNode *program) {
+    field_writer_count = 0;
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (size_t i = 0; i < program->child_count; i++) {
+            const AstNode *fn = program->children[i];
+            if (fn->kind != AST_FUNCTION || !fn->text || fn_writes_fields(fn->text)) continue;
+            if (tree_may_rebind_fields(fn)) {
+                if (field_writer_count < SAFE_FN_MAX) field_writer_fn[field_writer_count++] = fn->text;
+                changed = 1;
+            }
+        }
+    }
+}
+
 static void compute_safe_functions(const AstNode *program) {
+    compute_field_writers(program);
     unsafe_fn_count = 0;
     int changed = 1;
     while (changed) {
@@ -397,7 +442,7 @@ static int affine_split(const AstNode *e, const char *v, const AstNode *body, ch
 }
 
 typedef struct {
-    const char *base;
+    const char *base;       /* name used in clair_data_<base> */
     const char *list_type;
     char *c0;
     char *c1;
@@ -409,9 +454,12 @@ typedef struct {
     size_t check_count;
     FastAccess accesses[FAST_MAX];
     size_t access_count;
-    const char *bases[FAST_MAX];
+    const char *bases[FAST_MAX];       /* name used in clair_data_<base> */
+    const char *base_exprs[FAST_MAX];  /* C expression of the list or matrix: v, self->w */
     const char *base_types[FAST_MAX];
     size_t base_count;
+    char *owned[FAST_MAX * 2];         /* strings built for field chains */
+    size_t owned_count;
 } FastPlan;
 
 static void fast_plan_free(FastPlan *plan) {
@@ -419,7 +467,15 @@ static void fast_plan_free(FastPlan *plan) {
         free(plan->checks[i].c0);
         free(plan->checks[i].c1);
     }
-    plan->check_count = plan->access_count = plan->base_count = 0;
+    for (size_t i = 0; i < plan->owned_count; i++) free(plan->owned[i]);
+    plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+}
+
+static const char *fast_plan_expr(const FastPlan *plan, const char *base) {
+    for (size_t i = 0; i < plan->base_count; i++) {
+        if (strcmp(plan->bases[i], base) == 0) return plan->base_exprs[i];
+    }
+    return base;
 }
 
 static void fast_plan_add_check(FastPlan *plan, const char *base, const char *type, char *c0, char *c1, int dim) {
@@ -433,83 +489,157 @@ static void fast_plan_add_check(FastPlan *plan, const char *base, const char *ty
     plan->checks[plan->check_count++] = (BoundsCheck){ base, type, c0, c1, dim };
 }
 
-static void fast_plan_add_base(FastPlan *plan, const char *base, const char *type) {
+static void fast_plan_add_base(FastPlan *plan, const char *base, const char *expr, const char *type) {
     for (size_t i = 0; i < plan->base_count; i++) {
         if (strcmp(plan->bases[i], base) == 0) return;
     }
     plan->bases[plan->base_count] = base;
+    plan->base_exprs[plan->base_count] = expr;
     plan->base_types[plan->base_count++] = type;
 }
 
 /* m[r][c]: both indices proven in range, the access becomes data[r * cols + c] */
-static void fast_plan_add_matrix(FastPlan *plan, const AstNode *node, const char *base, const char *type,
-                                 char *r0, char *r1, char *k0, char *k1) {
+static void fast_plan_add_matrix(FastPlan *plan, const AstNode *node, const char *base, const char *expr,
+                                 const char *type, char *r0, char *r1, char *k0, char *k1) {
     if (plan->access_count >= FAST_MAX || plan->check_count + 2 > FAST_MAX || plan->base_count >= FAST_MAX) {
         free(r0); free(r1); free(k0); free(k1);
         return;
     }
     plan->accesses[plan->access_count++] = (FastAccess){ node, base };
-    fast_plan_add_base(plan, base, type);
+    fast_plan_add_base(plan, base, expr, type);
     fast_plan_add_check(plan, base, type, r0, r1, 1);
     fast_plan_add_check(plan, base, type, k0, k1, 2);
 }
 
-static void fast_plan_add(FastPlan *plan, const AstNode *node, const char *base, const char *list_type,
-                          char *c0, char *c1) {
+static void fast_plan_add(FastPlan *plan, const AstNode *node, const char *base, const char *expr,
+                          const char *list_type, char *c0, char *c1) {
     if (plan->access_count >= FAST_MAX || plan->check_count >= FAST_MAX || plan->base_count >= FAST_MAX) {
         free(c0); free(c1);
         return;
     }
     plan->accesses[plan->access_count++] = (FastAccess){ node, base };
-
-    fast_plan_add_base(plan, base, list_type);
-
+    fast_plan_add_base(plan, base, expr, list_type);
     fast_plan_add_check(plan, base, list_type, c0, c1, 0);
+}
+
+/* Does the loop body call a function that may reassign an object field? */
+static int tree_calls_field_writer(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && n->text[0] != '@' &&
+        strcmp(n->text, "len") != 0 && strcmp(n->text, "input_int") != 0 &&
+        fn_writes_fields(n->text)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (tree_calls_field_writer(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+static int tree_assigns_field(const AstNode *n, const char *field) {
+    if (!n) return 0;
+    if (n->kind == AST_MEMBER_ASSIGN && n->text && strcmp(n->text, field) == 0) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (tree_assigns_field(n->children[i], field)) return 1;
+    }
+    return 0;
+}
+
+/*
+ * Resolves the list or matrix being indexed to a stable base: a variable the
+ * body never reassigns, or a field chain (self.w, net.layer.b) that the body
+ * cannot rebind (no assignment to those fields, no call to a function that
+ * assigns fields).
+ * Returns 1 and sets the clair_data_<name> suffix and the C expression.
+ */
+static int fast_base_of(FastPlan *plan, const AstNode *e, const char *v, const AstNode *body,
+                        const char **name, const char **expr) {
+    if (e->kind == AST_IDENTIFIER && e->text) {
+        if (name_changes_in(body, e->text) || strcmp(e->text, v) == 0) return 0;
+        *name = *expr = e->text;
+        return 1;
+    }
+    if (e->kind != AST_MEMBER || plan->owned_count + 2 > FAST_MAX * 2) return 0;
+    if (tree_calls_field_writer(body)) return 0;
+
+    char suffix[256] = "", cexpr[256] = "";
+    const AstNode *chain[32];
+    size_t depth = 0;
+    const AstNode *cur = e;
+    while (cur->kind == AST_MEMBER && cur->child_count == 1 && cur->text && depth < 32) {
+        if (tree_assigns_field(body, cur->text)) return 0;
+        chain[depth++] = cur;
+        cur = cur->children[0];
+    }
+    if (cur->kind != AST_IDENTIFIER || !cur->text || depth == 32) return 0;
+    if (name_changes_in(body, cur->text) || strcmp(cur->text, v) == 0) return 0;
+
+    snprintf(suffix, sizeof(suffix), "%s", cur->text);
+    snprintf(cexpr, sizeof(cexpr), "%s", cur->text);
+    for (size_t i = depth; i > 0; i--) {
+        size_t sl = strlen(suffix), cl = strlen(cexpr);
+        snprintf(suffix + sl, sizeof(suffix) - sl, "__%s", chain[i - 1]->text);
+        snprintf(cexpr + cl, sizeof(cexpr) - cl, "->%s", chain[i - 1]->text);
+    }
+    char *ns = str_dup(suffix), *ne = str_dup(cexpr);
+    if (!ns || !ne) { free(ns); free(ne); return 0; }
+    plan->owned[plan->owned_count++] = ns;
+    plan->owned[plan->owned_count++] = ne;
+    *name = ns;
+    *expr = ne;
+    return 1;
 }
 
 static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, const AstNode *body) {
     if (!n) return;
 
-    const AstNode *index = NULL;
-    const char *base = NULL, *list_type = NULL;
-
-    if (n->kind == AST_INDEX && n->child_count == 2 &&
-        n->children[0]->kind == AST_IDENTIFIER && is_list_type(n->children[0]->type_name)) {
-        base = n->children[0]->text;
+    /* list read x[i] / write x[i] = value (x a variable or a field chain) */
+    const AstNode *index = NULL, *base_node = NULL;
+    const char *list_type = NULL;
+    if (n->kind == AST_INDEX && n->child_count == 2 && is_list_type(n->children[0]->type_name)) {
+        base_node = n->children[0];
         list_type = n->children[0]->type_name;
         index = n->children[1];
-    } else if (n->kind == AST_INDEX_ASSIGN && n->child_count == 2 && is_list_type(n->type_name)) {
-        base = n->text;
+    } else if (n->kind == AST_INDEX_ASSIGN && is_list_type(n->type_name) &&
+               ((n->child_count == 2 && n->text) || (n->child_count == 3 && !n->text))) {
         list_type = n->type_name;
         index = n->children[0];
+        base_node = n->text ? NULL : n->children[2];
     }
-
-    if (base && !name_changes_in(body, base) && strcmp(base, v) != 0) {
+    if (list_type) {
+        const char *name = NULL, *expr = NULL;
+        int ok = base_node ? fast_base_of(plan, base_node, v, body, &name, &expr)
+                           : (!name_changes_in(body, n->text) && strcmp(n->text, v) != 0 &&
+                              (name = expr = n->text) != NULL);
         char *c0, *c1;
-        if (affine_split(index, v, body, &c0, &c1)) fast_plan_add(plan, n, base, list_type, c0, c1);
+        if (ok && affine_split(index, v, body, &c0, &c1)) fast_plan_add(plan, n, name, expr, list_type, c0, c1);
     }
 
     /* matrix read m[r][c] or write m[r][c] = value */
-    const AstNode *row_index = NULL, *col_index = NULL;
-    const char *mbase = NULL, *mtype = NULL;
+    const AstNode *row_index = NULL, *col_index = NULL, *mnode = NULL;
+    const char *mtype = NULL;
+    int mvar = 0;
     if (n->kind == AST_INDEX && n->child_count == 2 && n->children[0]->kind == AST_INDEX &&
-        is_matrix_row_type(n->children[0]->type_name) &&
-        n->children[0]->children[0]->kind == AST_IDENTIFIER) {
-        mbase = n->children[0]->children[0]->text;
-        mtype = n->children[0]->children[0]->type_name;
+        is_matrix_row_type(n->children[0]->type_name)) {
+        mnode = n->children[0]->children[0];
+        mtype = mnode->type_name;
         row_index = n->children[0]->children[1];
         col_index = n->children[1];
-    } else if (n->kind == AST_MATRIX_SET && n->child_count == 3 && is_matrix_type(n->type_name)) {
-        mbase = n->text;
+    } else if (n->kind == AST_MATRIX_SET && is_matrix_type(n->type_name) &&
+               ((n->child_count == 3 && n->text) || (n->child_count == 4 && !n->text))) {
+        mvar = n->text != NULL;
+        mnode = mvar ? NULL : n->children[3];
         mtype = n->type_name;
         row_index = n->children[0];
         col_index = n->children[1];
     }
-    if (mbase && !name_changes_in(body, mbase) && strcmp(mbase, v) != 0) {
+    if (mtype) {
+        const char *name = NULL, *expr = NULL;
+        int ok = mnode ? fast_base_of(plan, mnode, v, body, &name, &expr)
+                       : (!name_changes_in(body, n->text) && strcmp(n->text, v) != 0 &&
+                          (name = expr = n->text) != NULL);
         char *r0, *r1, *k0, *k1;
-        if (affine_split(row_index, v, body, &r0, &r1)) {
+        if (ok && affine_split(row_index, v, body, &r0, &r1)) {
             if (affine_split(col_index, v, body, &k0, &k1)) {
-                fast_plan_add_matrix(plan, n, mbase, mtype, r0, r1, k0, k1);
+                fast_plan_add_matrix(plan, n, name, expr, mtype, r0, r1, k0, k1);
             } else {
                 free(r0); free(r1);
             }
@@ -521,7 +651,7 @@ static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, c
 
 /* Builds the plan for one `for` loop; returns 0 when the loop must stay checked only. */
 static int fast_plan_for(const AstNode *loop, FastPlan *plan) {
-    plan->check_count = plan->access_count = plan->base_count = 0;
+    plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
     if (!loop || loop->kind != AST_FOR || !loop->text) return 0;
     if (loop->child_count != 2 && loop->child_count != 3) return 0;  /* step must be 1 */
 
@@ -1224,10 +1354,14 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 const char *fast_base = fast_access_base(n);
                 if (fast_base) {
                     /* both indices proven in range: plain row-major access */
+                    int64_t col0;
                     fprintf(f, "clair_data_%s[", fast_base);
                     if (!emit_operand(f, row->children[1], PREC_MULTIPLICATIVE, 0)) return 0;
-                    fprintf(f, " * clair_cols_%s + ", fast_base);
-                    if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
+                    fprintf(f, " * clair_cols_%s", fast_base);
+                    if (!(const_int_value(n->children[1], &col0) && col0 == 0)) {
+                        fputs(" + ", f);
+                        if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
+                    }
                     fputc(']', f);
                     return 1;
                 }
@@ -1595,6 +1729,16 @@ static size_t clair_simd_v4_loop_counter = 0;
 
 static int emit_stmt(FILE *f, const AstNode *n, int depth);
 
+/* Emits the target of a write: the variable in `text`, or the field chain stored as an extra last child. */
+static int emit_write_target(FILE *f, const AstNode *n, size_t plain_children) {
+    if (n->text) {
+        fputs(n->text, f);
+        return 1;
+    }
+    if (n->child_count != plain_children + 1) return 0;
+    return emit_operand(f, n->children[plain_children], PREC_POSTFIX, 0);
+}
+
 /* Can evaluating `n` stop the program or run user code (calls, bounds, division)? */
 static int node_may_fail(const AstNode *n) {
     if (!n) return 0;
@@ -1751,13 +1895,17 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             return 1;
 
         case AST_MATRIX_SET: {
-            if (n->child_count != 3 || !n->type_name || !n->text) return 0;
+            if ((n->child_count != 3 && n->child_count != 4) || !n->type_name) return 0;
             const char *fast_base = fast_access_base(n);
             if (fast_base) {
+                int64_t col0;
                 fprintf(f, "clair_data_%s[", fast_base);
                 if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
-                fprintf(f, " * clair_cols_%s + ", fast_base);
-                if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
+                fprintf(f, " * clair_cols_%s", fast_base);
+                if (!(const_int_value(n->children[1], &col0) && col0 == 0)) {
+                    fputs(" + ", f);
+                    if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
+                }
                 fputs("] = ", f);
                 if (!emit_expr(f, n->children[2])) return 0;
                 fputs(";\n", f);
@@ -1765,7 +1913,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             }
             const char *accessor = matrix_accessor_name(n->type_name);
             if (!node_may_fail(n->children[0]) && !node_may_fail(n->children[1]) && !node_may_fail(n->children[2])) {
-                fprintf(f, "*%s(%s, ", accessor, n->text);
+                fprintf(f, "*%s(", accessor);
+                if (!emit_write_target(f, n, 3)) return 0;
+                fputs(", ", f);
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
@@ -1790,8 +1940,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             if (!emit_expr(f, n->children[2])) return 0;
             fputs(";\n", f);
             indent(f, depth + 1);
-            fprintf(f, "*%s(%s, __clair_row_%zu, __clair_col_%zu) = __clair_value_%zu;\n",
-                    accessor, n->text, id, id, id);
+            fprintf(f, "*%s(", accessor);
+            if (!emit_write_target(f, n, 3)) return 0;
+            fprintf(f, ", __clair_row_%zu, __clair_col_%zu) = __clair_value_%zu;\n", id, id, id);
             indent(f, depth);
             fputs("}\n", f);
             return 1;
@@ -1821,7 +1972,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                  * evaluate-value, then check order used below.
                  */
                 if (!node_may_fail(n->children[0]) && !node_may_fail(n->children[1])) {
-                    fprintf(f, "*%s(%s, ", list_accessor_name(n->type_name), n->text);
+                    fprintf(f, "*%s(", list_accessor_name(n->type_name));
+                    if (!emit_write_target(f, n, 2)) return 0;
+                    fputs(", ", f);
                     if (!emit_expr(f, n->children[0])) return 0;
                     fputs(") = ", f);
                     if (!emit_expr(f, n->children[1])) return 0;
@@ -1839,8 +1992,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                 if (!emit_expr(f, n->children[1])) return 0;
                 fputs(";\n", f);
                 indent(f, depth + 1);
-                fprintf(f, "*%s(%s, __clair_list_index_%zu) = __clair_list_value_%zu;\n",
-                        list_accessor_name(n->type_name), n->text, id, id);
+                fprintf(f, "*%s(", list_accessor_name(n->type_name));
+                if (!emit_write_target(f, n, 2)) return 0;
+                fprintf(f, ", __clair_list_index_%zu) = __clair_list_value_%zu;\n", id, id);
                 indent(f, depth);
                 fputs("}\n", f);
                 return 1;
@@ -1860,9 +2014,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                 if (!emit_expr(f, n->children[1])) return 0;
                 fputs(";\n", f);
                 indent(f, depth + 1);
-                fprintf(f,
-                        "*(%s *)clair_rt_dict_set_slot(%s, __clair_dict_key_%zu) = __clair_dict_value_%zu;\n",
-                        value_type, n->text, id, id);
+                fprintf(f, "*(%s *)clair_rt_dict_set_slot(", value_type);
+                if (!emit_write_target(f, n, 2)) return 0;
+                fprintf(f, ", __clair_dict_key_%zu) = __clair_dict_value_%zu;\n", id, id);
                 indent(f, depth);
                 fputs("}\n", f);
                 return 1;
@@ -1882,8 +2036,9 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(";\n", f);
             indent(f, depth + 1);
-            fprintf(f, "*(%s *)clair_rt_list_append_slot(%s) = __clair_list_append_value_%zu;\n",
-                    element_type, n->text, id);
+            fprintf(f, "*(%s *)clair_rt_list_append_slot(", element_type);
+            if (!emit_write_target(f, n, 1)) return 0;
+            fprintf(f, ") = __clair_list_append_value_%zu;\n", id);
             indent(f, depth);
             fputs("}\n", f);
             return 1;
@@ -2095,7 +2250,8 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                             fputs(" &&\n", f);
                             indent(f, inner + 1);
                         }
-                        if (b->dim == 0) fprintf(f, "clair_rt_affine_ok(%s, %s, %s, ", b->base, b->c0, b->c1);
+                        const char *bexpr = fast_plan_expr(&plan, b->base);
+                        if (b->dim == 0) fprintf(f, "clair_rt_affine_ok(%s, %s, %s, ", bexpr, b->c0, b->c1);
                         else fprintf(f, "clair_rt_affine_in(%s, %s, ", b->c0, b->c1);
                         if (start_text) fputs(start_text, f);
                         else if (!start_node) fputs("0", f);
@@ -2103,8 +2259,8 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                         fputs(", ", f);
                         if (stop_text) fputs(stop_text, f);
                         else if (!emit_expr(f, stop_node)) return 0;
-                        if (b->dim == 1) fprintf(f, ", %s->rows", b->base);
-                        if (b->dim == 2) fprintf(f, ", %s->cols", b->base);
+                        if (b->dim == 1) fprintf(f, ", %s->rows", bexpr);
+                        if (b->dim == 2) fprintf(f, ", %s->cols", bexpr);
                         fputc(')', f);
                     }
                     fputs(") {\n", f);
@@ -2115,10 +2271,10 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                                                   : list_element_c_type(plan.base_types[i]);
                         indent(f, inner + 1);
                         fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n",
-                                elem, plan.bases[i], elem, plan.bases[i]);
+                                elem, plan.bases[i], elem, plan.base_exprs[i]);
                         if (matrix) {
                             indent(f, inner + 1);
-                            fprintf(f, "int64_t clair_cols_%s = %s->cols;\n", plan.bases[i], plan.bases[i]);
+                            fprintf(f, "int64_t clair_cols_%s = %s->cols;\n", plan.bases[i], plan.base_exprs[i]);
                         }
                     }
 

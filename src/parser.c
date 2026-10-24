@@ -740,6 +740,28 @@ static AstNode *take_child(AstNode *node, size_t index) {
     return child;
 }
 
+/* obj.field or obj.a.b: a pure field chain that can be the target of a write */
+static int is_field_chain(const AstNode *n) {
+    if (!n || n->kind != AST_MEMBER || n->child_count != 1) return 0;
+    const AstNode *base = n->children[0];
+    return base->kind == AST_IDENTIFIER || is_field_chain(base);
+}
+
+/*
+ * Builds a write whose target is either a variable (stored in `text`) or a
+ * field chain (stored as an extra last child, `text` left NULL).
+ */
+static AstNode *make_write(AstKind kind, AstNode *target, AstNode **children, size_t count) {
+    int is_var = target->kind == AST_IDENTIFIER;
+    AstNode *n = ast_new(kind, is_var ? target->text : NULL, is_var ? strlen(target->text) : 0);
+    if (!n) return NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (!ast_add_child(n, children[i])) { ast_free(n); return NULL; }
+        children[i] = NULL;
+    }
+    return n;
+}
+
 /*
  * Statements that start with an identifier.  The left-hand side is parsed
  * as an ordinary expression, then its shape decides the statement:
@@ -756,7 +778,7 @@ static AstNode *parse_identifier_statement(Parser *p) {
     if (!lhs) return NULL;
 
     if (lhs->kind == AST_METHOD_CALL && lhs->text && strcmp(lhs->text, "append") == 0 &&
-        lhs->children[0]->kind == AST_IDENTIFIER) {
+        (lhs->children[0]->kind == AST_IDENTIFIER || is_field_chain(lhs->children[0]))) {
         if (lhs->child_count != 2) {
             fprintf(stderr, "parse error at %zu:%zu: append() expects exactly 1 argument\n",
                     start.line, start.column);
@@ -764,7 +786,12 @@ static AstNode *parse_identifier_statement(Parser *p) {
             ast_free(lhs);
             return NULL;
         }
-        AstNode *n = make_node(AST_LIST_APPEND, lhs->children[0]->text, take_child(lhs, 1), NULL);
+        AstNode *target = lhs->children[0];
+        AstNode *kids[2] = { take_child(lhs, 1), NULL };
+        size_t count = 1;
+        if (target->kind != AST_IDENTIFIER) { kids[1] = take_child(lhs, 0); count = 2; }
+        AstNode *n = make_write(AST_LIST_APPEND, kids[1] ? kids[1] : target, kids, count);
+        for (size_t i = 0; i < 2; i++) ast_free(kids[i]);
         ast_free(lhs);
         return n;
     }
@@ -785,17 +812,28 @@ static AstNode *parse_identifier_statement(Parser *p) {
 
             case AST_INDEX:
                 if (lhs->children[0]->kind == AST_INDEX &&
-                    lhs->children[0]->children[0]->kind == AST_IDENTIFIER) {
-                    /* m[i][j] = value */
+                    (lhs->children[0]->children[0]->kind == AST_IDENTIFIER ||
+                     is_field_chain(lhs->children[0]->children[0]))) {
+                    /* m[i][j] = value  or  obj.m[i][j] = value */
                     AstNode *row = lhs->children[0];
-                    n = make_node(AST_MATRIX_SET, row->children[0]->text, take_child(row, 1), take_child(lhs, 1));
-                    if (n && !ast_add_child(n, value)) { ast_free(n); n = NULL; value = NULL; }
-                    if (!n) ast_free(value);
+                    AstNode *target = row->children[0];
+                    AstNode *kids[4] = { take_child(row, 1), take_child(lhs, 1), value, NULL };
+                    size_t count = 3;
+                    if (target->kind != AST_IDENTIFIER) { kids[3] = take_child(row, 0); count = 4; }
+                    n = make_write(AST_MATRIX_SET, kids[3] ? kids[3] : target, kids, count);
+                    for (size_t i = 0; i < 4; i++) ast_free(kids[i]);
+                    break;
+                }
+                if (is_field_chain(lhs->children[0])) {
+                    /* obj.items[i] = value */
+                    AstNode *kids[3] = { take_child(lhs, 1), value, take_child(lhs, 0) };
+                    n = make_write(AST_INDEX_ASSIGN, kids[2], kids, 3);
+                    for (size_t i = 0; i < 3; i++) ast_free(kids[i]);
                     break;
                 }
                 if (lhs->children[0]->kind != AST_IDENTIFIER) {
                     fprintf(stderr,
-                            "parse error at %zu:%zu: indexed assignment target must be a variable\n",
+                            "parse error at %zu:%zu: indexed assignment target must be a variable or a field\n",
                             start.line, start.column);
                     p->had_error = 1;
                     ast_free(value);

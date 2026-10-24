@@ -748,7 +748,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             const AstNode *cls = receiver ? find_class(s, receiver) : NULL;
             if (!cls) {
                 if (receiver && is_list_type(receiver) && strcmp(n->text, "append") == 0) {
-                    error_type(s, "append() needs a list variable; store the list in a variable first");
+                    error_type(s, "append() needs a list variable or field (v.append(x), obj.items.append(x))");
                     return NULL;
                 }
                 fprintf(stderr, "semantic error: method call '%s' expects a class object, got %s\n",
@@ -838,6 +838,23 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
 static int check_block(Semantic *s, AstNode *block, int create_scope);
 
+/*
+ * Type of the target of a write: a variable named by `text`, or a field
+ * chain stored as an extra last child (then `text` is NULL).
+ */
+static const char *write_target_type(Semantic *s, AstNode *n, size_t plain_children, const char *what) {
+    if (!n->text) {
+        if (n->child_count != plain_children + 1) return NULL;
+        return expr_type(s, n->children[plain_children]);
+    }
+    const char *base = find_var(s, n->text);
+    if (!base) {
+        fprintf(stderr, "semantic error: %s undefined variable '%s'\n", what, n->text);
+        s->had_error = 1;
+    }
+    return base;
+}
+
 static int check_stmt(Semantic *s, AstNode *n) {
     switch (n->kind) {
         case AST_LET: {
@@ -899,12 +916,8 @@ static int check_stmt(Semantic *s, AstNode *n) {
             return 1;
         }
         case AST_INDEX_ASSIGN: {
-            const char *base = find_var(s, n->text);
-            if (!base) {
-                fprintf(stderr, "semantic error: assignment to undefined variable '%s'\n", n->text);
-                s->had_error = 1;
-                return 0;
-            }
+            const char *base = write_target_type(s, n, 2, "assignment to");
+            if (!base) return 0;
 
             const char *index = expr_type(s, n->children[0]);
 
@@ -951,15 +964,12 @@ static int check_stmt(Semantic *s, AstNode *n) {
             return 0;
         }
         case AST_MATRIX_SET: {
-            if (n->child_count != 3) return 0;
-            const char *base = find_var(s, n->text);
-            if (!base) {
-                fprintf(stderr, "semantic error: assignment to undefined variable '%s'\n", n->text);
-                s->had_error = 1;
-                return 0;
-            }
+            if (n->child_count != 3 && n->child_count != 4) return 0;
+            const char *base = write_target_type(s, n, 3, "assignment to");
+            if (!base) return 0;
             if (!is_matrix_type(base)) {
-                fprintf(stderr, "semantic error: '%s[i][j] = ...' needs a matrix, got %s\n", n->text, base);
+                fprintf(stderr, "semantic error: '%s[i][j] = ...' needs a matrix, got %s\n",
+                        n->text ? n->text : "field", base);
                 s->had_error = 1;
                 return 0;
             }
@@ -983,12 +993,8 @@ static int check_stmt(Semantic *s, AstNode *n) {
             return 1;
         }
         case AST_LIST_APPEND: {
-            const char *base = find_var(s, n->text);
-            if (!base) {
-                fprintf(stderr, "semantic error: append on undefined variable '%s'\n", n->text);
-                s->had_error = 1;
-                return 0;
-            }
+            const char *base = write_target_type(s, n, 1, "append on");
+            if (!base) return 0;
             if (!is_list_type(base)) {
                 fprintf(stderr, "semantic error: append() expects a list, got %s\n", base);
                 s->had_error = 1;

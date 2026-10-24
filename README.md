@@ -11,6 +11,8 @@ Son compilateur est écrit en C et utilise Clang.
 - Listes et dictionnaires typés
 - Matrices `matrix[float]` et `matrix[int]` : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
+- Écriture directe dans les champs : `self.w[i][j] = x`, `self.items.append(x)`
+- Exemple complet : réseau de neurones entraîné sur XOR (`tests/xor_training.cl`)
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
 - Boucles rapides : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
 - C généré lisible, proche du C écrit à la main
@@ -40,7 +42,7 @@ cmake --build build -j2
 bash tools/rapport_code_machine.sh
 ```
 
-Compare cinq programmes types avec leur version écrite à la main en C, et indique si Clang a vectorisé chaque boucle.
+Compare six programmes types avec leur version écrite à la main en C, et indique si Clang a vectorisé chaque boucle.
 
 ## Tests
 
@@ -57,6 +59,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.20](docs/README_V0.20.md) : écriture dans les champs, boucles rapides sur `self.w`, apprentissage de XOR
 - [Clair V0.19](docs/README_V0.19.md) : matrices, couche dense d'un réseau de neurones
 - [Clair V0.18](docs/README_V0.18.md) : fonctions mathématiques, conversions, `%`, notation scientifique
 - [Clair V0.17](docs/README_V0.17.md) : boucles rapides, C lisible, rapport du code machine
