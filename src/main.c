@@ -41,6 +41,7 @@ static int run_clang(const char *cpath, const char *output) {
             "-fwrapv",
             "-Wall",
             "-Wextra",
+            "-Wno-unused-function",
             (char *)cpath,
             "-o",
             (char *)output,
@@ -93,6 +94,7 @@ int main(int argc, char **argv) {
         free(source);
         return 1;
     }
+    semantic_mangle_c_identifiers(program);
 
     size_t cpath_len = strlen(output) + strlen(".generated.c") + 1;
     char *cpath = malloc(cpath_len);

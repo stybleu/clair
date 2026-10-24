@@ -95,27 +95,27 @@ if [ "${CLAIR_REQUIRE_NEON:-0}" = "1" ]; then
     [ "$ARCH" = "aarch64" ] \
         || fail "NEON_UNSUPPORTED_ARCH:$ARCH"
 
-    clang -O3 -S "$FLOAT_C" \
+    clang -O3 -fno-inline -S "$FLOAT_C" \
         -o "$WORK/float_O3.s" \
         >"$WORK/float_asm.log" 2>&1 \
         || fail FLOAT_ASSEMBLY
 
-    clang -O3 -S "$INT_C" \
+    clang -O3 -fno-inline -S "$INT_C" \
         -o "$WORK/int_O3.s" \
         >"$WORK/int_asm.log" 2>&1 \
         || fail INT_ASSEMBLY
 
     awk '
-    /^map_float:/ {inside=1}
-    inside && /^[[:space:]]*\.size[[:space:]]+map_float/ {
+    /^clair_fn_map_float:/ {inside=1}
+    inside && /^[[:space:]]*\.size[[:space:]]+clair_fn_map_float/ {
         exit
     }
     inside {print}
     ' "$WORK/float_O3.s" >"$WORK/float_function.s"
 
     awk '
-    /^sum_int:/ {inside=1}
-    inside && /^[[:space:]]*\.size[[:space:]]+sum_int/ {
+    /^clair_fn_sum_int:/ {inside=1}
+    inside && /^[[:space:]]*\.size[[:space:]]+clair_fn_sum_int/ {
         exit
     }
     inside {print}

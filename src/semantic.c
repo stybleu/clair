@@ -564,6 +564,72 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             set_type(n, fn->type_name);
             return n->type_name;
         }
+        case AST_METHOD_CALL: {
+            /*
+             * receiver.method(args) is resolved to the plain function
+             * Class__method(receiver, args), so code generation needs no
+             * knowledge of methods.  Children are [receiver, args...].
+             */
+            if (n->child_count < 1 || !n->text) return NULL;
+            const char *receiver = expr_type(s, n->children[0]);
+            const AstNode *cls = receiver ? find_class(s, receiver) : NULL;
+            if (!cls) {
+                if (receiver && is_list_type(receiver) && strcmp(n->text, "append") == 0) {
+                    error_type(s, "append() needs a list variable; store the list in a variable first");
+                    return NULL;
+                }
+                fprintf(stderr, "semantic error: method call '%s' expects a class object, got %s\n",
+                        n->text, receiver ? receiver : "invalid");
+                s->had_error = 1;
+                return NULL;
+            }
+
+            size_t mangled_len = strlen(cls->text) + 2 + strlen(n->text);
+            char *mangled = malloc(mangled_len + 1);
+            if (!mangled) return NULL;
+            snprintf(mangled, mangled_len + 1, "%s__%s", cls->text, n->text);
+
+            const AstNode *fn = find_function(s, mangled);
+            if (!fn) {
+                if (find_field(cls, n->text)) {
+                    fprintf(stderr, "semantic error: '%s.%s' is a field, not a method\n",
+                            cls->text, n->text);
+                } else {
+                    fprintf(stderr, "semantic error: class '%s' has no method '%s'\n",
+                            cls->text, n->text);
+                }
+                s->had_error = 1;
+                free(mangled);
+                return NULL;
+            }
+
+            size_t param_count = fn->child_count ? fn->child_count - 1 : 0; /* includes self */
+            if (n->child_count != param_count) {
+                fprintf(stderr, "semantic error: method '%s.%s' expects %zu argument(s), got %zu\n",
+                        cls->text, n->text, param_count - 1, n->child_count - 1);
+                s->had_error = 1;
+                free(mangled);
+                return NULL;
+            }
+            for (size_t i = 1; i < param_count; i++) {
+                const char *expected = fn->children[i]->type_name;
+                const char *actual = expr_type_expected(s, n->children[i], expected);
+                if (!actual || !assignable(expected, actual)) {
+                    fprintf(stderr, "semantic error: argument %zu of '%s.%s' expects %s, got %s\n",
+                            i, cls->text, n->text, expected ? expected : "?",
+                            actual ? actual : "invalid");
+                    s->had_error = 1;
+                    free(mangled);
+                    return NULL;
+                }
+            }
+
+            free(n->text);
+            n->text = mangled;
+            n->kind = AST_CALL;
+            set_type(n, fn->type_name);
+            return n->type_name;
+        }
         case AST_CONSTRUCT:
             return n->type_name;
         case AST_BINARY:
@@ -782,6 +848,9 @@ static int check_stmt(Semantic *s, AstNode *n) {
             leave_scope(s);
             return ok;
         }
+        case AST_EXPR_STMT:
+            /* A call used as a statement; its result, if any, is discarded. */
+            return n->child_count == 1 && expr_type(s, n->children[0]) != NULL;
         case AST_BREAK:
         case AST_CONTINUE:
             return 1;
@@ -914,4 +983,70 @@ done:
     while (s.var_count > 0) free(s.vars[--s.var_count].name);
     free(s.vars);
     return !s.had_error;
+}
+
+/*
+ * C identifier hygiene.
+ *
+ * Variables, parameters and fields keep their Clair spelling in the generated
+ * C, which breaks when that spelling is a C keyword or a macro / name the
+ * generated code itself relies on (`char`, `default`, `NULL`, `strlen`, ...).
+ * Such names get a `clair_u_` prefix.  The rename is a pure function of the
+ * name, so every reference stays consistent.  It runs after semantic_check so
+ * error messages keep showing the original spelling.  Functions need no
+ * renaming here: code generation prefixes all of them with `clair_fn_`.
+ */
+static int collides_with_c(const char *name) {
+    static const char *const reserved[] = {
+        "auto", "case", "char", "const", "default", "do", "double", "enum",
+        "extern", "goto", "inline", "long", "register", "restrict", "short",
+        "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+        "unsigned", "void", "volatile",
+        "NULL", "EOF", "errno", "stdin", "stdout", "stderr", "offsetof",
+        "strlen", "strcmp", "int64_t", "uint64_t", "intmax_t", "size_t",
+        "INT64_MIN", "INT64_MAX", "SIZE_MAX",
+        NULL
+    };
+    for (size_t i = 0; reserved[i]; i++) {
+        if (strcmp(name, reserved[i]) == 0) return 1;
+    }
+    if (strncmp(name, "clair_", 6) == 0 || strncmp(name, "Clair", 5) == 0) return 1;
+    if (name[0] == '_' && (name[1] == '_' || (name[1] >= 'A' && name[1] <= 'Z'))) return 1;
+    return 0;
+}
+
+static void mangle_node(AstNode *n) {
+    if (!n) return;
+
+    switch (n->kind) {
+        case AST_IDENTIFIER:
+        case AST_LET:
+        case AST_ASSIGN:
+        case AST_INDEX_ASSIGN:
+        case AST_LIST_APPEND:
+        case AST_FOR:
+        case AST_PARAM:
+        case AST_FIELD:
+        case AST_MEMBER:
+        case AST_MEMBER_ASSIGN:
+            if (n->text && collides_with_c(n->text)) {
+                size_t len = strlen(n->text);
+                char *renamed = malloc(len + 9);
+                if (renamed) {
+                    memcpy(renamed, "clair_u_", 8);
+                    memcpy(renamed + 8, n->text, len + 1);
+                    free(n->text);
+                    n->text = renamed;
+                }
+            }
+            break;
+        default:
+            break;
+    }
+
+    for (size_t i = 0; i < n->child_count; i++) mangle_node(n->children[i]);
+}
+
+void semantic_mangle_c_identifiers(AstNode *program) {
+    mangle_node(program);
 }

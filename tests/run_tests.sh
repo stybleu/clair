@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.15 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.17 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -17,10 +17,18 @@ if ! bash tests/run_simd_v3.sh; then
     exit 1
 fi
 
-if ! bash tests/run_simd_v4.sh; then
-    echo "SIMD V4 regression failed" >&2
-    exit 1
-fi
+# Ce test inspecte l'assembleur NEON : il n'a de sens que sur ARM64.
+case "$(uname -m)" in
+    aarch64|arm64)
+        if ! bash tests/run_simd_v4.sh; then
+            echo "SIMD V4 regression failed" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "SIMD V4 NEON : ignore (machine $(uname -m), ARM64 requis)"
+        ;;
+esac
 
 if ! bash tests/run_simd_v4_shadow.sh; then
     echo "SIMD V4 SHADOW FAILED"
@@ -467,6 +475,60 @@ if ./build/clair tests/invalid_class_duplicate_top_level.cl -o build/test_invali
 fi
 grep -Fq "duplicate top-level name 'Thing'" build/invalid_class_duplicate_top_level.stderr
 printf '%s\n' 'invalid_class_duplicate_top_level.cl : OK -> namespace constructeur/fonction protege'
+
+./build/clair tests/class_methods.cl -o build/test_class_methods
+out_class_methods="$(./build/test_class_methods)"
+expected_class_methods="$(printf '1\n5\n15\n25\n0\n100\n101\n102\nHello Alice\n1\n0\n31\n26\n27\n40\nHello Bob\n10\n6')"
+[ "$out_class_methods" = "$expected_class_methods" ]
+printf '%s\n' 'class_methods.cl : OK -> methodes, self, appels en instruction, mutation chainee'
+
+expect_compile_error() {
+    local name="$1" message="$2"
+    if ./build/clair "tests/$name.cl" -o "build/test_$name" >"build/$name.stdout" 2>"build/$name.stderr"; then
+        printf '%s\n' "$name.cl : ECHEC -> aurait du etre refuse" >&2
+        exit 1
+    fi
+    grep -Fq "$message" "build/$name.stderr"
+    printf '%s\n' "$name.cl : OK -> refuse"
+}
+
+expect_compile_error invalid_method_unknown "class 'Person' has no method 'fly'"
+expect_compile_error invalid_method_arg_count "method 'Counter.add' expects 1 argument(s), got 2"
+expect_compile_error invalid_method_arg_type "argument 1 of 'Counter.add' expects int, got float"
+expect_compile_error invalid_method_duplicate "duplicate method 'Counter.reset'"
+expect_compile_error invalid_method_field_conflict "method 'Counter.count' conflicts with a field of the same name"
+expect_compile_error invalid_method_on_non_object "method call 'foo' expects a class object, got int"
+expect_compile_error invalid_method_field_call "'Counter.count' is a field, not a method"
+expect_compile_error invalid_append_on_field "append() needs a list variable"
+expect_compile_error invalid_assignment_target "invalid assignment target"
+
+./build/clair tests/c_name_collisions.cl -o build/test_c_name_collisions
+out_c_name_collisions="$(./build/test_c_name_collisions)"
+expected_c_name_collisions="$(printf '5\n2\n42\nhi!\n6\n10\n9\n3\n3')"
+[ "$out_c_name_collisions" = "$expected_c_name_collisions" ]
+printf '%s\n' 'c_name_collisions.cl : OK -> fonctions abs/exit/free/printf/strlen et variables char/default/NULL/size_t'
+
+./build/clair tests/loop_fast_path.cl -o build/test_loop_fast_path
+out_loop_fast_path="$(./build/test_loop_fast_path)"
+expected_loop_fast_path="$(printf '7.5\n10.5\n6\n560\n110\n260\n6\n70\n3\nacd\n1\n9\n21\n6\n7\n7\n7\n22\n10000000000\n-9223372036854775808\n5\n9')"
+[ "$out_loop_fast_path" = "$expected_loop_fast_path" ]
+grep -Fq 'clair_rt_affine_ok(' build/test_loop_fast_path.generated.c
+printf '%s\n' 'loop_fast_path.cl : OK -> boucles rapides sans verification, alias, pas negatif, constantes 64 bits'
+
+expect_runtime_error() {
+    local name="$1" stdout_expected="$2" message="$3"
+    ./build/clair "tests/$name.cl" -o "build/test_$name"
+    if ./build/test_$name >"build/$name.stdout" 2>"build/$name.stderr"; then
+        printf '%s\n' "$name.cl : ECHEC -> aurait du s arreter sur une erreur" >&2
+        exit 1
+    fi
+    [ "$(cat "build/$name.stdout")" = "$(printf "$stdout_expected")" ]
+    grep -Fq "$message" "build/$name.stderr"
+    printf '%s\n' "$name.cl : OK -> erreur au bon moment"
+}
+
+expect_runtime_error loop_fast_path_bounds '0\n1\n2\n3\n4' 'list index 4 out of bounds for length 4'
+expect_runtime_error loop_fast_path_overflow '0\n5\n1' 'list index 4611686018427387904 out of bounds for length 2'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

@@ -153,7 +153,7 @@ import sys
 source = Path(sys.argv[1]).read_text()
 
 pattern = re.compile(
-    r"(?ms)^int64_t[ \t]+map_dynamic"
+    r"(?ms)^static[ \t]+int64_t[ \t]+clair_fn_map_dynamic"
     r"\(ClairList values\)[ \t]*\{"
     r".*?^\}[ \t]*$"
 )
@@ -167,7 +167,7 @@ if len(matches) != 1:
 
 body = matches[0].group(0)
 
-if body.count("map_dynamic(") != 1:
+if body.count("clair_fn_map_dynamic(") != 1:
     raise SystemExit("DYNAMIC_EXTRACTION_INVALID")
 
 Path(sys.argv[2]).write_text(body + "\n")
@@ -176,7 +176,7 @@ PY_V4_EXTRACT
 grep -Fq 'return i;' "$WORK/dynamic_function.c" \
     || fail "DYNAMIC_EXTRACT_TRUNCATED"
 
-FUNC_COUNT=$(grep -Ec '^int64_t [A-Za-z_][A-Za-z0-9_]*\(' \
+FUNC_COUNT=$(grep -Ec '^static int64_t [A-Za-z_][A-Za-z0-9_]*\(' \
     "$WORK/dynamic_function.c")
 
 [ "$FUNC_COUNT" -eq 1 ] \
@@ -190,16 +190,16 @@ fi
 echo "THRESHOLD_16=OK"
 echo "DYNAMIC_FALLBACK=OK"
 
-clang -O2 -S "$GEN" \
+clang -O2 -fno-inline -S "$GEN" \
     -o "$WORK/permanent_O2.s" \
     > "$WORK/assembly.log" 2>&1 \
     || fail "ASSEMBLY_BUILD"
 
 awk '
-    /^map_v4:/ { inside = 1 }
+    /^clair_fn_map_v4:/ { inside = 1 }
     inside {
         print
-        if ($0 ~ /^[[:space:]]*\.size[[:space:]]+map_v4/) exit
+        if ($0 ~ /^[[:space:]]*\.size[[:space:]]+clair_fn_map_v4/) exit
     }
 ' "$WORK/permanent_O2.s" \
     > "$WORK/map_v4.s"

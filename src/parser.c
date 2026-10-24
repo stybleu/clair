@@ -1,5 +1,6 @@
 #include "parser.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void next(Parser *p) { p->current = lexer_next(&p->lexer); }
@@ -14,6 +15,7 @@ static int expect(Parser *p, TokenKind kind, const char *what) {
 
 static AstNode *parse_expression(Parser *p);
 static AstNode *parse_block(Parser *p);
+static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_len);
 
 static AstNode *make_binary(Token op, AstNode *left, AstNode *right) {
     AstNode *bin = ast_new(AST_BINARY, op.start, op.length);
@@ -204,6 +206,41 @@ static AstNode *parse_primary(Parser *p) {
             if (!expect(p, TOKEN_IDENTIFIER, "field name")) {
                 ast_free(base);
                 return NULL;
+            }
+
+            /* receiver.method(args): children are [receiver, arg1, arg2, ...] */
+            if (p->current.kind == TOKEN_LPAREN) {
+                AstNode *call = parse_call_after_name(p, field);
+                if (!call) {
+                    ast_free(base);
+                    return NULL;
+                }
+
+                AstNode *method = ast_new(AST_METHOD_CALL, field.start, field.length);
+                if (!method) {
+                    ast_free(call);
+                    ast_free(base);
+                    return NULL;
+                }
+                if (!ast_add_child(method, base)) {
+                    ast_free(method);
+                    ast_free(call);
+                    ast_free(base);
+                    return NULL;
+                }
+                for (size_t i = 0; i < call->child_count; i++) {
+                    if (!ast_add_child(method, call->children[i])) {
+                        for (size_t j = i; j < call->child_count; j++) ast_free(call->children[j]);
+                        call->child_count = 0;
+                        ast_free(call);
+                        ast_free(method);
+                        return NULL;
+                    }
+                }
+                call->child_count = 0;
+                ast_free(call);
+                base = method;
+                continue;
             }
 
             AstNode *node = ast_new(AST_MEMBER, field.start, field.length);
@@ -641,6 +678,117 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
     return 0;
 }
 
+/* Builds a node and adopts `a` and `b` (either may be NULL); frees them on failure. */
+static AstNode *make_node(AstKind kind, const char *text, AstNode *a, AstNode *b) {
+    AstNode *n = ast_new(kind, text, text ? strlen(text) : 0);
+    if (!n) {
+        ast_free(a);
+        ast_free(b);
+        return NULL;
+    }
+    if (a && !ast_add_child(n, a)) {
+        ast_free(a);
+        ast_free(b);
+        ast_free(n);
+        return NULL;
+    }
+    if (b && !ast_add_child(n, b)) {
+        ast_free(b);
+        ast_free(n);
+        return NULL;
+    }
+    return n;
+}
+
+/* Detaches a child so it can be reused; ast_free() ignores the NULL left behind. */
+static AstNode *take_child(AstNode *node, size_t index) {
+    AstNode *child = node->children[index];
+    node->children[index] = NULL;
+    return child;
+}
+
+/*
+ * Statements that start with an identifier.  The left-hand side is parsed
+ * as an ordinary expression, then its shape decides the statement:
+ *
+ *   name = value                 assignment
+ *   name[index] = value          indexed assignment
+ *   a.b.field = value            field assignment (any object expression)
+ *   name.append(value)           list append
+ *   f(args) / a.b.method(args)   call used as a statement
+ */
+static AstNode *parse_identifier_statement(Parser *p) {
+    Token start = p->current;
+    AstNode *lhs = parse_primary(p);
+    if (!lhs) return NULL;
+
+    if (lhs->kind == AST_METHOD_CALL && lhs->text && strcmp(lhs->text, "append") == 0 &&
+        lhs->children[0]->kind == AST_IDENTIFIER) {
+        if (lhs->child_count != 2) {
+            fprintf(stderr, "parse error at %zu:%zu: append() expects exactly 1 argument\n",
+                    start.line, start.column);
+            p->had_error = 1;
+            ast_free(lhs);
+            return NULL;
+        }
+        AstNode *n = make_node(AST_LIST_APPEND, lhs->children[0]->text, take_child(lhs, 1), NULL);
+        ast_free(lhs);
+        return n;
+    }
+
+    if (p->current.kind == TOKEN_EQUAL) {
+        next(p);
+        AstNode *value = parse_expression(p);
+        if (!value) {
+            ast_free(lhs);
+            return NULL;
+        }
+
+        AstNode *n = NULL;
+        switch (lhs->kind) {
+            case AST_IDENTIFIER:
+                n = make_node(AST_ASSIGN, lhs->text, value, NULL);
+                break;
+
+            case AST_INDEX:
+                if (lhs->children[0]->kind != AST_IDENTIFIER) {
+                    fprintf(stderr,
+                            "parse error at %zu:%zu: indexed assignment target must be a variable\n",
+                            start.line, start.column);
+                    p->had_error = 1;
+                    ast_free(value);
+                    ast_free(lhs);
+                    return NULL;
+                }
+                n = make_node(AST_INDEX_ASSIGN, lhs->children[0]->text,
+                              take_child(lhs, 1), value);
+                break;
+
+            case AST_MEMBER:
+                n = make_node(AST_MEMBER_ASSIGN, lhs->text, take_child(lhs, 0), value);
+                break;
+
+            default:
+                fprintf(stderr, "parse error at %zu:%zu: invalid assignment target\n",
+                        start.line, start.column);
+                p->had_error = 1;
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+        }
+        ast_free(lhs);
+        return n;
+    }
+
+    if (lhs->kind == AST_CALL || lhs->kind == AST_METHOD_CALL) {
+        return make_node(AST_EXPR_STMT, NULL, lhs, NULL);
+    }
+
+    expect(p, TOKEN_EQUAL, "'='");
+    ast_free(lhs);
+    return NULL;
+}
+
 static AstNode *parse_statement(Parser *p) {
     if (p->current.kind == TOKEN_LET) {
         next(p);
@@ -664,82 +812,7 @@ static AstNode *parse_statement(Parser *p) {
     }
 
     if (p->current.kind == TOKEN_IDENTIFIER) {
-        Token name = p->current;
-        next(p);
-
-        if (p->current.kind == TOKEN_LBRACKET) {
-            next(p);
-            AstNode *index = parse_expression(p);
-            if (!index) return NULL;
-            if (!expect(p, TOKEN_RBRACKET, "']'")) { ast_free(index); return NULL; }
-            if (!expect(p, TOKEN_EQUAL, "'='")) { ast_free(index); return NULL; }
-
-            AstNode *value = parse_expression(p);
-            if (!value) { ast_free(index); return NULL; }
-
-            AstNode *n = ast_new(AST_INDEX_ASSIGN, name.start, name.length);
-            if (!n) { ast_free(index); ast_free(value); return NULL; }
-            if (!ast_add_child(n, index)) { ast_free(n); ast_free(index); ast_free(value); return NULL; }
-            if (!ast_add_child(n, value)) { ast_free(n); ast_free(value); return NULL; }
-            return n;
-        }
-
-        if (p->current.kind == TOKEN_DOT) {
-            next(p);
-            Token member = p->current;
-            if (!expect(p, TOKEN_IDENTIFIER, "member name")) return NULL;
-
-            if (member.length == 6 && strncmp(member.start, "append", 6) == 0 &&
-                p->current.kind == TOKEN_LPAREN) {
-                next(p);
-                AstNode *value = parse_expression(p);
-                if (!value) return NULL;
-                if (!expect(p, TOKEN_RPAREN, "')'")) { ast_free(value); return NULL; }
-
-                AstNode *n = ast_new(AST_LIST_APPEND, name.start, name.length);
-                if (!n) { ast_free(value); return NULL; }
-                if (!ast_add_child(n, value)) { ast_free(n); ast_free(value); return NULL; }
-                return n;
-            }
-
-            if (!expect(p, TOKEN_EQUAL, "'='")) return NULL;
-            AstNode *value = parse_expression(p);
-            if (!value) return NULL;
-
-            AstNode *base = ast_new(AST_IDENTIFIER, name.start, name.length);
-            AstNode *n = ast_new(AST_MEMBER_ASSIGN, member.start, member.length);
-            if (!base || !n) {
-                ast_free(base);
-                ast_free(n);
-                ast_free(value);
-                return NULL;
-            }
-            if (!ast_add_child(n, base)) {
-                ast_free(n);
-                ast_free(base);
-                ast_free(value);
-                return NULL;
-            }
-            if (!ast_add_child(n, value)) {
-                ast_free(n);
-                ast_free(value);
-                return NULL;
-            }
-            return n;
-        }
-
-        if (!expect(p, TOKEN_EQUAL, "'='")) return NULL;
-
-        AstNode *value = parse_expression(p);
-        if (!value) return NULL;
-
-        AstNode *n = ast_new(AST_ASSIGN, name.start, name.length);
-        if (!n || !ast_add_child(n, value)) {
-            ast_free(n);
-            if (!n) ast_free(value);
-            return NULL;
-        }
-        return n;
+        return parse_identifier_statement(p);
     }
 
     if (p->current.kind == TOKEN_RETURN) {
@@ -827,7 +900,13 @@ static AstNode *parse_block(Parser *p) {
     return block;
 }
 
-static AstNode *parse_class(Parser *p) {
+/*
+ * Parses a class.  Fields become children of the class node.  Methods are
+ * appended to `program` as top-level functions named `Class__method` (see
+ * parse_function_impl), so the rest of the compiler needs no special case
+ * for them beyond resolving `value.method(...)` calls.
+ */
+static AstNode *parse_class(Parser *p, AstNode *program) {
     if (!expect(p, TOKEN_CLASS, "Class")) return NULL;
 
     Token name = p->current;
@@ -837,7 +916,38 @@ static AstNode *parse_class(Parser *p) {
     AstNode *cls = ast_new(AST_CLASS, name.start, name.length);
     if (!cls) return NULL;
 
+    size_t first_method = program->child_count;
+    size_t prefix_len = strlen(cls->text) + 2;
+
     while (p->current.kind != TOKEN_RBRACE && p->current.kind != TOKEN_EOF) {
+        if (p->current.kind == TOKEN_DEF) {
+            Token def_token = p->current;
+            AstNode *method = parse_function_impl(p, cls->text, strlen(cls->text));
+            if (!method) {
+                ast_free(cls);
+                return NULL;
+            }
+
+            for (size_t i = first_method; i < program->child_count; i++) {
+                if (strcmp(program->children[i]->text, method->text) == 0) {
+                    fprintf(stderr, "parse error at %zu:%zu: duplicate method '%s.%s'\n",
+                            def_token.line, def_token.column,
+                            cls->text, method->text + prefix_len);
+                    p->had_error = 1;
+                    ast_free(method);
+                    ast_free(cls);
+                    return NULL;
+                }
+            }
+
+            if (!ast_add_child(program, method)) {
+                ast_free(method);
+                ast_free(cls);
+                return NULL;
+            }
+            continue;
+        }
+
         Token field_name = p->current;
         if (!expect(p, TOKEN_IDENTIFIER, "field name")) {
             ast_free(cls);
@@ -870,18 +980,62 @@ static AstNode *parse_class(Parser *p) {
         return NULL;
     }
 
+    for (size_t m = first_method; m < program->child_count; m++) {
+        const char *method_name = program->children[m]->text + prefix_len;
+        for (size_t j = 0; j < cls->child_count; j++) {
+            if (strcmp(cls->children[j]->text, method_name) == 0) {
+                fprintf(stderr,
+                        "parse error: method '%s.%s' conflicts with a field of the same name\n",
+                        cls->text, method_name);
+                p->had_error = 1;
+                ast_free(cls);
+                return NULL;
+            }
+        }
+    }
+
     return cls;
 }
 
-static AstNode *parse_function(Parser *p) {
+/*
+ * Parses `def name(params) -> type { body }`.
+ *
+ * With owner == NULL this is an ordinary function.  With an owner class
+ * it is a method: it becomes the top-level function `Owner__name` whose
+ * first parameter is the implicit `self: Owner`.  Calls written
+ * `value.name(args)` are resolved to it by the semantic pass.
+ */
+static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_len) {
     if (!expect(p, TOKEN_DEF, "def")) return NULL;
 
     Token name = p->current;
     if (!expect(p, TOKEN_IDENTIFIER, "function name")) return NULL;
     if (!expect(p, TOKEN_LPAREN, "'('") ) return NULL;
 
-    AstNode *fn = ast_new(AST_FUNCTION, name.start, name.length);
+    AstNode *fn = NULL;
+    if (owner) {
+        size_t len = owner_len + 2 + name.length;
+        char *mangled = malloc(len + 1);
+        if (!mangled) return NULL;
+        memcpy(mangled, owner, owner_len);
+        memcpy(mangled + owner_len, "__", 2);
+        memcpy(mangled + owner_len + 2, name.start, name.length);
+        mangled[len] = '\0';
+        fn = ast_new(AST_FUNCTION, mangled, len);
+        free(mangled);
+    } else {
+        fn = ast_new(AST_FUNCTION, name.start, name.length);
+    }
     if (!fn) return NULL;
+
+    if (owner) {
+        AstNode *self = ast_new(AST_PARAM, "self", 4);
+        if (!self || !ast_set_type(self, owner, owner_len) || !ast_add_child(fn, self)) {
+            ast_free(self);
+            ast_free(fn);
+            return NULL;
+        }
+    }
 
     if (p->current.kind != TOKEN_RPAREN) {
         for (;;) {
@@ -926,6 +1080,10 @@ static AstNode *parse_function(Parser *p) {
     return fn;
 }
 
+static AstNode *parse_function(Parser *p) {
+    return parse_function_impl(p, NULL, 0);
+}
+
 void parser_init(Parser *p, const char *source) {
     lexer_init(&p->lexer, source);
     p->had_error = 0;
@@ -947,7 +1105,7 @@ AstNode *parser_parse_program(Parser *p) {
 
         AstNode *decl = NULL;
         if (p->current.kind == TOKEN_CLASS) {
-            decl = parse_class(p);
+            decl = parse_class(p, program);
         } else if (p->current.kind == TOKEN_DEF) {
             decl = parse_function(p);
         } else {
