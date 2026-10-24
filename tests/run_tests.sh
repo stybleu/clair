@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.26 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.27 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -632,6 +632,12 @@ expect_runtime_error big_narrow_runtime '123456789012345678' 'Clair runtime erro
 expect_compile_error invalid_int_literal_too_large "integer 9223372036854775808 is too large for int (64 bits): use int128, int256, int512 or int1024"
 expect_compile_error invalid_big_literal_too_large "integer 170141183460469231731687303715884105728 is too large for int128"
 expect_compile_error invalid_big_float_mix "operator '+' cannot mix int256 and float: convert with float(x)"
+
+./build/clair tests/matvec_rows.cl -o build/test_matvec_rows
+[ "$(./build/test_matvec_rows)" = "$(cat tests/matvec_rows.expected)" ]
+[ "$(grep -c 'for (; clair_row + 4 <= ' build/test_matvec_rows.generated.c)" = "3" ]
+printf '%s\n' 'matvec_rows.cl : OK -> couche dense 4 lignes a la fois, identique au bit pres, champs, liste a plat, repli si y = x'
+expect_runtime_error matvec_rows_bounds '' 'Clair runtime error: list index 2 out of bounds for length 2'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

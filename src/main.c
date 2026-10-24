@@ -26,6 +26,14 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/*
+ * Floating point: by default every + - * / is rounded on its own, like Python.
+ * Clang may otherwise fuse a * b + c into one instruction (FMA) where it wants,
+ * so the same formula could give a different last digit in two loops or on two
+ * machines.  --fma allows that fusion (a little faster on ARM).
+ */
+static int allow_fma = 0;
+
 static int run_clang(const char *cpath, const char *output) {
     pid_t pid = fork();
     if (pid < 0) {
@@ -43,6 +51,7 @@ static int run_clang(const char *cpath, const char *output) {
             "-Wextra",
             "-Wno-unused-function",
             "-fno-math-errno",   /* Clair never reads errno: lets Clang vectorize sqrt() and friends */
+            allow_fma ? "-ffp-contract=on" : "-ffp-contract=off",
             (char *)cpath,
             "-o",
             (char *)output,
@@ -73,11 +82,12 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
         else if (strcmp(argv[i], "--sans-verif") == 0 || strcmp(argv[i], "--unchecked") == 0) unchecked = 1;
+        else if (strcmp(argv[i], "--fma") == 0) allow_fma = 1;
         else if (!input && argv[i][0] != '-') input = argv[i];
         else { input = NULL; break; }
     }
     if (!input || !output) {
-        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif]\n", argv[0]);
+        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif] [--fma]\n", argv[0]);
         return 2;
     }
     codegen_set_unchecked(unchecked);

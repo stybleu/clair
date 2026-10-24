@@ -53,7 +53,7 @@ printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$version"
 printf '%s\n' "$CORE_INFO"
 printf '%-9s %-11s %-7s %-7s %s\n' "programme" "$SIMD_NAME Cl/C" "Clair" "C" "ecart"
 
-for name in collatz dot axpy while forin matmul matrice reseau; do
+for name in collatz dot axpy while forin matmul matrice couche reseau; do
     # hot function: "// noyau: name" in the program, otherwise its first def
     kernel=$(grep -m 1 -oE '^// noyau: [A-Za-z_]+' "$BENCH/$name.cl" | cut -d' ' -f3)
     [ -n "$kernel" ] || kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
@@ -63,15 +63,15 @@ for name in collatz dot axpy while forin matmul matrice reseau; do
         printf '%-9s ECHEC de compilation Clair\n' "$name"
         continue
     fi
-    clang -std=c11 -O2 -fwrapv -fno-math-errno "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" -lm 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" -lm 2>> "$WORK/$name.log"
 
     # Keep the hot functions out of line so their machine code can be read alone.
     sed -E "s/^static ([a-z0-9_]+) clair_fn_${kernel}\(/static __attribute__((noinline)) \1 clair_fn_${kernel}(/" \
         "$WORK/$name.generated.c" > "$WORK/$name.noinline.c"
-    clang -std=c11 -O2 -fwrapv -fno-math-errno -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
     sed -E "s/^static ([a-z0-9_]+) ${ref_kernel}\(/static __attribute__((noinline)) \1 ${ref_kernel}(/" \
         "$BENCH/${name}_ref.c" > "$WORK/${name}_ref.noinline.c"
-    clang -std=c11 -O2 -fwrapv -fno-math-errno -S "$WORK/${name}_ref.noinline.c" -o "$WORK/${name}_ref.s" 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -S "$WORK/${name}_ref.noinline.c" -o "$WORK/${name}_ref.s" 2>> "$WORK/$name.log"
     v_clair=$(vectorized "$WORK/$name.s" "clair_fn_${kernel}")
     v_ref=$(vectorized "$WORK/${name}_ref.s" "${ref_kernel}")
 

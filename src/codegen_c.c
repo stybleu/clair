@@ -313,8 +313,49 @@ static void compute_field_writers(const AstNode *program) {
     }
 }
 
+/* Functions that may write an element of a list or matrix (directly or through calls). */
+static const char *list_writer_fn[SAFE_FN_MAX];
+static size_t list_writer_count = 0;
+
+static int fn_writes_lists(const char *name) {
+    if (list_writer_count >= SAFE_FN_MAX) return 1;
+    for (size_t i = 0; i < list_writer_count; i++) {
+        if (strcmp(list_writer_fn[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int tree_writes_lists(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_INDEX_ASSIGN || n->kind == AST_MATRIX_SET || n->kind == AST_LIST_APPEND ||
+        n->kind == AST_METHOD_CALL) return 1;
+    if (n->kind == AST_CALL && n->text && n->text[0] != '@' && strcmp(n->text, "len") != 0 &&
+        strcmp(n->text, "input_int") != 0 && fn_writes_lists(n->text)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (tree_writes_lists(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+static void compute_list_writers(const AstNode *program) {
+    list_writer_count = 0;
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (size_t i = 0; i < program->child_count; i++) {
+            const AstNode *fn = program->children[i];
+            if (fn->kind != AST_FUNCTION || !fn->text || fn_writes_lists(fn->text)) continue;
+            if (tree_writes_lists(fn)) {
+                if (list_writer_count < SAFE_FN_MAX) list_writer_fn[list_writer_count++] = fn->text;
+                changed = 1;
+            }
+        }
+    }
+}
+
 static void compute_safe_functions(const AstNode *program) {
     compute_field_writers(program);
+    compute_list_writers(program);
     unsafe_fn_count = 0;
     int changed = 1;
     while (changed) {
@@ -1271,6 +1312,178 @@ static int program_has_matmul(const AstNode *n) {
     if (n->kind == AST_FOR && matmul_pattern(n, &p)) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (program_has_matmul(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Matrix x vector (a dense layer of a neural network):               */
+/*     for i { let s = b[i]; for j { s = s + w[i][j] * x[j] }; ... }  */
+/* runs 4 rows at once.  Each row keeps its own additions in the same */
+/* order, so the result is identical to the bit; the 4 independent    */
+/* sums no longer wait for each other.                                */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    FastPlan bases;                     /* owns the C expressions of field chains */
+    const AstNode *body;
+    const char *i, *j, *s;
+    const AstNode *m_stop, *n_stop;
+    const char *w_name, *w_expr;        /* clair_data_<w_name> and the C expression */
+    int w_matrix;                       /* w[i][j], or a flat list w[i * ld + j] */
+    const AstNode *ld;
+    const char *x_name, *x_expr;
+    const AstNode *w_node, *x_node, *b_node;
+    const AstNode *init;                /* number, variable, or b[i] */
+    const char *b_name, *b_expr;
+    const char *targets[FAST_MAX];      /* lists written after the sum: checked distinct from w, x, b */
+    size_t target_count;
+} MatvecPattern;
+
+static int matvec_suppress = 0;
+
+/* What may follow the sum: anything that cannot change w, x, b or the rows still to compute. */
+static int matvec_rest_ok(const AstNode *n, MatvecPattern *p) {
+    if (!n) return 1;
+    switch (n->kind) {
+        case AST_FOR: case AST_WHILE: case AST_FOR_EACH: case AST_BREAK: case AST_CONTINUE:
+        case AST_LIST_APPEND: case AST_METHOD_CALL:
+            return 0;
+        case AST_CALL:
+            if (n->text && n->text[0] != '@' && strcmp(n->text, "len") != 0 &&
+                strcmp(n->text, "input_int") != 0 && fn_writes_lists(n->text)) return 0;
+            break;
+        case AST_INDEX_ASSIGN:
+        case AST_MATRIX_SET: {
+            const char *name = NULL, *expr = NULL;
+            if (p->target_count >= FAST_MAX) return 0;
+            if (n->text) {
+                if (name_changes_in(p->body, n->text) || strcmp(n->text, p->i) == 0) return 0;
+                expr = n->text;
+            } else {
+                size_t plain = n->kind == AST_INDEX_ASSIGN ? 2 : 3;
+                if (n->child_count != plain + 1 ||
+                    !fast_base_of(&p->bases, n->children[plain], p->i, p->body, &name, &expr)) return 0;
+            }
+            p->targets[p->target_count++] = expr;
+            break;
+        }
+        default:
+            break;
+    }
+    for (size_t k = 0; k < n->child_count; k++) {
+        if (!matvec_rest_ok(n->children[k], p)) return 0;
+    }
+    return 1;
+}
+
+static int matvec_pattern(const AstNode *loop, MatvecPattern *p) {
+    memset(p, 0, sizeof(*p));
+    if (!loop || loop->kind != AST_FOR || !loop->text) return 0;
+    p->i = loop->text;
+    p->m_stop = zero_based_stop(loop);
+    p->body = loop->children[loop->child_count - 1];
+    const AstNode *body = p->body;
+    if (!p->m_stop || !body || body->kind != AST_BLOCK || body->child_count < 2) return 0;
+
+    const AstNode *let = body->children[0], *jl = body->children[1];
+    if (let->kind != AST_LET || !let->text || let->child_count != 1 || !let->type_name ||
+        strcmp(let->type_name, "float") != 0) return 0;
+    p->s = let->text;
+    p->init = let->children[0];
+    if (jl->kind != AST_FOR || !jl->text) return 0;
+    p->j = jl->text;
+    p->n_stop = zero_based_stop(jl);
+    const AstNode *jb = jl->children[jl->child_count - 1];
+    if (!p->n_stop || !jb || jb->kind != AST_BLOCK || jb->child_count != 1) return 0;
+    if (strcmp(p->i, p->j) == 0 || strcmp(p->i, p->s) == 0 || strcmp(p->j, p->s) == 0) return 0;
+
+    /* s = s + w[i][j] * x[j], operands of + and * in any order */
+    const AstNode *upd = jb->children[0];
+    if (upd->kind != AST_ASSIGN || !upd->text || strcmp(upd->text, p->s) != 0 || upd->child_count != 1) return 0;
+    const AstNode *sum = upd->children[0];
+    if (!is_binary(sum, "+") || !sum->type_name || strcmp(sum->type_name, "float") != 0) return 0;
+    const AstNode *prod = is_ident(sum->children[0], p->s) ? sum->children[1]
+                        : is_ident(sum->children[1], p->s) ? sum->children[0] : NULL;
+    if (!is_binary(prod, "*")) return 0;
+    const AstNode *wnode = NULL, *xnode = NULL;
+    for (int t = 0; t < 2 && !wnode; t++) {
+        const AstNode *wr = prod->children[t], *xr = prod->children[1 - t];
+        if (!xr || xr->kind != AST_INDEX || xr->child_count != 2 || !is_ident(xr->children[1], p->j) ||
+            !xr->children[0]->type_name || strcmp(xr->children[0]->type_name, "list[float]") != 0) continue;
+        if (!wr || wr->kind != AST_INDEX || wr->child_count != 2) continue;
+        const AstNode *row = wr->children[0];
+        if (row->kind == AST_INDEX && row->child_count == 2 && is_ident(row->children[1], p->i) &&
+            is_ident(wr->children[1], p->j) && row->children[0]->type_name &&
+            strcmp(row->children[0]->type_name, "matrix[float]") == 0) {
+            p->w_matrix = 1;
+            wnode = row->children[0];
+        } else if (wr->children[0]->type_name && strcmp(wr->children[0]->type_name, "list[float]") == 0 &&
+                   (p->ld = flat_index_ld(wr->children[1], p->i, p->j)) != NULL) {
+            p->w_matrix = 0;
+            wnode = wr->children[0];
+        }
+        if (wnode) xnode = xr->children[0];
+    }
+    if (!wnode) return 0;
+    p->w_node = wnode;
+    p->x_node = xnode;
+    if (!fast_base_of(&p->bases, wnode, p->i, body, &p->w_name, &p->w_expr)) return 0;
+    if (!fast_base_of(&p->bases, xnode, p->i, body, &p->x_name, &p->x_expr)) return 0;
+    if (p->ld && is_ident(p->ld, NULL) && (name_changes_in(body, p->ld->text) || strcmp(p->ld->text, p->i) == 0)) return 0;
+
+    /* starting value of each sum: a number, a variable, or b[i] */
+    int64_t k;
+    const AstNode *init = p->init;
+    if (init->kind == AST_FLOAT || const_int_value(init, &k)) {
+        /* fine */
+    } else if (is_ident(init, NULL)) {
+        if (name_changes_in(body, init->text) || strcmp(init->text, p->i) == 0) return 0;
+    } else if (init->kind == AST_INDEX && init->child_count == 2 && is_ident(init->children[1], p->i) &&
+               init->children[0]->type_name && strcmp(init->children[0]->type_name, "list[float]") == 0) {
+        p->b_node = init->children[0];
+        if (!fast_base_of(&p->bases, init->children[0], p->i, body, &p->b_name, &p->b_expr)) return 0;
+    } else {
+        return 0;
+    }
+
+    /* bounds that cannot change, nothing that appends, nothing that rewrites the inputs */
+    if (!nest_bound_is_invariant(p->m_stop, p->i, body) || !nest_bound_is_invariant(p->n_stop, p->i, body)) return 0;
+    if (tree_may_grow_lists(body)) return 0;
+    for (size_t r = 2; r < body->child_count; r++) {
+        const AstNode *st = body->children[r];
+        if (name_changes_in(st, p->s) || name_changes_in(st, p->i) || name_changes_in(st, p->j)) return 0;
+        if (!matvec_rest_ok(st, p)) return 0;
+    }
+    return 1;
+}
+
+/* Same variable or same chain of fields (self.w and self.w). */
+static int same_access_path(const AstNode *a, const AstNode *b) {
+    while (a && b && a->kind == AST_MEMBER && b->kind == AST_MEMBER && a->child_count == 1 && b->child_count == 1) {
+        if (!a->text || !b->text || strcmp(a->text, b->text) != 0) return 0;
+        a = a->children[0];
+        b = b->children[0];
+    }
+    return is_ident(a, NULL) && is_ident(b, NULL) && strcmp(a->text, b->text) == 0;
+}
+
+/* rows(m) / cols(m) / len(m) of exactly this list or matrix: such a bound needs no check */
+static int is_size_of(const AstNode *e, const char *call, const AstNode *base) {
+    return e && e->kind == AST_CALL && e->text && strcmp(e->text, call) == 0 && e->child_count == 1 &&
+           same_access_path(e->children[0], base);
+}
+
+static int program_has_matvec(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_FOR) {
+        MatvecPattern p;
+        int ok = matvec_pattern(n, &p);
+        fast_plan_free(&p.bases);
+        if (ok) return 1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (program_has_matvec(n->children[i])) return 1;
     }
     return 0;
 }
@@ -2985,6 +3198,158 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
         case AST_FOR: {
             if (!n->text || n->child_count < 2 || n->child_count > 4) return 0;
 
+            MatvecPattern mv;
+            memset(&mv, 0, sizeof(mv));
+            int is_matvec = !matvec_suppress && !matmul_suppress && !fast_suppress && matvec_pattern(n, &mv);
+            if (is_matvec) {
+                /* Matrix x vector: 4 rows at once when the shapes fit and nothing written aliases w, x, b. */
+                const AstNode *body = mv.body;
+                int first = 1;
+                #define MV_AND() do { if (!first) { fputs(" &&\n", f); indent(f, depth + 1); } first = 0; } while (0)
+                fputs("if (", f);
+                if (mv.w_matrix) {
+                    if (!is_size_of(mv.m_stop, "@rows", mv.w_node)) {
+                        MV_AND();
+                        if (!emit_expr(f, mv.m_stop)) return 0;
+                        fprintf(f, " <= %s->rows", mv.w_expr);
+                    }
+                    if (!is_size_of(mv.n_stop, "@cols", mv.w_node)) {
+                        MV_AND();
+                        if (!emit_expr(f, mv.n_stop)) return 0;
+                        fprintf(f, " <= %s->cols", mv.w_expr);
+                    }
+                } else {
+                    MV_AND();
+                    fprintf(f, "clair_rt_matvec_list_fits(%s, ", mv.w_expr);
+                    if (!emit_expr(f, mv.ld)) return 0;
+                    fputs(", ", f);
+                    if (!emit_expr(f, mv.m_stop)) return 0;
+                    fputs(", ", f);
+                    if (!emit_expr(f, mv.n_stop)) return 0;
+                    fputc(')', f);
+                }
+                if (!is_size_of(mv.n_stop, "len", mv.x_node)) {
+                    MV_AND();
+                    if (!emit_expr(f, mv.n_stop)) return 0;
+                    fprintf(f, " <= (int64_t)%s->len", mv.x_expr);
+                }
+                if (mv.b_expr && !is_size_of(mv.m_stop, "len", mv.b_node)) {
+                    MV_AND();
+                    if (!emit_expr(f, mv.m_stop)) return 0;
+                    fprintf(f, " <= (int64_t)%s->len", mv.b_expr);
+                }
+                for (size_t t = 0; t < mv.target_count; t++) {
+                    MV_AND();
+                    fprintf(f, "%s->data != %s->data && %s->data != %s->data", mv.targets[t], mv.w_expr,
+                            mv.targets[t], mv.x_expr);
+                    if (mv.b_expr) fprintf(f, " && %s->data != %s->data", mv.targets[t], mv.b_expr);
+                }
+                if (first) fputs("true", f);
+                #undef MV_AND
+                fputs(") {\n", f);
+
+                indent(f, depth + 1);
+                fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.w_name, mv.w_expr);
+                if (mv.w_matrix) {
+                    indent(f, depth + 1);
+                    fprintf(f, "int64_t clair_cols_%s = %s->cols;\n", mv.w_name, mv.w_expr);
+                }
+                if (strcmp(mv.x_name, mv.w_name) != 0) {
+                    indent(f, depth + 1);
+                    fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.x_name, mv.x_expr);
+                }
+                if (mv.b_expr && strcmp(mv.b_name, mv.w_name) != 0 && strcmp(mv.b_name, mv.x_name) != 0) {
+                    indent(f, depth + 1);
+                    fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.b_name, mv.b_expr);
+                }
+                indent(f, depth + 1);
+                fputs("int64_t clair_row = 0;\n", f);
+                indent(f, depth + 1);
+                fputs("for (; clair_row + 4 <= ", f);
+                if (!emit_operand(f, mv.m_stop, PREC_ADDITIVE, 1)) return 0;
+                fputs("; clair_row += 4) {\n", f);
+                for (int r = 0; r < 4; r++) {
+                    indent(f, depth + 2);
+                    fprintf(f, "double clair_s%d = ", r);
+                    if (mv.b_expr) fprintf(f, "clair_data_%s[clair_row%s]", mv.b_name, r == 0 ? "" : r == 1 ? " + 1" : r == 2 ? " + 2" : " + 3");
+                    else if (!emit_expr(f, mv.init)) return 0;
+                    fputs(";\n", f);
+                }
+                for (int r = 0; r < 4; r++) {
+                    indent(f, depth + 2);
+                    if (r == 0) {
+                        fprintf(f, "const double *clair_w0 = clair_data_%s + clair_row * ", mv.w_name);
+                        if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
+                        else if (!emit_operand(f, mv.ld, PREC_MULTIPLICATIVE, 1)) return 0;
+                    } else {
+                        fprintf(f, "const double *clair_w%d = clair_w%d + ", r, r - 1);
+                        if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
+                        else if (!emit_operand(f, mv.ld, PREC_ADDITIVE, 1)) return 0;
+                    }
+                    fputs(";\n", f);
+                }
+                indent(f, depth + 2);
+                fprintf(f, "for (int64_t %s = 0; %s < ", mv.j, mv.j);
+                if (!emit_operand(f, mv.n_stop, PREC_RELATIONAL, 1)) return 0;
+                fprintf(f, "; %s++) {\n", mv.j);
+                indent(f, depth + 3);
+                fprintf(f, "double clair_x = clair_data_%s[%s];\n", mv.x_name, mv.j);
+                for (int r = 0; r < 4; r++) {
+                    indent(f, depth + 3);
+                    fprintf(f, "clair_s%d = clair_s%d + clair_w%d[%s] * clair_x;\n", r, r, r, mv.j);
+                }
+                indent(f, depth + 2);
+                fputs("}\n", f);
+                /* what followed the sum, row by row, in the original order */
+                for (int r = 0; r < 4; r++) {
+                    int uses_i = 0, uses_s = 0;
+                    for (size_t st = 2; st < body->child_count; st++) {
+                        uses_i |= name_mentioned_in(body->children[st], mv.i);
+                        uses_s |= name_mentioned_in(body->children[st], mv.s);
+                    }
+                    if (body->child_count == 2) break;
+                    indent(f, depth + 2);
+                    fputs("{\n", f);
+                    if (uses_i) {
+                        indent(f, depth + 3);
+                        if (r == 0) fprintf(f, "int64_t %s = clair_row;\n", mv.i);
+                        else fprintf(f, "int64_t %s = clair_row + %d;\n", mv.i, r);
+                    }
+                    if (uses_s) {
+                        indent(f, depth + 3);
+                        fprintf(f, "double %s = clair_s%d;\n", mv.s, r);
+                    }
+                    for (size_t st = 2; st < body->child_count; st++) {
+                        if (!emit_stmt(f, body->children[st], depth + 3)) return 0;
+                    }
+                    indent(f, depth + 2);
+                    fputs("}\n", f);
+                }
+                indent(f, depth + 1);
+                fputs("}\n", f);
+                /* the last rows (fewer than 4), as written */
+                indent(f, depth + 1);
+                fprintf(f, "for (int64_t %s = clair_row; %s < ", mv.i, mv.i);
+                if (!emit_operand(f, mv.m_stop, PREC_RELATIONAL, 1)) return 0;
+                fprintf(f, "; %s++) {\n", mv.i);
+                matvec_suppress = 1;
+                int ok = emit_block(f, body, depth + 2);
+                if (ok) {
+                    indent(f, depth + 1);
+                    fputs("}\n", f);
+                    indent(f, depth);
+                    fputs("} else {\n", f);
+                    ok = emit_stmt(f, n, depth + 1);
+                }
+                matvec_suppress = 0;
+                fast_plan_free(&mv.bases);
+                if (!ok) return 0;
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
+            fast_plan_free(&mv.bases);
+
             MatmulPattern mm;
             if (!matmul_suppress && !fast_suppress && matmul_pattern(n, &mm)) {
                 /*
@@ -4382,6 +4747,20 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 f
             );
         }
+    }
+
+    if (program_has_matvec(program) && node_uses_list(program)) {
+        fputs(
+            "/* w[i * ld + j] stays inside the list for every i < rows and j < cols */\n"
+            "static inline bool clair_rt_matvec_list_fits(ClairList w, int64_t ld, int64_t rows, int64_t cols) {\n"
+            "    int64_t last;\n"
+            "    if (rows <= 0 || cols <= 0) return true;\n"
+            "    return ld >= 0 && w->len <= (size_t)INT64_MAX &&\n"
+            "           !__builtin_mul_overflow(rows - 1, ld, &last) && !__builtin_add_overflow(last, cols - 1, &last) &&\n"
+            "           last < (int64_t)w->len;\n"
+            "}\n\n",
+            f
+        );
     }
 
     if (program_has_matmul(program)) {
