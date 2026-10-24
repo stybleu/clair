@@ -1,4 +1,5 @@
 /* Same program written by hand in C, compiled with the same flags. */
+/* noyau: axpy */
 #include <stdio.h>
 #include <stdlib.h>
 

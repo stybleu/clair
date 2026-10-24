@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.21 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.22 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -522,7 +522,7 @@ expect_runtime_error() {
         printf '%s\n' "$name.cl : ECHEC -> aurait du s arreter sur une erreur" >&2
         exit 1
     fi
-    [ "$(cat "build/$name.stdout")" = "$(printf "$stdout_expected")" ]
+    [ "$(cat "build/$name.stdout")" = "$(printf '%b' "$stdout_expected")" ]
     grep -Fq "$message" "build/$name.stderr"
     printf '%s\n' "$name.cl : OK -> erreur au bon moment"
 }
@@ -570,6 +570,14 @@ expected_xor_training="$(printf '3\n97\n97\n4\n1')"
 [ "$out_xor_training" = "$expected_xor_training" ]
 grep -Fq 'if (clair_cols_self__w1 == 2) {' build/test_xor_training.generated.c
 printf '%s\n' 'xor_training.cl : OK -> reseau de neurones entraine sur XOR par descente de gradient'
+
+./build/clair tests/while_fast_path.cl -o build/test_while_fast_path
+out_while_fast_path="$(./build/test_while_fast_path)"
+expected_while_fast_path="$(printf '55\n3\n7.5\n24\n6\n6\n15\n40\n3')"
+[ "$out_while_fast_path" = "$expected_while_fast_path" ]
+grep -Fq 'while (i < clair_stop_i) {' build/test_while_fast_path.generated.c
+printf '%s\n' 'while_fast_path.cl : OK -> boucles while rapides, continue, break, borne modifiee, matrice'
+expect_runtime_error while_fast_path_bounds '-1\n1' 'Clair runtime error: list index -1 out of bounds for length 3'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

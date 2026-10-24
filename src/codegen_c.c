@@ -701,11 +701,67 @@ static int fast_plan_for(const AstNode *loop, FastPlan *plan) {
     return 1;
 }
 
+/*
+ * The counting loop written by hand:   while v < stop { ...; v = v + 1 }
+ * v changes only through that last statement, stop never changes, so the
+ * body sees v going through [v at entry, stop) exactly like a for loop.
+ */
+static int while_counter_pattern(const AstNode *loop, const char **var, const AstNode **stop) {
+    if (!loop || loop->kind != AST_WHILE || loop->child_count != 2) return 0;
+    const AstNode *cond = loop->children[0], *body = loop->children[1];
+    if (cond->kind != AST_BINARY || !cond->text || strcmp(cond->text, "<") != 0 || cond->child_count != 2) return 0;
+    const AstNode *lhs = cond->children[0], *rhs = cond->children[1];
+    if (lhs->kind != AST_IDENTIFIER || !lhs->text || !is_int_type(lhs->type_name)) return 0;
+    if (!body || body->kind != AST_BLOCK || body->child_count < 2) return 0;
+
+    const AstNode *last = body->children[body->child_count - 1];
+    if (last->kind != AST_ASSIGN || !last->text || strcmp(last->text, lhs->text) != 0 || last->child_count != 1) return 0;
+    const AstNode *inc = last->children[0];
+    int64_t one;
+    if (inc->kind != AST_BINARY || !inc->text || strcmp(inc->text, "+") != 0) return 0;
+    int v_left = inc->children[0]->kind == AST_IDENTIFIER && strcmp(inc->children[0]->text, lhs->text) == 0 &&
+                 const_int_value(inc->children[1], &one) && one == 1;
+    int v_right = inc->children[1]->kind == AST_IDENTIFIER && strcmp(inc->children[1]->text, lhs->text) == 0 &&
+                  const_int_value(inc->children[0], &one) && one == 1;
+    if (!v_left && !v_right) return 0;
+
+    for (size_t i = 0; i + 1 < body->child_count; i++) {
+        if (name_changes_in(body->children[i], lhs->text)) return 0;
+    }
+
+    int64_t k;
+    int stable = const_int_value(rhs, &k) ||
+        (rhs->kind == AST_IDENTIFIER && rhs->text && strcmp(rhs->text, lhs->text) != 0 &&
+         !name_changes_in(body, rhs->text)) ||
+        (rhs->kind == AST_CALL && rhs->text && strcmp(rhs->text, "len") == 0 && rhs->child_count == 1 &&
+         rhs->children[0]->kind == AST_IDENTIFIER && is_list_type(rhs->children[0]->type_name) &&
+         !name_changes_in(body, rhs->children[0]->text));
+    if (!stable) return 0;
+
+    *var = lhs->text;
+    *stop = rhs;
+    return 1;
+}
+
+static int fast_plan_while(const AstNode *loop, FastPlan *plan, const char **var, const AstNode **stop) {
+    plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+    if (!while_counter_pattern(loop, var, stop)) return 0;
+    const AstNode *body = loop->children[1];
+    if (has_nested_loop(body)) return 0;
+    if (tree_may_grow_lists(body)) return 0;   /* also keeps len(list) in the condition stable */
+
+    fast_plan_collect(plan, body, *var, body);
+    if (plan->access_count == 0) { fast_plan_free(plan); return 0; }
+    return 1;
+}
+
 static int program_has_fast_loop(const AstNode *n) {
     if (!n) return 0;
-    if (n->kind == AST_FOR) {
+    if (n->kind == AST_FOR || n->kind == AST_WHILE) {
         FastPlan plan;
-        int ok = fast_plan_for(n, &plan);
+        const char *var;
+        const AstNode *stop;
+        int ok = n->kind == AST_FOR ? fast_plan_for(n, &plan) : fast_plan_while(n, &plan, &var, &stop);
         fast_plan_free(&plan);
         if (ok) return 1;
     }
@@ -2198,6 +2254,93 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             }
 
             if (n->child_count != 2) return 0;
+            {
+                FastPlan plan;
+                const char *var = NULL;
+                const AstNode *stop = NULL;
+                if (fast_plan_while(n, &plan, &var, &stop)) {
+                    /*
+                     * Same idea as the for loop: prove the bounds once, at entry.
+                     * The bound is copied to a local so stores into the list can
+                     * never look like they change it (Clang can then vectorize).
+                     */
+                    int64_t kstop;
+                    int stop_const = const_int_value(stop, &kstop) || stop->kind == AST_IDENTIFIER;
+                    if (!stop_const) {
+                        fputs("{\n", f);
+                        indent(f, depth + 1);
+                        fprintf(f, "int64_t clair_stop_%s = ", var);
+                        if (!emit_expr(f, stop)) return 0;
+                        fputs(";\n", f);
+                        depth++;
+                        indent(f, depth);
+                    }
+                    fputs("if (", f);
+                    for (size_t i = 0; i < plan.check_count; i++) {
+                        BoundsCheck *b = &plan.checks[i];
+                        if (i != 0) {
+                            fputs(" &&\n", f);
+                            indent(f, depth + 1);
+                        }
+                        const char *bexpr = fast_plan_expr(&plan, b->base);
+                        if (b->dim == 0) fprintf(f, "clair_rt_affine_ok(%s, %s, %s, %s, ", bexpr, b->c0, b->c1, var);
+                        else fprintf(f, "clair_rt_affine_in(%s, %s, %s, ", b->c0, b->c1, var);
+                        if (stop_const) { if (!emit_expr(f, stop)) return 0; }
+                        else fprintf(f, "clair_stop_%s", var);
+                        if (b->dim == 1) fprintf(f, ", %s->rows", bexpr);
+                        if (b->dim == 2) fprintf(f, ", %s->cols", bexpr);
+                        fputc(')', f);
+                    }
+                    fputs(") {\n", f);
+                    for (size_t i = 0; i < plan.base_count; i++) {
+                        int matrix = is_matrix_type(plan.base_types[i]);
+                        const char *elem = matrix ? matrix_element_c_type(plan.base_types[i])
+                                                  : list_element_c_type(plan.base_types[i]);
+                        indent(f, depth + 1);
+                        fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n",
+                                elem, plan.bases[i], elem, plan.base_exprs[i]);
+                        if (matrix) {
+                            indent(f, depth + 1);
+                            fprintf(f, "int64_t clair_cols_%s = %s->cols;\n", plan.bases[i], plan.base_exprs[i]);
+                        }
+                    }
+                    for (size_t i = 0; i < plan.access_count; i++) fast_access[i] = plan.accesses[i];
+                    fast_access_count = plan.access_count;
+                    indent(f, depth + 1);
+                    if (stop_const) {
+                        fputs("while (", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputs(") {\n", f);
+                    } else {
+                        fprintf(f, "while (%s < clair_stop_%s) {\n", var, var);
+                    }
+                    fast_access_active = 1;
+                    int ok = emit_block(f, n->children[1], depth + 2);
+                    fast_access_active = 0;
+                    fast_access_count = 0;
+                    if (!ok) return 0;
+                    indent(f, depth + 1);
+                    fputs("}\n", f);
+                    indent(f, depth);
+                    fputs("} else {\n", f);
+                    indent(f, depth + 1);
+                    fputs("while (", f);
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fputs(") {\n", f);
+                    if (!emit_block(f, n->children[1], depth + 2)) return 0;
+                    indent(f, depth + 1);
+                    fputs("}\n", f);
+                    indent(f, depth);
+                    fputs("}\n", f);
+                    if (!stop_const) {
+                        depth--;
+                        indent(f, depth);
+                        fputs("}\n", f);
+                    }
+                    fast_plan_free(&plan);
+                    return 1;
+                }
+            }
             fputs("while (", f);
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(") {\n", f);

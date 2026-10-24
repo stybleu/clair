@@ -14,7 +14,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Écriture directe dans les champs : `self.w[i][j] = x`, `self.items.append(x)`
 - Exemple complet : réseau de neurones entraîné sur XOR (`tests/xor_training.cl`)
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
-- Boucles rapides : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
+- Boucles rapides (`for` et `while`) : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
 - Optimisations SIMD ARM64 NEON
@@ -42,7 +42,7 @@ cmake --build build -j2
 bash tools/rapport_code_machine.sh
 ```
 
-Compare six programmes types avec leur version écrite à la main en C, et indique si Clang a vectorisé chaque boucle.
+Compare sept programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %.
 
 ## Tests
 
@@ -59,6 +59,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.22](docs/README_V0.22.md) : boucles `while` rapides, rapport du code machine plus fiable
 - [Clair V0.21](docs/README_V0.21.md) : matrices à largeur fixe vectorisées (apprentissage XOR)
 - [Clair V0.20](docs/README_V0.20.md) : écriture dans les champs, boucles rapides sur `self.w`, apprentissage de XOR
 - [Clair V0.19](docs/README_V0.19.md) : matrices, couche dense d'un réseau de neurones

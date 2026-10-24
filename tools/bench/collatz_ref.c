@@ -1,4 +1,5 @@
 /* Same program written by hand in C, compiled with the same flags. */
+/* noyau: steps */
 #include <stdint.h>
 #include <stdio.h>
 

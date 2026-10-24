@@ -21,7 +21,7 @@ def main() -> int {
             b[i][j] = 0.5
         }
     }
-    for r in range(4) {
+    for r in range(32) {
         matmul(a, b, c)
     }
     print(c[n - 1][n - 1])
