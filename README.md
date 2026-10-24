@@ -1,46 +1,32 @@
-# Clair
+Clair — Langage de programmation compilé
 
-Clair est un langage de programmation expérimental.
-Son compilateur est écrit en C et utilise Clang.
+Clair est un langage de programmation en cours de développement, conçu pour proposer une syntaxe simple, des performances élevées et une gestion sécurisée des opérations.
 
-## Fonctionnalités
+Le compilateur analyse le code Clair, vérifie sa validité et génère du code C, qui peut ensuite être compilé en programme natif avec Clang.
 
-- Types (int, float 64 et 128bit), bool et string
-- Fonctions, conditions et boucles
-- Listes et dictionnaires typés
-- Classes et objets
-- Optimisations de listes sur la pile
-- Optimisations SIMD ARM64 NEON
-- Division entière contrôlée
+Fonctionnement
 
-## Compilation sous Termux
+Clair prend actuellement en charge plusieurs fonctionnalités, notamment :
 
-Installer Clang, CMake et Make.
+- Les variables et les types de données.
+- Les fonctions et les conditions.
+- Les boucles.
+- Les listes et leurs opérations.
+- Les contrôles de débordement arithmétique.
+- La compilation en code natif.
 
-```sh
-cmake -S . -B build
-cmake --build build -j2
-```
+Performances et sécurité
 
-## Utilisation
+Le développement de Clair accorde une attention particulière aux performances et à la sécurité.
 
-```sh
-./build/clair hello.cl -o hello
-./hello
-```
+Des expérimentations sont réalisées avec Clang et LLVM afin d'étudier les optimisations possibles, notamment pour les calculs matriciels.
 
-## Tests
+Les optimisations expérimentales ne sont intégrées au compilateur qu'après validation de leur comportement et de leur sécurité.
 
-```sh
-bash tests/run_tests.sh
-```
+État du projet
 
-## Statut
+Clair est actuellement en développement actif. De nouvelles fonctionnalités, des optimisations et des améliorations du compilateur sont progressivement étudiées et ajoutées.
 
-Clair est en développement.
-SIMD V4 est encore expérimental.
-Les validations principales sont réalisées sous Termux ARM64.
+Licence
 
-## Documentation historique
-
-[Clair V0.14](docs/README_V0.14.md)
+Clair est distribué sous licence MIT.
