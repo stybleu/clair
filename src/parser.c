@@ -617,6 +617,28 @@ static AstNode *parse_for_statement(Parser *p) {
 
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
+
+    /* matrix[float] / matrix[int]: "matrix" stays an ordinary identifier elsewhere */
+    if (t.kind == TOKEN_IDENTIFIER && t.length == 6 && strncmp(t.start, "matrix", 6) == 0) {
+        next(p);
+        if (p->current.kind == TOKEN_LBRACKET) {
+            next(p);
+            const char *matrix_type = NULL;
+            if (p->current.kind == TOKEN_FLOAT) matrix_type = "matrix[float]";
+            else if (p->current.kind == TOKEN_INT) matrix_type = "matrix[int]";
+            else {
+                fprintf(stderr, "parse error at %zu:%zu: matrix element type must be float or int\n",
+                        p->current.line, p->current.column);
+                p->had_error = 1;
+                return 0;
+            }
+            next(p);
+            if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
+            return ast_set_type(node, matrix_type, strlen(matrix_type));
+        }
+        return ast_set_type(node, t.start, t.length);  /* a class named matrix */
+    }
+
     if (t.kind == TOKEN_INT || t.kind == TOKEN_FLOAT ||
         t.kind == TOKEN_BOOL || t.kind == TOKEN_STRING_TYPE ||
         t.kind == TOKEN_IDENTIFIER) {
@@ -762,6 +784,15 @@ static AstNode *parse_identifier_statement(Parser *p) {
                 break;
 
             case AST_INDEX:
+                if (lhs->children[0]->kind == AST_INDEX &&
+                    lhs->children[0]->children[0]->kind == AST_IDENTIFIER) {
+                    /* m[i][j] = value */
+                    AstNode *row = lhs->children[0];
+                    n = make_node(AST_MATRIX_SET, row->children[0]->text, take_child(row, 1), take_child(lhs, 1));
+                    if (n && !ast_add_child(n, value)) { ast_free(n); n = NULL; value = NULL; }
+                    if (!n) ast_free(value);
+                    break;
+                }
                 if (lhs->children[0]->kind != AST_IDENTIFIER) {
                     fprintf(stderr,
                             "parse error at %zu:%zu: indexed assignment target must be a variable\n",

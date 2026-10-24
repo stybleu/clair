@@ -54,6 +54,22 @@ static const char *list_type_for_element(const char *type) {
     return NULL;
 }
 
+static int is_matrix_type(const char *type) {
+    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[int]") == 0);
+}
+
+/* m[i] alone is only an intermediate step of m[i][j] */
+static int is_matrix_row_type(const char *type) {
+    return type && strncmp(type, "matrix_row[", 11) == 0;
+}
+
+static const char *matrix_element_type(const char *type) {
+    if (!type) return NULL;
+    if (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix_row[float]") == 0) return "float";
+    if (strcmp(type, "matrix[int]") == 0 || strcmp(type, "matrix_row[int]") == 0) return "int";
+    return NULL;
+}
+
 static int is_dict_type(const char *type) {
     return type && (
         strcmp(type, "dict[string,int]") == 0 ||
@@ -122,7 +138,7 @@ static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
-        (is_list_type(type) || is_dict_type(type))) {
+        (is_list_type(type) || is_dict_type(type) || is_matrix_type(type))) {
         return 1;
     }
     return find_class(s, type) != NULL;
@@ -328,6 +344,35 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
  * Returns 1 when `n` is a valid builtin call, -1 when it is a builtin used
  * wrongly (error already reported), 0 when the name is not a builtin.
  */
+static int check_matrix_builtin(Semantic *s, AstNode *n) {
+    const char *name = n->text;
+    if (strcmp(name, "matrix") == 0) {
+        error_type(s, "matrix() needs its type from context, e.g. let m: matrix[float] = matrix(2, 3)");
+        return -1;
+    }
+    if (strcmp(name, "rows") != 0 && strcmp(name, "cols") != 0) return 0;
+    if (n->child_count != 1) {
+        fprintf(stderr, "semantic error: %s() expects 1 argument, got %zu\n", name, n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *t = expr_type(s, n->children[0]);
+    if (!t) return -1;
+    if (!is_matrix_type(t)) {
+        fprintf(stderr, "semantic error: %s() expects a matrix, got %s\n", name, t);
+        s->had_error = 1;
+        return -1;
+    }
+    char *renamed = malloc(strlen(name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, name);
+    free(n->text);
+    n->text = renamed;
+    set_type(n, "int");
+    return 1;
+}
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -432,6 +477,11 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     }
 
     if (strcmp(n->text, "==") == 0 || strcmp(n->text, "!=") == 0) {
+        if (is_matrix_type(left) || is_matrix_type(right) ||
+            is_matrix_row_type(left) || is_matrix_row_type(right)) {
+            error_type(s, "matrix equality is not supported");
+            return NULL;
+        }
         if (is_list_type(left) || is_list_type(right) ||
             is_dict_type(left) || is_dict_type(right)) {
             error_type(s, "list or dictionary equality is not supported in Clair V0.15");
@@ -464,7 +514,34 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     return NULL;
 }
 
+static const char *check_matrix_make(Semantic *s, AstNode *n, const char *matrix_type) {
+    if (n->child_count != 2) {
+        fprintf(stderr, "semantic error: matrix() expects 2 arguments (rows, cols), got %zu\n", n->child_count);
+        s->had_error = 1;
+        return NULL;
+    }
+    for (size_t i = 0; i < 2; i++) {
+        const char *t = expr_type(s, n->children[i]);
+        if (!t) return NULL;
+        if (strcmp(t, "int") != 0) {
+            fprintf(stderr, "semantic error: matrix() %s must be int, got %s\n", i == 0 ? "rows" : "cols", t);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    free(n->text);
+    n->text = malloc(8);
+    if (!n->text) return NULL;
+    strcpy(n->text, "@matrix");
+    set_type(n, matrix_type);
+    return n->type_name;
+}
+
 static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expected) {
+    if (n && n->kind == AST_CALL && n->text && strcmp(n->text, "matrix") == 0 &&
+        is_matrix_type(expected) && !find_function(s, "matrix")) {
+        return check_matrix_make(s, n, expected);
+    }
     if (n && n->kind == AST_LIST && is_list_type(expected)) {
         return check_list_literal_as(s, n, expected);
     }
@@ -507,6 +584,23 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                     return NULL;
                 }
                 set_type(n, list_element_type(base));
+                return n->type_name;
+            }
+
+            if (base && (is_matrix_type(base) || is_matrix_row_type(base))) {
+                if (!index || strcmp(index, "int") != 0) {
+                    fprintf(stderr, "semantic error: matrix index must be int, got %s\n",
+                            index ? index : "invalid");
+                    s->had_error = 1;
+                    return NULL;
+                }
+                if (is_matrix_type(base)) {
+                    char row[32];
+                    snprintf(row, sizeof(row), "matrix_row[%s]", matrix_element_type(base));
+                    set_type(n, row);
+                } else {
+                    set_type(n, matrix_element_type(base));
+                }
                 return n->type_name;
             }
 
@@ -574,6 +668,10 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                     return NULL;
                 }
                 const char *arg = expr_type(s, n->children[0]);
+                if (arg && is_matrix_type(arg)) {
+                    error_type(s, "len() of a matrix is ambiguous: use rows(m) or cols(m)");
+                    return NULL;
+                }
                 if (!arg || (strcmp(arg, "string") != 0 && !is_list_type(arg) && !is_dict_type(arg))) {
                     fprintf(stderr, "semantic error: len() expects string, list or dictionary, got %s\n", arg ? arg : "invalid");
                     s->had_error = 1;
@@ -611,7 +709,8 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             const AstNode *fn = find_function(s, n->text);
             if (!fn) {
-                int builtin = check_builtin_call(s, n);
+                int builtin = check_matrix_builtin(s, n);
+                if (builtin == 0) builtin = check_builtin_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
                 fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);
@@ -745,6 +844,10 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *actual = expr_type_expected(s, n->children[0], n->type_name);
             if (!actual) return 0;
             if (!assignable(n->type_name, actual)) {
+                if (is_matrix_row_type(actual)) {
+                    error_type(s, "m[i] alone is a matrix row: write m[i][j]");
+                    return 0;
+                }
                 fprintf(stderr, "semantic error: cannot initialize %s '%s' with %s\n",
                         n->type_name, n->text, actual);
                 s->had_error = 1;
@@ -846,6 +949,38 @@ static int check_stmt(Semantic *s, AstNode *n) {
             fprintf(stderr, "semantic error: indexed assignment expects a list or dictionary, got %s\n", base);
             s->had_error = 1;
             return 0;
+        }
+        case AST_MATRIX_SET: {
+            if (n->child_count != 3) return 0;
+            const char *base = find_var(s, n->text);
+            if (!base) {
+                fprintf(stderr, "semantic error: assignment to undefined variable '%s'\n", n->text);
+                s->had_error = 1;
+                return 0;
+            }
+            if (!is_matrix_type(base)) {
+                fprintf(stderr, "semantic error: '%s[i][j] = ...' needs a matrix, got %s\n", n->text, base);
+                s->had_error = 1;
+                return 0;
+            }
+            for (size_t i = 0; i < 2; i++) {
+                const char *idx = expr_type(s, n->children[i]);
+                if (!idx || strcmp(idx, "int") != 0) {
+                    fprintf(stderr, "semantic error: matrix index must be int, got %s\n", idx ? idx : "invalid");
+                    s->had_error = 1;
+                    return 0;
+                }
+            }
+            const char *element = matrix_element_type(base);
+            const char *value = expr_type(s, n->children[2]);
+            if (!value || !assignable(element, value)) {
+                fprintf(stderr, "semantic error: %s element assignment expects %s, got %s\n",
+                        base, element, value ? value : "invalid");
+                s->had_error = 1;
+                return 0;
+            }
+            set_type(n, base);
+            return 1;
         }
         case AST_LIST_APPEND: {
             const char *base = find_var(s, n->text);
@@ -1097,6 +1232,7 @@ static void mangle_node(AstNode *n) {
         case AST_LET:
         case AST_ASSIGN:
         case AST_INDEX_ASSIGN:
+        case AST_MATRIX_SET:
         case AST_LIST_APPEND:
         case AST_FOR:
         case AST_PARAM:

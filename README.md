@@ -9,6 +9,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
 - Fonctions, conditions et boucles
 - Listes et dictionnaires typés
+- Matrices `matrix[float]` et `matrix[int]` : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
 - Boucles rapides : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
@@ -39,7 +40,7 @@ cmake --build build -j2
 bash tools/rapport_code_machine.sh
 ```
 
-Compare quatre programmes types avec leur version écrite à la main en C, et indique si Clang a vectorisé chaque boucle.
+Compare cinq programmes types avec leur version écrite à la main en C, et indique si Clang a vectorisé chaque boucle.
 
 ## Tests
 
@@ -56,6 +57,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.19](docs/README_V0.19.md) : matrices, couche dense d'un réseau de neurones
 - [Clair V0.18](docs/README_V0.18.md) : fonctions mathématiques, conversions, `%`, notation scientifique
 - [Clair V0.17](docs/README_V0.17.md) : boucles rapides, C lisible, rapport du code machine
 - [Clair V0.16](docs/README_V0.16.md) : méthodes, appels en instruction, mutation chaînée

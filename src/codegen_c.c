@@ -28,6 +28,28 @@ static int is_dict_type(const char *type) {
 }
 
 
+static int is_matrix_type(const char *type) {
+    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[int]") == 0);
+}
+
+static int is_matrix_row_type(const char *type) {
+    return type && strncmp(type, "matrix_row[", 11) == 0;
+}
+
+/* C element type of a matrix or of one of its rows */
+static const char *matrix_element_c_type(const char *type) {
+    if (!type) return NULL;
+    if (strstr(type, "[float]")) return "double";
+    if (strstr(type, "[int]")) return "int64_t";
+    return NULL;
+}
+
+static const char *matrix_accessor_name(const char *type) {
+    const char *e = matrix_element_c_type(type);
+    if (!e) return NULL;
+    return strcmp(e, "double") == 0 ? "clair_rt_matrix_at_f64_checked" : "clair_rt_matrix_at_i64_checked";
+}
+
 static const char *c_type_name(const char *clair_type) {
     static char class_type[512];
 
@@ -38,6 +60,7 @@ static const char *c_type_name(const char *clair_type) {
     if (strcmp(clair_type, "string") == 0) return "const char *";
     if (is_list_type(clair_type)) return "ClairList";
     if (is_dict_type(clair_type)) return "ClairDict";
+    if (is_matrix_type(clair_type)) return "ClairMatrix";
 
     int written = snprintf(class_type, sizeof(class_type), "ClairClass_%s *", clair_type);
     if (written < 0 || (size_t)written >= sizeof(class_type)) return NULL;
@@ -138,9 +161,10 @@ static int int_div_is_safe(const AstNode *n) {
 
 static int is_int_type(const char *t) { return t && strcmp(t, "int") == 0; }
 
-/* Builtins that can never stop the program (only int(float) can). */
+/* Builtins that can never stop the program (only int(float) and matrix() can). */
 static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
+    if (strcmp(call->text, "@matrix") == 0) return 0;
     if (strcmp(call->text, "@int") == 0)
         return call->child_count == 1 && !(call->children[0]->type_name &&
                                            strcmp(call->children[0]->type_name, "float") == 0);
@@ -164,8 +188,8 @@ static void emit_int_literal(FILE *f, int64_t v) {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    const AstNode *node;   /* AST_INDEX or AST_INDEX_ASSIGN made unchecked */
-    const char *base;      /* list variable */
+    const AstNode *node;   /* AST_INDEX, AST_INDEX_ASSIGN or AST_MATRIX_SET made unchecked */
+    const char *base;      /* list or matrix variable */
 } FastAccess;
 
 #define FAST_MAX 128
@@ -377,6 +401,7 @@ typedef struct {
     const char *list_type;
     char *c0;
     char *c1;
+    int dim;        /* 0: list index, 1: matrix row index, 2: matrix column index */
 } BoundsCheck;
 
 typedef struct {
@@ -397,6 +422,38 @@ static void fast_plan_free(FastPlan *plan) {
     plan->check_count = plan->access_count = plan->base_count = 0;
 }
 
+static void fast_plan_add_check(FastPlan *plan, const char *base, const char *type, char *c0, char *c1, int dim) {
+    for (size_t i = 0; i < plan->check_count; i++) {
+        BoundsCheck *b = &plan->checks[i];
+        if (b->dim == dim && strcmp(b->base, base) == 0 && strcmp(b->c0, c0) == 0 && strcmp(b->c1, c1) == 0) {
+            free(c0); free(c1);
+            return;
+        }
+    }
+    plan->checks[plan->check_count++] = (BoundsCheck){ base, type, c0, c1, dim };
+}
+
+static void fast_plan_add_base(FastPlan *plan, const char *base, const char *type) {
+    for (size_t i = 0; i < plan->base_count; i++) {
+        if (strcmp(plan->bases[i], base) == 0) return;
+    }
+    plan->bases[plan->base_count] = base;
+    plan->base_types[plan->base_count++] = type;
+}
+
+/* m[r][c]: both indices proven in range, the access becomes data[r * cols + c] */
+static void fast_plan_add_matrix(FastPlan *plan, const AstNode *node, const char *base, const char *type,
+                                 char *r0, char *r1, char *k0, char *k1) {
+    if (plan->access_count >= FAST_MAX || plan->check_count + 2 > FAST_MAX || plan->base_count >= FAST_MAX) {
+        free(r0); free(r1); free(k0); free(k1);
+        return;
+    }
+    plan->accesses[plan->access_count++] = (FastAccess){ node, base };
+    fast_plan_add_base(plan, base, type);
+    fast_plan_add_check(plan, base, type, r0, r1, 1);
+    fast_plan_add_check(plan, base, type, k0, k1, 2);
+}
+
 static void fast_plan_add(FastPlan *plan, const AstNode *node, const char *base, const char *list_type,
                           char *c0, char *c1) {
     if (plan->access_count >= FAST_MAX || plan->check_count >= FAST_MAX || plan->base_count >= FAST_MAX) {
@@ -405,23 +462,9 @@ static void fast_plan_add(FastPlan *plan, const AstNode *node, const char *base,
     }
     plan->accesses[plan->access_count++] = (FastAccess){ node, base };
 
-    int seen_base = 0;
-    for (size_t i = 0; i < plan->base_count; i++) {
-        if (strcmp(plan->bases[i], base) == 0) seen_base = 1;
-    }
-    if (!seen_base) {
-        plan->bases[plan->base_count] = base;
-        plan->base_types[plan->base_count++] = list_type;
-    }
+    fast_plan_add_base(plan, base, list_type);
 
-    for (size_t i = 0; i < plan->check_count; i++) {
-        BoundsCheck *b = &plan->checks[i];
-        if (strcmp(b->base, base) == 0 && strcmp(b->c0, c0) == 0 && strcmp(b->c1, c1) == 0) {
-            free(c0); free(c1);
-            return;
-        }
-    }
-    plan->checks[plan->check_count++] = (BoundsCheck){ base, list_type, c0, c1 };
+    fast_plan_add_check(plan, base, list_type, c0, c1, 0);
 }
 
 static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, const AstNode *body) {
@@ -444,6 +487,33 @@ static void fast_plan_collect(FastPlan *plan, const AstNode *n, const char *v, c
     if (base && !name_changes_in(body, base) && strcmp(base, v) != 0) {
         char *c0, *c1;
         if (affine_split(index, v, body, &c0, &c1)) fast_plan_add(plan, n, base, list_type, c0, c1);
+    }
+
+    /* matrix read m[r][c] or write m[r][c] = value */
+    const AstNode *row_index = NULL, *col_index = NULL;
+    const char *mbase = NULL, *mtype = NULL;
+    if (n->kind == AST_INDEX && n->child_count == 2 && n->children[0]->kind == AST_INDEX &&
+        is_matrix_row_type(n->children[0]->type_name) &&
+        n->children[0]->children[0]->kind == AST_IDENTIFIER) {
+        mbase = n->children[0]->children[0]->text;
+        mtype = n->children[0]->children[0]->type_name;
+        row_index = n->children[0]->children[1];
+        col_index = n->children[1];
+    } else if (n->kind == AST_MATRIX_SET && n->child_count == 3 && is_matrix_type(n->type_name)) {
+        mbase = n->text;
+        mtype = n->type_name;
+        row_index = n->children[0];
+        col_index = n->children[1];
+    }
+    if (mbase && !name_changes_in(body, mbase) && strcmp(mbase, v) != 0) {
+        char *r0, *r1, *k0, *k1;
+        if (affine_split(row_index, v, body, &r0, &r1)) {
+            if (affine_split(col_index, v, body, &k0, &k1)) {
+                fast_plan_add_matrix(plan, n, mbase, mtype, r0, r1, k0, k1);
+            } else {
+                free(r0); free(r1);
+            }
+        }
     }
 
     for (size_t i = 0; i < n->child_count; i++) fast_plan_collect(plan, n->children[i], v, body);
@@ -1148,6 +1218,28 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
         case AST_INDEX: {
             if (n->child_count != 2 || !n->type_name || !n->children[0]->type_name) return 0;
+
+            if (is_matrix_row_type(n->children[0]->type_name)) {
+                const AstNode *row = n->children[0];
+                const char *fast_base = fast_access_base(n);
+                if (fast_base) {
+                    /* both indices proven in range: plain row-major access */
+                    fprintf(f, "clair_data_%s[", fast_base);
+                    if (!emit_operand(f, row->children[1], PREC_MULTIPLICATIVE, 0)) return 0;
+                    fprintf(f, " * clair_cols_%s + ", fast_base);
+                    if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
+                    fputc(']', f);
+                    return 1;
+                }
+                fprintf(f, "*%s(", matrix_accessor_name(row->type_name));
+                if (!emit_expr(f, row->children[0])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, row->children[1])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputc(')', f);
+                return 1;
+            }
             const char *element_type = c_type_name(n->type_name);
             if (!element_type || is_list_type(n->type_name) || is_dict_type(n->type_name)) return 0;
 
@@ -1207,6 +1299,19 @@ static int emit_expr(FILE *f, const AstNode *n) {
         case AST_CALL:
             if (n->text && n->text[0] == '@') {
                 const char *name = n->text + 1;
+                if (strcmp(name, "matrix") == 0) {
+                    fprintf(f, "clair_rt_matrix_make(");
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fputs(", ", f);
+                    if (!emit_expr(f, n->children[1])) return 0;
+                    fprintf(f, ", sizeof(%s))", matrix_element_c_type(n->type_name));
+                    return 1;
+                }
+                if (strcmp(name, "rows") == 0 || strcmp(name, "cols") == 0) {
+                    if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
+                    fprintf(f, "->%s", name);
+                    return 1;
+                }
                 const char *t0 = n->child_count > 0 ? n->children[0]->type_name : NULL;
                 if (strcmp(name, "float") == 0) {
                     fputs("(double)", f);
@@ -1645,6 +1750,53 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             fputs(";\n", f);
             return 1;
 
+        case AST_MATRIX_SET: {
+            if (n->child_count != 3 || !n->type_name || !n->text) return 0;
+            const char *fast_base = fast_access_base(n);
+            if (fast_base) {
+                fprintf(f, "clair_data_%s[", fast_base);
+                if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
+                fprintf(f, " * clair_cols_%s + ", fast_base);
+                if (!emit_operand(f, n->children[1], PREC_ADDITIVE, 1)) return 0;
+                fputs("] = ", f);
+                if (!emit_expr(f, n->children[2])) return 0;
+                fputs(";\n", f);
+                return 1;
+            }
+            const char *accessor = matrix_accessor_name(n->type_name);
+            if (!node_may_fail(n->children[0]) && !node_may_fail(n->children[1]) && !node_may_fail(n->children[2])) {
+                fprintf(f, "*%s(%s, ", accessor, n->text);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputs(") = ", f);
+                if (!emit_expr(f, n->children[2])) return 0;
+                fputs(";\n", f);
+                return 1;
+            }
+            /* same order as lists: indices, then value, then the bounds check */
+            size_t id = list_mutation_counter++;
+            fputs("{\n", f);
+            indent(f, depth + 1);
+            fprintf(f, "int64_t __clair_row_%zu = ", id);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputs(";\n", f);
+            indent(f, depth + 1);
+            fprintf(f, "int64_t __clair_col_%zu = ", id);
+            if (!emit_expr(f, n->children[1])) return 0;
+            fputs(";\n", f);
+            indent(f, depth + 1);
+            fprintf(f, "%s __clair_value_%zu = ", matrix_element_c_type(n->type_name), id);
+            if (!emit_expr(f, n->children[2])) return 0;
+            fputs(";\n", f);
+            indent(f, depth + 1);
+            fprintf(f, "*%s(%s, __clair_row_%zu, __clair_col_%zu) = __clair_value_%zu;\n",
+                    accessor, n->text, id, id, id);
+            indent(f, depth);
+            fputs("}\n", f);
+            return 1;
+        }
+
         case AST_INDEX_ASSIGN: {
             if (!n->type_name) return 0;
             size_t id;
@@ -1943,22 +2095,31 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                             fputs(" &&\n", f);
                             indent(f, inner + 1);
                         }
-                        fprintf(f, "clair_rt_affine_ok(%s, %s, %s, ", b->base, b->c0, b->c1);
+                        if (b->dim == 0) fprintf(f, "clair_rt_affine_ok(%s, %s, %s, ", b->base, b->c0, b->c1);
+                        else fprintf(f, "clair_rt_affine_in(%s, %s, ", b->c0, b->c1);
                         if (start_text) fputs(start_text, f);
                         else if (!start_node) fputs("0", f);
                         else if (!emit_expr(f, start_node)) return 0;
                         fputs(", ", f);
                         if (stop_text) fputs(stop_text, f);
                         else if (!emit_expr(f, stop_node)) return 0;
+                        if (b->dim == 1) fprintf(f, ", %s->rows", b->base);
+                        if (b->dim == 2) fprintf(f, ", %s->cols", b->base);
                         fputc(')', f);
                     }
                     fputs(") {\n", f);
 
                     for (size_t i = 0; i < plan.base_count; i++) {
-                        const char *elem = list_element_c_type(plan.base_types[i]);
+                        int matrix = is_matrix_type(plan.base_types[i]);
+                        const char *elem = matrix ? matrix_element_c_type(plan.base_types[i])
+                                                  : list_element_c_type(plan.base_types[i]);
                         indent(f, inner + 1);
                         fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n",
                                 elem, plan.bases[i], elem, plan.bases[i]);
+                        if (matrix) {
+                            indent(f, inner + 1);
+                            fprintf(f, "int64_t clair_cols_%s = %s->cols;\n", plan.bases[i], plan.bases[i]);
+                        }
                     }
 
                     EMIT_FOR_HEADER(inner + 1);
@@ -2112,7 +2273,8 @@ static int node_uses_string_concat(const AstNode *n) {
 
 static int node_uses_list(const AstNode *n) {
     if (!n) return 0;
-    if (n->kind == AST_LIST || n->kind == AST_INDEX || n->kind == AST_INDEX_ASSIGN || n->kind == AST_LIST_APPEND ||
+    if (n->kind == AST_LIST || n->kind == AST_INDEX_ASSIGN || n->kind == AST_LIST_APPEND ||
+        (n->kind == AST_INDEX && n->child_count == 2 && is_list_type(n->children[0]->type_name)) ||
         is_list_type(n->type_name)) {
         return 1;
     }
@@ -2285,6 +2447,27 @@ static int node_uses_int_division(const AstNode *n) {
     return 0;
 }
 
+static int node_uses_matrix(const AstNode *n) {
+    if (!n) return 0;
+    if (is_matrix_type(n->type_name)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_matrix(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* element-access kinds actually used, so only those accessors are emitted */
+static int node_uses_matrix_kind(const AstNode *n, const char *suffix) {
+    if (!n) return 0;
+    if ((n->kind == AST_MATRIX_SET && n->type_name && strstr(n->type_name, suffix)) ||
+        (n->kind == AST_INDEX && n->child_count == 2 && is_matrix_row_type(n->children[0]->type_name) &&
+         strstr(n->children[0]->type_name, suffix))) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_matrix_kind(n->children[i], suffix)) return 1;
+    }
+    return 0;
+}
+
 static int node_uses_int_mod(const AstNode *n) {
     if (!n) return 0;
     if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 &&
@@ -2308,6 +2491,7 @@ static int node_uses_math(const AstNode *n) {
     if (!n) return 0;
     if (n->kind == AST_CALL && n->text && n->text[0] == '@' &&
         strcmp(n->text, "@int") != 0 && strcmp(n->text, "@float") != 0 &&
+        strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
         !(is_int_type(n->type_name) &&
           (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
     if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !is_int_type(n->type_name)) return 1;
@@ -2526,21 +2710,6 @@ int codegen_c_file(const AstNode *program, const char *path) {
             }
         }
 
-        if (program_has_fast_loop(program)) {
-            fputs(
-                "/* True when list[c0 + c1 * i] is in bounds for every i in [first, stop). */\n"
-                "static inline bool clair_rt_affine_ok(ClairList list, int64_t c0, int64_t c1, int64_t first, int64_t stop) {\n"
-                "    if (first >= stop) return true;\n"
-                "    int64_t lo, hi;\n"
-                "    if (__builtin_mul_overflow(c1, first, &lo) || __builtin_add_overflow(lo, c0, &lo)) return false;\n"
-                "    if (__builtin_mul_overflow(c1, stop - 1, &hi) || __builtin_add_overflow(hi, c0, &hi)) return false;\n"
-                "    if (lo > hi) { int64_t t = lo; lo = hi; hi = t; }\n"
-                "    return list && lo >= 0 && (uint64_t)hi < list->len;\n"
-                "}\n\n",
-                f
-            );
-        }
-
         if (uses_list_append) {
             fputs(
                 "static void *clair_rt_list_append_slot(ClairList list) {\n"
@@ -2573,6 +2742,16 @@ int codegen_c_file(const AstNode *program, const char *path) {
         }
     }
 
+    int uses_matrix = node_uses_matrix(program);
+    if (uses_matrix) {
+        fputs(
+            "/* A matrix is one contiguous row-major block, like hand-written C. */\n"
+            "typedef struct ClairMatrixObj { void *data; int64_t rows; int64_t cols; struct ClairMatrixObj *next; } ClairMatrixObj;\n"
+            "typedef ClairMatrixObj *ClairMatrix;\n\n",
+            f
+        );
+    }
+
     if (!emit_class_declarations(f, program)) {
         fclose(f);
         return 0;
@@ -2581,14 +2760,15 @@ int codegen_c_file(const AstNode *program, const char *path) {
     int uses_objects = node_uses_kind(program, AST_CONSTRUCT);
     int uses_concat = node_uses_string_concat(program);
 
-    if (uses_objects || uses_concat) {
+    if (uses_objects || uses_concat || uses_matrix) {
         /*
          * Bump-pointer arena shared by objects and concatenated strings.
          * One allocation is a pointer increment instead of malloc() plus a
          * registry insert; the few large chunks are released at exit.
          */
         fputs(
-            "typedef struct ClairArenaChunk { struct ClairArenaChunk *next; size_t used; size_t size; } ClairArenaChunk;\n"
+            "/* 32-byte header keeps every allocation 16-byte aligned */\n"
+            "typedef struct ClairArenaChunk { struct ClairArenaChunk *next; size_t used; size_t size; size_t pad; } ClairArenaChunk;\n"
             "static ClairArenaChunk *clair_rt_arena = NULL;\n\n"
             "static void clair_rt_arena_cleanup(void) {\n"
             "    while (clair_rt_arena) { ClairArenaChunk *next = clair_rt_arena->next; free(clair_rt_arena); clair_rt_arena = next; }\n"
@@ -2623,6 +2803,86 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "}\n\n",
             f
         );
+    }
+
+    if (uses_matrix) {
+        fputs(
+            "static ClairMatrix clair_rt_matrices = NULL;\n\n"
+            "static void clair_rt_matrix_cleanup(void) {\n"
+            "    for (ClairMatrix m = clair_rt_matrices; m; m = m->next) free(m->data);\n"
+            "    clair_rt_matrices = NULL;\n"
+            "}\n\n"
+            "static ClairMatrix clair_rt_matrix_make(int64_t rows, int64_t cols, size_t elem_size) {\n"
+            "    if (rows < 0 || cols < 0) {\n"
+            "        fputs(\"Clair runtime error: matrix() size cannot be negative\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    if (cols != 0 && (uint64_t)rows > SIZE_MAX / elem_size / (uint64_t)cols) {\n"
+            "        fputs(\"Clair runtime error: matrix() is too large\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    ClairMatrix m = clair_rt_arena_alloc(sizeof(*m));\n"
+            "    /* calloc: zeroed lazily by the system, same memory layout as hand-written C */\n"
+            "    m->data = calloc((size_t)rows * (size_t)cols + 1, elem_size);\n"
+            "    if (!m->data) {\n"
+            "        fputs(\"Clair runtime error: out of memory while creating matrix\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    m->rows = rows;\n"
+            "    m->cols = cols;\n"
+            "    if (!clair_rt_matrices && atexit(clair_rt_matrix_cleanup) != 0) {\n"
+            "        fputs(\"Clair runtime error: cannot register matrix cleanup\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    m->next = clair_rt_matrices;\n"
+            "    clair_rt_matrices = m;\n"
+            "    return m;\n"
+            "}\n\n"
+            "static _Noreturn void clair_rt_matrix_index_error(ClairMatrix m, int64_t i, int64_t j) {\n"
+            "    fprintf(stderr, \"Clair runtime error: matrix index [%\" PRId64 \"][%\" PRId64 \"] out of bounds for shape %\" PRId64 \"x%\" PRId64 \"\\n\",\n"
+            "            i, j, m->rows, m->cols);\n"
+            "    exit(EXIT_FAILURE);\n"
+            "}\n\n",
+            f
+        );
+        static const char *const mkinds[2][3] = {
+            { "[float]", "f64", "double" },
+            { "[int]", "i64", "int64_t" },
+        };
+        for (size_t k = 0; k < 2; k++) {
+            if (!node_uses_matrix_kind(program, mkinds[k][0])) continue;
+            fprintf(f,
+                "static inline %s *clair_rt_matrix_at_%s_checked(ClairMatrix m, int64_t i, int64_t j) {\n"
+                "    if ((uint64_t)i >= (uint64_t)m->rows || (uint64_t)j >= (uint64_t)m->cols) clair_rt_matrix_index_error(m, i, j);\n"
+                "    return (%s *)m->data + (i * m->cols + j);\n"
+                "}\n\n",
+                mkinds[k][2], mkinds[k][1], mkinds[k][2]);
+        }
+    }
+
+    if (program_has_fast_loop(program)) {
+        fputs(
+            "/* True when c0 + c1 * i stays in [0, limit) for every i in [first, stop). */\n"
+            "static inline bool clair_rt_affine_in(int64_t c0, int64_t c1, int64_t first, int64_t stop, int64_t limit) {\n"
+            "    if (first >= stop) return true;\n"
+            "    int64_t lo, hi;\n"
+            "    if (__builtin_mul_overflow(c1, first, &lo) || __builtin_add_overflow(lo, c0, &lo)) return false;\n"
+            "    if (__builtin_mul_overflow(c1, stop - 1, &hi) || __builtin_add_overflow(hi, c0, &hi)) return false;\n"
+            "    if (lo > hi) { int64_t t = lo; lo = hi; hi = t; }\n"
+            "    return lo >= 0 && hi < limit;\n"
+            "}\n\n",
+            f
+        );
+        if (node_uses_list(program)) {
+            fputs(
+                "/* True when list[c0 + c1 * i] is in bounds for every i in [first, stop). */\n"
+                "static inline bool clair_rt_affine_ok(ClairList list, int64_t c0, int64_t c1, int64_t first, int64_t stop) {\n"
+                "    return list && list->len <= (size_t)INT64_MAX &&\n"
+                "           clair_rt_affine_in(c0, c1, first, stop, (int64_t)list->len);\n"
+                "}\n\n",
+                f
+            );
+        }
     }
 
     if (uses_objects) {

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.18 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.19 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -542,6 +542,20 @@ expect_compile_error invalid_math_type "argument 1 of sqrt() expects int or floa
 expect_compile_error invalid_mod_type "operator '%' requires int or float operands"
 expect_runtime_error mod_zero_runtime '1' 'Clair runtime error: modulo by zero'
 expect_runtime_error int_range_runtime '' 'Clair runtime error: int() argument out of range'
+
+./build/clair tests/matrix_basic.cl -o build/test_matrix_basic
+out_matrix_basic="$(./build/test_matrix_basic)"
+expected_matrix_basic="$(printf '2\n3\n0\n6.5\n2\n5\n4\n11\n6\n0.731058578630005\n0.731058578630005\n9\n0\n5')"
+[ "$out_matrix_basic" = "$expected_matrix_basic" ]
+grep -Fq 'clair_data_c[i * clair_cols_c + j] = clair_data_c[i * clair_cols_c + j] + aik * clair_data_b[k * clair_cols_b + j];' build/test_matrix_basic.generated.c
+printf '%s\n' 'matrix_basic.cl : OK -> matrix[float]/[int], m[i][j], rows/cols, couche dense, produit, boucles rapides'
+
+expect_compile_error invalid_matrix_context "matrix() needs its type from context"
+expect_compile_error invalid_matrix_row "m[i] alone is a matrix row: write m[i][j]"
+expect_compile_error invalid_matrix_value "matrix[float] element assignment expects float, got string"
+expect_compile_error invalid_matrix_len "len() of a matrix is ambiguous: use rows(m) or cols(m)"
+expect_runtime_error matrix_bounds_runtime '0\n1\n2' 'Clair runtime error: matrix index [2][0] out of bounds for shape 2x2'
+expect_runtime_error matrix_negative_runtime '' 'Clair runtime error: matrix() size cannot be negative'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

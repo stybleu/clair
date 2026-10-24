@@ -34,7 +34,7 @@ best_of_3() {
 
 printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$(clang --version | head -n 1 | sed 's/ (.*//')"
 
-for name in collatz dot axpy matmul; do
+for name in collatz dot axpy matmul matrice; do
     kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
 
     if ! "$ROOT/build/clair" "$BENCH/$name.cl" -o "$WORK/$name" > "$WORK/$name.log" 2>&1; then

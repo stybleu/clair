@@ -19,6 +19,7 @@ typedef enum {
     AST_CONTINUE,
     AST_ASSIGN,
     AST_INDEX_ASSIGN,
+    AST_MATRIX_SET,     /* name[i][j] = value ; children: i, j, value */
     AST_LIST_APPEND,
     AST_CALL,
     AST_METHOD_CALL,
