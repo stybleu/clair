@@ -24,7 +24,7 @@ int main(void) {
         x[i] = (double)(i % 3) / 3.0;
         y[i] = 0.0;
     }
-    for (long r = 0; r < 4000; r++) {
+    for (long r = 0; r < 16000; r++) {
         couche(w, b, x, y, n, n);
         x[r % n] = y[(r * 7) % n];
     }

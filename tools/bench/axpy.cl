@@ -12,7 +12,7 @@ def main() -> int {
         x.append(1.0)
         y.append(0.0)
     }
-    for r in range(100000) {
+    for r in range(400000) {
         axpy(0.000001, x, y)
     }
     print(y[4095])

@@ -1,4 +1,4 @@
-// XOR : reseau 2-16-1 entraine 200000 fois sur les 4 exemples (descente de gradient).
+// XOR : reseau 2-16-1 entraine 600000 fois sur les 4 exemples (descente de gradient).
 // noyau: Mlp__train
 
 def sigmoid(x: float) -> float {
@@ -68,7 +68,7 @@ def main() -> int {
     let y: list[float] = [0.0, 1.0, 1.0, 0.0]
 
     let loss: float = 0.0
-    for epoch in range(200000) {
+    for epoch in range(600000) {
         loss = 0.0
         for n in range(4) {
             loss = loss + net.train(x0[n], x1[n], y[n], 0.5)

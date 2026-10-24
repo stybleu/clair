@@ -16,7 +16,7 @@ def main() -> int {
         x.append(i * 7919 % 1000)
     }
     let s: int = 0
-    for r in range(100000) {
+    for r in range(300000) {
         s = s + au_dessus(x, r % 1000)
     }
     print(s)

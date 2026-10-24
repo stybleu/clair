@@ -1,4 +1,4 @@
-// couche dense d'un reseau de neurones : 256 entrees -> 256 sorties, sigmoide, 4000 fois
+// couche dense d'un reseau de neurones : 256 entrees -> 256 sorties, sigmoide, 16000 fois
 // noyau: couche
 def sigmoid(v: float) -> float {
     return 1.0 / (1.0 + exp(-v))
@@ -29,7 +29,7 @@ def main() -> int {
         x.append(float(i % 3) / 3.0)
         y.append(0.0)
     }
-    for r in range(4000) {
+    for r in range(16000) {
         couche(w, b, x, y)
         x[r % n] = y[(r * 7) % n]
     }

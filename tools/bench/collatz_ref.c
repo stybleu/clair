@@ -15,7 +15,7 @@ static int64_t steps(int64_t n) {
 
 int main(void) {
     int64_t best = 0;
-    for (int64_t i = 1; i < 600000; i++) {
+    for (int64_t i = 1; i < 1200000; i++) {
         int64_t s = steps(i);
         if (s > best) best = s;
     }

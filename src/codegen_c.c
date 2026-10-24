@@ -2047,6 +2047,286 @@ static int stack_list_decl_is_safe(const AstNode *n) {
     return stack_list_binding_uses_are_safe(n);
 }
 
+/* ------------------------------------------------------------------ */
+/* Ownership: freeing lists and matrices during the program.          */
+/*                                                                    */
+/* A variable declared with a new list or matrix ([...], matrix(r, c) */
+/* or a call to a function that returns a new one) owns it when no    */
+/* other reference can survive: it is only indexed, measured, appended */
+/* to, iterated, or passed to parameters that do not keep it.  The    */
+/* list is then freed when the variable goes away (end of its block,  */
+/* break, continue, return), and `v = new list` frees the old one.    */
+/* Everything else is kept until the end of the program, as before.   */
+/* ------------------------------------------------------------------ */
+
+static size_t function_param_count(const AstNode *fn);
+static const AstNode *function_body(const AstNode *fn);
+
+#define OWN_MAX 4096
+static const AstNode *own_decls[OWN_MAX];
+static size_t own_decl_count = 0;
+static const AstNode *own_assigns[OWN_MAX];
+static size_t own_assign_count = 0;
+static const AstNode *own_pending[OWN_MAX];     /* assignments found while checking one binding */
+static size_t own_pending_count = 0;
+
+/* parameters (list or matrix) a function may keep: bit k set for parameter k */
+static const char *escape_fn[SAFE_FN_MAX];
+static uint64_t escape_bits[SAFE_FN_MAX];
+static size_t escape_count = 0;
+static const char *fresh_fn[SAFE_FN_MAX];
+static size_t fresh_count = 0;
+
+static int is_owned_type(const char *t) { return is_list_type(t) || is_matrix_type(t); }
+
+static const AstNode *find_program_function(const char *name) {
+    if (!codegen_program || !name) return NULL;
+    for (size_t i = 0; i < codegen_program->child_count; i++) {
+        const AstNode *fn = codegen_program->children[i];
+        if (fn->kind == AST_FUNCTION && fn->text && strcmp(fn->text, name) == 0) return fn;
+    }
+    return NULL;
+}
+
+static int param_escapes(const char *fn_name, size_t k) {
+    if (k >= 64) return 1;
+    for (size_t i = 0; i < escape_count; i++) {
+        if (strcmp(escape_fn[i], fn_name) == 0) return (int)((escape_bits[i] >> k) & 1);
+    }
+    return 1;   /* unknown function: assume it keeps everything */
+}
+
+static int is_fresh_fn(const char *name) {
+    for (size_t i = 0; i < fresh_count; i++) if (strcmp(fresh_fn[i], name) == 0) return 1;
+    return 0;
+}
+
+/* an expression that always makes a new list or matrix nobody else knows */
+static int fresh_expr(const AstNode *e) {
+    if (!e) return 0;
+    if (e->kind == AST_LIST && is_list_type(e->type_name)) return 1;
+    if (e->kind == AST_CALL && e->text && strcmp(e->text, "@matrix") == 0) return 1;
+    if (e->kind == AST_CALL && e->text && e->text[0] != '@' && is_fresh_fn(e->text)) return 1;
+    return 0;
+}
+
+typedef struct { int allow_return; } OwnCtx;
+
+static int own_block_ok(const AstNode *block, const AstNode *decl, const char *name, int visible, const OwnCtx *ctx);
+
+static int own_expr_ok(const AstNode *n, const char *name, int visible, const AstNode *parent, size_t idx,
+                       const OwnCtx *ctx) {
+    if (!n || !visible) return 1;
+    if (n->kind == AST_IDENTIFIER && n->text && strcmp(n->text, name) == 0) {
+        if (!parent) return 0;
+        if (parent->kind == AST_INDEX && idx == 0) return 1;                     /* v[i] */
+        if (parent->kind == AST_FOR_EACH && idx == 0) return 1;                  /* for x in v */
+        if (parent->kind == AST_RETURN && ctx->allow_return) return 1;           /* return v */
+        if (parent->kind == AST_CALL && parent->text) {
+            const char *callee = parent->text;
+            if (strcmp(callee, "len") == 0 || strcmp(callee, "@rows") == 0 || strcmp(callee, "@cols") == 0) return 1;
+            if (callee[0] != '@' && find_program_function(callee) && !param_escapes(callee, idx)) return 1;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (!own_expr_ok(n->children[i], name, visible, n, i, ctx)) return 0;
+    }
+    return 1;
+}
+
+static int own_stmt_ok(const AstNode *n, const AstNode *decl, const char *name, int visible, const OwnCtx *ctx) {
+    if (!n) return 1;
+    switch (n->kind) {
+        case AST_IF:
+            if (!own_expr_ok(n->children[0], name, visible, n, 0, ctx)) return 0;
+            for (size_t i = 1; i < n->child_count; i++) {
+                if (!own_block_ok(n->children[i], decl, name, visible, ctx)) return 0;
+            }
+            return 1;
+        case AST_WHILE:
+            if (n->child_count != 2) return 0;
+            if (!own_expr_ok(n->children[0], name, visible, n, 0, ctx)) return 0;
+            return own_block_ok(n->children[1], decl, name, visible, ctx);
+        case AST_FOR: {
+            if (!n->text || n->child_count < 2) return 0;
+            for (size_t i = 0; i + 1 < n->child_count; i++) {
+                if (!own_expr_ok(n->children[i], name, visible, n, i, ctx)) return 0;
+            }
+            return own_block_ok(n->children[n->child_count - 1], decl, name,
+                                strcmp(n->text, name) == 0 ? 0 : visible, ctx);
+        }
+        case AST_FOR_EACH: {
+            if (!n->text || n->child_count != 2) return 0;
+            if (!own_expr_ok(n->children[0], name, visible, n, 0, ctx)) return 0;
+            /* the loop keeps reading the list: it must not be replaced (and freed) meanwhile */
+            if (visible && is_ident(n->children[0], name) && name_changes_in(n->children[1], name)) return 0;
+            return own_block_ok(n->children[1], decl, name, strcmp(n->text, name) == 0 ? 0 : visible, ctx);
+        }
+        case AST_ASSIGN:
+            if (visible && n->text && strcmp(n->text, name) == 0) {
+                /* v = new list: the old one is freed first; anything else could share it */
+                if (ctx->allow_return || !fresh_expr(n->children[0]) || own_pending_count >= OWN_MAX) return 0;
+                if (!own_expr_ok(n->children[0], name, visible, n, 0, ctx)) return 0;
+                own_pending[own_pending_count++] = n;
+                return 1;
+            }
+            break;
+        case AST_LET:
+            return 0;    /* handled by the block walker */
+        default:
+            break;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (!own_expr_ok(n->children[i], name, visible, n, i, ctx)) return 0;
+    }
+    return 1;
+}
+
+static int own_block_ok(const AstNode *block, const AstNode *decl, const char *name, int visible, const OwnCtx *ctx) {
+    if (!block || block->kind != AST_BLOCK) return 0;
+    for (size_t i = 0; i < block->child_count; i++) {
+        const AstNode *st = block->children[i];
+        if (st->kind == AST_LET) {
+            if (!st->text || st->child_count != 1) return 0;
+            if (!own_expr_ok(st->children[0], name, visible, st, 0, ctx)) return 0;   /* also rejects aliases */
+            if (st == decl) visible = 1;
+            else if (strcmp(st->text, name) == 0) visible = 0;
+            continue;
+        }
+        if (!own_stmt_ok(st, decl, name, visible, ctx)) return 0;
+    }
+    return 1;
+}
+
+static int own_binding_ok(const AstNode *decl, int allow_return) {
+    const AstNode *fn = stack_list_find_function(decl);
+    const AstNode *body = fn ? function_body(fn) : NULL;
+    OwnCtx ctx = { allow_return };
+    own_pending_count = 0;
+    return body && own_block_ok(body, decl, decl->text, 0, &ctx);
+}
+
+static void collect_lets(const AstNode *n, const AstNode **out, size_t *count, size_t max) {
+    if (!n) return;
+    if (n->kind == AST_LET && *count < max) out[(*count)++] = n;
+    for (size_t i = 0; i < n->child_count; i++) collect_lets(n->children[i], out, count, max);
+}
+
+static int count_declarations(const AstNode *n, const char *name) {
+    if (!n) return 0;
+    int c = ((n->kind == AST_LET || n->kind == AST_PARAM || n->kind == AST_FOR || n->kind == AST_FOR_EACH) &&
+             n->text && strcmp(n->text, name) == 0) ? 1 : 0;
+    for (size_t i = 0; i < n->child_count; i++) c += count_declarations(n->children[i], name);
+    return c;
+}
+
+/* every `return` returns the same local, declared once with a new list nobody else keeps */
+static int returns_fresh(const AstNode *fn) {
+    if (!is_owned_type(fn->type_name)) return 0;
+    const AstNode *body = function_body(fn);
+    const AstNode *lets[256];
+    size_t let_count = 0;
+    collect_lets(body, lets, &let_count, 256);
+    const AstNode *stack[512];
+    size_t top = 0;
+    const char *returned = NULL;
+    if (body) stack[top++] = body;
+    while (top > 0) {
+        const AstNode *n = stack[--top];
+        if (n->kind == AST_RETURN) {
+            if (n->child_count != 1 || !is_ident(n->children[0], NULL)) return 0;
+            if (returned && strcmp(returned, n->children[0]->text) != 0) return 0;
+            returned = n->children[0]->text;
+        }
+        for (size_t i = 0; i < n->child_count; i++) {
+            if (top >= 512) return 0;
+            stack[top++] = n->children[i];
+        }
+    }
+    if (!returned || count_declarations(fn, returned) != 1) return 0;
+    for (size_t i = 0; i < let_count; i++) {
+        const AstNode *let = lets[i];
+        if (strcmp(let->text, returned) != 0) continue;
+        if (!fresh_expr(let->children[0]) || stack_list_decl_is_safe(let)) return 0;
+        return own_binding_ok(let, 1);
+    }
+    return 0;
+}
+
+static int own_param_escapes(const AstNode *fn, size_t k) {
+    const AstNode *param = fn->children[k];
+    if (!param->text || !is_owned_type(param->type_name)) return 0;
+    OwnCtx ctx = { 0 };
+    own_pending_count = 0;
+    /* a parameter must not even be replaced: the caller still frees its own list */
+    if (name_changes_in(function_body(fn), param->text)) return 1;
+    return !own_block_ok(function_body(fn), NULL, param->text, 1, &ctx);
+}
+
+static int is_owned_decl(const AstNode *n) {
+    for (size_t i = 0; i < own_decl_count; i++) if (own_decls[i] == n) return 1;
+    return 0;
+}
+
+static int is_owned_assign(const AstNode *n) {
+    for (size_t i = 0; i < own_assign_count; i++) if (own_assigns[i] == n) return 1;
+    return 0;
+}
+
+static void compute_ownership(const AstNode *program) {
+    own_decl_count = own_assign_count = escape_count = fresh_count = 0;
+
+    /* 1. which list / matrix parameters may be kept by their function (least fixpoint) */
+    for (size_t i = 0; i < program->child_count && escape_count < SAFE_FN_MAX; i++) {
+        const AstNode *fn = program->children[i];
+        if (fn->kind != AST_FUNCTION || !fn->text) continue;
+        escape_fn[escape_count] = fn->text;
+        escape_bits[escape_count++] = 0;
+    }
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t i = 0; i < escape_count; i++) {
+            const AstNode *fn = find_program_function(escape_fn[i]);
+            size_t params = function_param_count(fn);
+            for (size_t k = 0; k < params && k < 64; k++) {
+                if ((escape_bits[i] >> k) & 1) continue;
+                if (own_param_escapes(fn, k)) {
+                    escape_bits[i] |= UINT64_C(1) << k;
+                    changed = 1;
+                }
+            }
+        }
+    }
+
+    /* 2. functions that return a new list or matrix (grows until stable) */
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t i = 0; i < program->child_count && fresh_count < SAFE_FN_MAX; i++) {
+            const AstNode *fn = program->children[i];
+            if (fn->kind != AST_FUNCTION || !fn->text || is_fresh_fn(fn->text)) continue;
+            if (returns_fresh(fn)) {
+                fresh_fn[fresh_count++] = fn->text;
+                changed = 1;
+            }
+        }
+    }
+
+    /* 3. variables that own their list or matrix */
+    const AstNode *lets[OWN_MAX];
+    size_t let_count = 0;
+    collect_lets(program, lets, &let_count, OWN_MAX);
+    for (size_t i = 0; i < let_count; i++) {
+        const AstNode *let = lets[i];
+        if (!let->text || !is_owned_type(let->type_name) || let->child_count != 1) continue;
+        if (!fresh_expr(let->children[0]) || stack_list_decl_is_safe(let)) continue;
+        if (!own_binding_ok(let, 0)) continue;
+        if (own_decl_count >= OWN_MAX || own_assign_count + own_pending_count > OWN_MAX) continue;
+        own_decls[own_decl_count++] = let;
+        for (size_t k = 0; k < own_pending_count; k++) own_assigns[own_assign_count++] = own_pending[k];
+    }
+}
+
 static void emit_c_string(FILE *f, const char *s) {
     fputc('"', f);
     for (; *s; s++) {
@@ -2681,15 +2961,65 @@ static int node_may_fail(const AstNode *n) {
     return 0;
 }
 
-static int emit_block(FILE *f, const AstNode *block, int depth) {
-    if (!block || block->kind != AST_BLOCK) return 0;
-    for (size_t i = 0; i < block->child_count; i++) {
-        if (!emit_stmt(f, block->children[i], depth)) return 0;
+/* Lists and matrices owned by the variables of the blocks being written (see compute_ownership). */
+typedef struct { const char *name; int matrix; } OwnedVar;
+static OwnedVar owned_live[OWN_MAX];
+static size_t owned_live_count = 0;
+static size_t loop_marks[1024];          /* owned_live_count when each enclosing loop started */
+static size_t loop_mark_count = 0;
+static const char *current_return_type = NULL;
+
+static void emit_free_since(FILE *f, size_t mark, int depth) {
+    for (size_t i = owned_live_count; i > mark; i--) {
+        indent(f, depth);
+        fprintf(f, "%s(%s);\n", owned_live[i - 1].matrix ? "clair_rt_matrix_free" : "clair_rt_list_free",
+                owned_live[i - 1].name);
     }
+}
+
+/* break / continue / return leaving owned variables: free them first */
+static int emit_jump(FILE *f, const char *jump, size_t mark, int depth) {
+    if (owned_live_count <= mark) {
+        fprintf(f, "%s;\n", jump);
+        return 1;
+    }
+    fputs("{\n", f);
+    emit_free_since(f, mark, depth + 1);
+    indent(f, depth + 1);
+    fprintf(f, "%s;\n", jump);
+    indent(f, depth);
+    fputs("}\n", f);
     return 1;
 }
 
+static int emit_block(FILE *f, const AstNode *block, int depth) {
+    if (!block || block->kind != AST_BLOCK) return 0;
+    size_t mark = owned_live_count;
+    for (size_t i = 0; i < block->child_count; i++) {
+        if (!emit_stmt(f, block->children[i], depth)) return 0;
+    }
+    const AstNode *last = block->child_count ? block->children[block->child_count - 1] : NULL;
+    int jumps = last && (last->kind == AST_RETURN || last->kind == AST_BREAK || last->kind == AST_CONTINUE);
+    if (!jumps) emit_free_since(f, mark, depth);   /* after a jump the frees were already written */
+    owned_live_count = mark;
+    return 1;
+}
+
+static int emit_stmt_inner(FILE *f, const AstNode *n, int depth);
+
+/* loops remember which owned variables are outside them, for break and continue */
 static int emit_stmt(FILE *f, const AstNode *n, int depth) {
+    int loop = n->kind == AST_FOR || n->kind == AST_WHILE || n->kind == AST_FOR_EACH;
+    if (loop) {
+        if (loop_mark_count >= sizeof(loop_marks) / sizeof(loop_marks[0])) return 0;
+        loop_marks[loop_mark_count++] = owned_live_count;
+    }
+    int ok = emit_stmt_inner(f, n, depth);
+    if (loop) loop_mark_count--;
+    return ok;
+}
+
+static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
     indent(f, depth);
 
     switch (n->kind) {
@@ -2799,10 +3129,32 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
             fprintf(f, "%s %s = ", type, n->text);
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(";\n", f);
+            if (is_owned_decl(n)) {
+                if (owned_live_count >= OWN_MAX) return 0;
+                owned_live[owned_live_count++] = (OwnedVar){ n->text, is_matrix_type(n->type_name) };
+            }
             return 1;
         }
 
         case AST_ASSIGN:
+            if (is_owned_assign(n)) {
+                /* v = new list: the old one is freed (nothing else can still use it) */
+                const char *type = c_type_name(n->children[0]->type_name);
+                if (!type) return 0;
+                fprintf(f, "{\n");
+                indent(f, depth + 1);
+                fprintf(f, "%s clair_new = ", type);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(";\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "%s(%s);\n", is_matrix_type(n->children[0]->type_name) ? "clair_rt_matrix_free"
+                                                                                     : "clair_rt_list_free", n->text);
+                indent(f, depth + 1);
+                fprintf(f, "%s = clair_new;\n", n->text);
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
             fprintf(f, "%s = ", n->text);
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(";\n", f);
@@ -2975,18 +3327,32 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
         }
 
         case AST_RETURN:
+            if (owned_live_count > 0) {
+                /* the value first (it may read an owned list), then the frees */
+                const char *type = c_type_name(current_return_type);
+                if (!type) return 0;
+                fputs("{\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "%s clair_result = ", type);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(";\n", f);
+                emit_free_since(f, 0, depth + 1);
+                indent(f, depth + 1);
+                fputs("return clair_result;\n", f);
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
             fputs("return ", f);
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(";\n", f);
             return 1;
 
         case AST_BREAK:
-            fputs("break;\n", f);
-            return 1;
+            return emit_jump(f, "break", loop_mark_count ? loop_marks[loop_mark_count - 1] : owned_live_count, depth);
 
         case AST_CONTINUE:
-            fputs("continue;\n", f);
-            return 1;
+            return emit_jump(f, "continue", loop_mark_count ? loop_marks[loop_mark_count - 1] : owned_live_count, depth);
 
         case AST_PRINT: {
             const AstNode *value = n->children[0];
@@ -3319,9 +3685,12 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
                         indent(f, depth + 3);
                         fprintf(f, "double %s = clair_s%d;\n", mv.s, r);
                     }
+                    size_t own_mark = owned_live_count;
                     for (size_t st = 2; st < body->child_count; st++) {
                         if (!emit_stmt(f, body->children[st], depth + 3)) return 0;
                     }
+                    emit_free_since(f, own_mark, depth + 3);
+                    owned_live_count = own_mark;
                     indent(f, depth + 2);
                     fputs("}\n", f);
                 }
@@ -4348,6 +4717,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     int uses_input_int = node_uses_call_named(program, "input_int");
     compute_safe_functions(program);
+    compute_ownership(program);
 
     fputs(unchecked_mode ? "/* Generated by the Clair compiler (--sans-verif: no bounds checks). */\n"
                          : "/* Generated by the Clair compiler. */\n", f);
@@ -4502,6 +4872,23 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "}\n\n",
                 f
             );
+            if (own_decl_count > 0) {
+                fputs(
+                    "/* A list nobody uses any more: freed now instead of at the end. */\n"
+                    "static void clair_rt_list_free(ClairList list) {\n"
+                    "    for (size_t i = clair_rt_list_count; i > 0; i--) {     /* usually the most recent */\n"
+                    "        if (clair_rt_lists[i - 1] == list) {\n"
+                    "            clair_rt_lists[i - 1] = NULL;\n"
+                    "            while (clair_rt_list_count > 0 && !clair_rt_lists[clair_rt_list_count - 1]) clair_rt_list_count--;\n"
+                    "            break;\n"
+                    "        }\n"
+                    "    }\n"
+                    "    free(list->data);\n"
+                    "    free(list);\n"
+                    "}\n\n",
+                    f
+                );
+            }
         }
 
         if (uses_list_at) {
@@ -4637,8 +5024,23 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs(
             "static ClairMatrix clair_rt_matrices = NULL;\n\n"
             "static void clair_rt_matrix_cleanup(void) {\n"
-            "    for (ClairMatrix m = clair_rt_matrices; m; m = m->next) free(m->data);\n"
+            "    for (ClairMatrix m = clair_rt_matrices, next; m; m = next) {\n"
+            "        next = m->next;\n"
+            "        free(m->data);\n"
+            "        free(m);\n"
+            "    }\n"
             "    clair_rt_matrices = NULL;\n"
+            "}\n\n"
+            "/* A matrix nobody uses any more: freed now instead of at the end. */\n"
+            "static void clair_rt_matrix_free(ClairMatrix m) {\n"
+            "    for (ClairMatrix *p = &clair_rt_matrices; *p; p = &(*p)->next) {   /* usually the first */\n"
+            "        if (*p == m) {\n"
+            "            *p = m->next;\n"
+            "            break;\n"
+            "        }\n"
+            "    }\n"
+            "    free(m->data);\n"
+            "    free(m);\n"
             "}\n\n"
             "static ClairMatrix clair_rt_matrix_make(int64_t rows, int64_t cols, size_t elem_size) {\n"
             "    if (rows < 0 || cols < 0) {\n"
@@ -4649,7 +5051,11 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "        fputs(\"Clair runtime error: matrix() is too large\\n\", stderr);\n"
             "        exit(EXIT_FAILURE);\n"
             "    }\n"
-            "    ClairMatrix m = clair_rt_arena_alloc(sizeof(*m));\n"
+            "    ClairMatrix m = malloc(sizeof(*m));\n"
+            "    if (!m) {\n"
+            "        fputs(\"Clair runtime error: out of memory while creating matrix\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
             "    /* calloc: zeroed lazily by the system, same memory layout as hand-written C */\n"
             "    m->data = calloc((size_t)rows * (size_t)cols + 1, elem_size);\n"
             "    if (!m->data) {\n"
@@ -4898,6 +5304,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs(" {\n", f);
 
         const AstNode *body = function_body(fn);
+        current_return_type = fn->type_name;
+        owned_live_count = 0;
+        loop_mark_count = 0;
         if (!emit_block(f, body, 1)) {
             fclose(f);
             return 0;

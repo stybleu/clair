@@ -20,7 +20,7 @@ def main() -> int {
         b.append(0.5)
         c.append(0.0)
     }
-    for r in range(32) {
+    for r in range(128) {
         matmul(a, b, c, n)
     }
     print(c[n * n - 1])

@@ -56,7 +56,7 @@ int main(void) {
 
     double x0[4] = { 0.0, 0.0, 1.0, 1.0 }, x1[4] = { 0.0, 1.0, 0.0, 1.0 }, y[4] = { 0.0, 1.0, 1.0, 0.0 };
     double loss = 0.0;
-    for (int epoch = 0; epoch < 200000; epoch++) {
+    for (int epoch = 0; epoch < 600000; epoch++) {
         loss = 0.0;
         for (int n = 0; n < 4; n++) loss = loss + train(&net, x0[n], x1[n], y[n], 0.5);
     }

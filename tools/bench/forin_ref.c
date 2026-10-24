@@ -16,7 +16,7 @@ int main(void) {
     long *x = malloc(n * sizeof(long));
     for (long i = 0; i < n; i++) x[i] = i * 7919 % 1000;
     long s = 0;
-    for (long r = 0; r < 100000; r++) s += au_dessus(x, n, r % 1000);
+    for (long r = 0; r < 300000; r++) s += au_dessus(x, n, r % 1000);
     printf("%ld\n", s);
     return 0;
 }

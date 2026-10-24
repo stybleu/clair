@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.27 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.28 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -638,6 +638,14 @@ expect_compile_error invalid_big_float_mix "operator '+' cannot mix int256 and f
 [ "$(grep -c 'for (; clair_row + 4 <= ' build/test_matvec_rows.generated.c)" = "3" ]
 printf '%s\n' 'matvec_rows.cl : OK -> couche dense 4 lignes a la fois, identique au bit pres, champs, liste a plat, repli si y = x'
 expect_runtime_error matvec_rows_bounds '' 'Clair runtime error: list index 2 out of bounds for length 2'
+
+./build/clair tests/memory_freeing.cl -o build/test_memory_freeing
+[ "$(./build/test_memory_freeing)" = "$(cat tests/memory_freeing.expected)" ]
+clang -O2 tests/max_memory.c -o build/max_memory
+memory_mb="$(./build/max_memory ./build/test_memory_freeing)"
+[ "$memory_mb" -lt 200 ]
+grep -Fq 'clair_rt_list_free(grads);' build/test_memory_freeing.generated.c
+printf '%s\n' "memory_freeing.cl : OK -> listes et matrices rendues pendant le programme ($memory_mb Mo au lieu d'environ 1200)"
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

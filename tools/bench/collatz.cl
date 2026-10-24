@@ -14,7 +14,7 @@ def steps(n: int) -> int {
 
 def main() -> int {
     let best: int = 0
-    for i in range(1, 600000) {
+    for i in range(1, 1200000) {
         let s: int = steps(i)
         if s > best {
             best = s

@@ -20,6 +20,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Produit de matrices reconnu et calculé en blocs : plus rapide que la triple boucle en C, résultat identique au bit près
 - Couche dense (matrice × vecteur) calculée 4 lignes à la fois : environ 2 fois plus rapide, résultat identique au bit près
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
+- Listes et matrices rendues pendant le programme quand plus rien ne les utilise (fin de bloc, `break`, `return`, remplacement)
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
 - Optimisations SIMD ARM64 NEON
@@ -74,6 +75,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.28](docs/README_V0.28.md) : mémoire rendue pendant le programme, rapport plus long
 - [Clair V0.27](docs/README_V0.27.md) : couche dense calculée 4 lignes à la fois, calculs à virgule identiques partout
 - [Clair V0.26](docs/README_V0.26.md) : grands entiers int128 à int1024, nombres trop grands pour int refusés
 - [Clair V0.25](docs/README_V0.25.md) : produit de matrices en blocs, rapport en temps médian
