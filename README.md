@@ -16,6 +16,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
 - Boucles rapides (`for` et `while`) : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
 - Doubles boucles (produit de matrices) vérifiées une seule fois avant la boucle extérieure
+- Produit de matrices reconnu et calculé en blocs : plus rapide que la triple boucle en C, résultat identique au bit près
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
@@ -51,7 +52,7 @@ n'est alors plus détecté) :
 bash tools/rapport_code_machine.sh
 ```
 
-Compare huit programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide.
+Compare huit programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé.
 
 ## Tests
 
@@ -68,6 +69,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.25](docs/README_V0.25.md) : produit de matrices en blocs, rapport en temps médian
 - [Clair V0.24](docs/README_V0.24.md) : `for v in liste`, rapport mesuré sur un seul cœur
 - [Clair V0.23](docs/README_V0.23.md) : doubles boucles vérifiées une seule fois, option `--sans-verif`
 - [Clair V0.22](docs/README_V0.22.md) : boucles `while` rapides, rapport du code machine plus fiable

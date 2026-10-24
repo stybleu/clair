@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Compares programs compiled by Clair with the same programs written by hand
 # in C: was the hot loop vectorized in each version, and how fast are they.
-# Clair and C are run alternately 5 times and the best time of each is kept,
-# so both are measured under the same conditions (a phone slows down when hot).
+# Clair and C are run alternately 5 times and the median time of each is kept,
+# so both are measured under the same conditions (a phone slows down when hot)
+# and one lucky run (memory placed favourably by chance) does not decide.
 # Every run is pinned to the same core, the fastest one (tools/pin_core.c):
 # otherwise the phone may give the fast core to one program and not the other.
 set -u
@@ -38,7 +39,7 @@ if clang -O2 "$ROOT/tools/pin_core.c" -o "$WORK/pin_core" 2> "$WORK/pin_core.log
         'BEGIN { printf "coeur %d", c; if (k > 0) printf " (%.2f GHz)", k / 1e6; printf " pour Clair et C" }')
 fi
 
-min_of() { awk -v a="$1" -v b="$2" 'BEGIN { print (b == "" || a < b) ? a : b }'; }
+median() { printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 } END { print (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
 
 # "oui" when the function's machine code contains SIMD instructions
 vectorized() {
@@ -78,11 +79,13 @@ for name in collatz dot axpy while forin matmul matrice reseau; do
     same=""
     [ "$out_clair" = "$out_ref" ] || same=" RESULTAT DIFFERENT"
 
-    t_clair=""; t_ref=""
+    times_clair=(); times_ref=()
     for _ in $(seq "$ROUNDS"); do
-        t_clair=$(min_of "$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/$name")" "$t_clair")
-        t_ref=$(min_of "$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/${name}_ref")" "$t_ref")
+        times_clair+=("$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/$name")")
+        times_ref+=("$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/${name}_ref")")
     done
+    t_clair=$(median "${times_clair[@]}")
+    t_ref=$(median "${times_ref[@]}")
     gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
     printf '%-9s %-11s %-7s %-7s %s%s\n' "$name" "$v_clair/$v_ref" \
         "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.24 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.25 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -612,6 +612,15 @@ printf '%s\n' 'for_each.cl : OK -> for v in liste, comme Python (liste qui grand
 expect_compile_error invalid_for_each_type "for ... in needs a list, got int"
 expect_compile_error invalid_for_each_matrix "for ... in needs a list, got matrix[float]: use for i in range(rows(m))"
 expect_compile_error invalid_for_each_element "operator '+' requires two numbers or two strings"
+
+./build/clair tests/matmul_blocks.cl -o build/test_matmul_blocks
+out_matmul_blocks="$(./build/test_matmul_blocks)"
+expected_matmul_blocks="$(printf '0\n0\n0\n0\n0\n0\n0\n0\n5.59825743440233\n0')"
+[ "$out_matmul_blocks" = "$expected_matmul_blocks" ]
+grep -Fq 'if (clair_rt_matmul_ok(a, b, c, a->rows, b->cols, a->cols)) {' build/test_matmul_blocks.generated.c
+grep -Fq 'if (clair_rt_matmul_list_ok(a, k, b, n, c, n, m, n, k)) {' build/test_matmul_blocks.generated.c
+printf '%s\n' 'matmul_blocks.cl : OK -> produit de matrices en blocs, identique au bit pres, repli si c = a'
+expect_runtime_error matmul_blocks_bounds '7' 'Clair runtime error: matrix index [0][2] out of bounds for shape 2x2'
 
 ./build/clair tests/input_int.cl -o build/test_input_int
 out_input_int="$(printf '10\n20\n' | ./build/test_input_int)"

@@ -1065,6 +1065,202 @@ static int program_has_fast_loop(const AstNode *n) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Matrix product: the triple loop                                    */
+/*     for i { for k { let aik = a[i][k]; for j {                     */
+/*         c[i][j] = c[i][j] + aik * b[k][j] } } }                    */
+/* is replaced by a blocked kernel doing the same additions in the    */
+/* same order for every c[i][j]: the result is identical to the bit.  */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int list_form;                      /* 0: matrices m[i][j], 1: flat lists x[i * ld + j] */
+    const char *i, *k, *j;
+    const AstNode *m_stop, *k_stop, *n_stop;
+    const char *a, *b, *c;
+    const AstNode *lda, *ldb, *ldc;     /* list form: row lengths (identifier or literal) */
+} MatmulPattern;
+
+static int matmul_suppress = 0;         /* set while emitting the plain loop kept as fallback */
+
+static int is_ident(const AstNode *e, const char *name) {
+    return e && e->kind == AST_IDENTIFIER && e->text && (!name || strcmp(e->text, name) == 0);
+}
+
+static int is_binary(const AstNode *e, const char *op) {
+    return e && e->kind == AST_BINARY && e->text && strcmp(e->text, op) == 0 && e->child_count == 2;
+}
+
+/* range(n) or range(0, n): the stop expression, or NULL */
+static const AstNode *zero_based_stop(const AstNode *loop) {
+    int64_t v;
+    if (loop->child_count == 2) return loop->children[0];
+    if (loop->child_count == 3 && const_int_value(loop->children[0], &v) && v == 0) return loop->children[1];
+    return NULL;
+}
+
+/* row * ld + col, in any operand order; ld is an int variable or an int literal */
+static const AstNode *flat_index_ld(const AstNode *e, const char *row, const char *col) {
+    if (!is_binary(e, "+")) return NULL;
+    for (int s = 0; s < 2; s++) {
+        const AstNode *mul = e->children[s];
+        if (!is_ident(e->children[1 - s], col) || !is_binary(mul, "*")) continue;
+        for (int t = 0; t < 2; t++) {
+            const AstNode *ld = mul->children[1 - t];
+            int64_t v;
+            if (is_ident(mul->children[t], row) &&
+                ((is_ident(ld, NULL) && is_int_type(ld->type_name)) || const_int_value(ld, &v))) return ld;
+        }
+    }
+    return NULL;
+}
+
+static int same_ld(const AstNode *x, const AstNode *y) {
+    int64_t a, b;
+    if (is_ident(x, NULL) && is_ident(y, NULL)) return strcmp(x->text, y->text) == 0;
+    return const_int_value(x, &a) && const_int_value(y, &b) && a == b;
+}
+
+/* name of m when e is m[row][col] with m a matrix[float] variable */
+static const char *matrix_read(const AstNode *e, const char *row, const char *col) {
+    if (!e || e->kind != AST_INDEX || e->child_count != 2 || !is_ident(e->children[1], col)) return NULL;
+    const AstNode *r = e->children[0];
+    if (r->kind != AST_INDEX || r->child_count != 2 || !is_ident(r->children[1], row)) return NULL;
+    const AstNode *m = r->children[0];
+    if (!is_ident(m, NULL) || !m->type_name || strcmp(m->type_name, "matrix[float]") != 0) return NULL;
+    return m->text;
+}
+
+/* name of x when e is x[row * ld + col] with x a list[float] variable */
+static const char *list_read(const AstNode *e, const char *row, const char *col, const AstNode **ld) {
+    if (!e || e->kind != AST_INDEX || e->child_count != 2) return NULL;
+    const AstNode *x = e->children[0];
+    if (!is_ident(x, NULL) || !x->type_name || strcmp(x->type_name, "list[float]") != 0) return NULL;
+    *ld = flat_index_ld(e->children[1], row, col);
+    return *ld ? x->text : NULL;
+}
+
+static const char *element_read(const MatmulPattern *p, const AstNode *e, const char *row, const char *col,
+                                const AstNode **ld) {
+    *ld = NULL;
+    return p->list_form ? list_read(e, row, col, ld) : matrix_read(e, row, col);
+}
+
+/* A range bound that cannot change in the loops and cannot fail. */
+static int matmul_bound_ok(const AstNode *e, const MatmulPattern *p, const char *aik) {
+    int64_t v;
+    if (const_int_value(e, &v)) return 1;
+    if (is_ident(e, NULL)) {
+        return is_int_type(e->type_name) && strcmp(e->text, p->i) != 0 && strcmp(e->text, p->k) != 0 &&
+               strcmp(e->text, p->j) != 0 && (!aik || strcmp(e->text, aik) != 0);
+    }
+    if (e->kind == AST_CALL && e->text && e->child_count == 1 &&
+        (strcmp(e->text, "len") == 0 || strcmp(e->text, "@rows") == 0 || strcmp(e->text, "@cols") == 0)) {
+        return is_ident(e->children[0], NULL);
+    }
+    if (is_binary(e, "+") || is_binary(e, "-") || is_binary(e, "*")) {
+        return matmul_bound_ok(e->children[0], p, aik) && matmul_bound_ok(e->children[1], p, aik);
+    }
+    return 0;
+}
+
+static int matmul_pattern(const AstNode *outer, MatmulPattern *p) {
+    memset(p, 0, sizeof(*p));
+    if (!outer || outer->kind != AST_FOR || !outer->text) return 0;
+    p->i = outer->text;
+    p->m_stop = zero_based_stop(outer);
+    const AstNode *ob = outer->children[outer->child_count - 1];
+    if (!p->m_stop || !ob || ob->kind != AST_BLOCK || ob->child_count != 1) return 0;
+
+    const AstNode *kl = ob->children[0];
+    if (kl->kind != AST_FOR || !kl->text) return 0;
+    p->k = kl->text;
+    p->k_stop = zero_based_stop(kl);
+    const AstNode *kb = kl->children[kl->child_count - 1];
+    if (!p->k_stop || !kb || kb->kind != AST_BLOCK || (kb->child_count != 1 && kb->child_count != 2)) return 0;
+
+    const AstNode *jl = kb->children[kb->child_count - 1];
+    if (jl->kind != AST_FOR || !jl->text) return 0;
+    p->j = jl->text;
+    p->n_stop = zero_based_stop(jl);
+    const AstNode *jb = jl->children[jl->child_count - 1];
+    if (!p->n_stop || !jb || jb->kind != AST_BLOCK || jb->child_count != 1) return 0;
+    if (strcmp(p->i, p->k) == 0 || strcmp(p->i, p->j) == 0 || strcmp(p->k, p->j) == 0) return 0;
+
+    /* c[i][j] = value  or  c[i * ldc + j] = value */
+    const AstNode *upd = jb->children[0], *value = NULL;
+    if (upd->kind == AST_MATRIX_SET && upd->text && upd->child_count == 3 && upd->type_name &&
+        strcmp(upd->type_name, "matrix[float]") == 0 &&
+        is_ident(upd->children[0], p->i) && is_ident(upd->children[1], p->j)) {
+        p->list_form = 0;
+        value = upd->children[2];
+    } else if (upd->kind == AST_INDEX_ASSIGN && upd->text && upd->child_count == 2 && upd->type_name &&
+               strcmp(upd->type_name, "list[float]") == 0) {
+        p->list_form = 1;
+        p->ldc = flat_index_ld(upd->children[0], p->i, p->j);
+        if (!p->ldc) return 0;
+        value = upd->children[1];
+    } else {
+        return 0;
+    }
+    p->c = upd->text;
+
+    /* optional  let aik: float = a[i][k] */
+    const char *aik = NULL;
+    if (kb->child_count == 2) {
+        const AstNode *let = kb->children[0];
+        if (let->kind != AST_LET || !let->text || let->child_count != 1 || !let->type_name ||
+            strcmp(let->type_name, "float") != 0) return 0;
+        aik = let->text;
+        p->a = element_read(p, let->children[0], p->i, p->k, &p->lda);
+        if (!p->a) return 0;
+        if (strcmp(aik, p->i) == 0 || strcmp(aik, p->k) == 0 || strcmp(aik, p->j) == 0) return 0;
+    }
+
+    /* value: c[i][j] + aik * b[k][j], operands of + and * in any order */
+    if (!is_binary(value, "+")) return 0;
+    int found = 0;
+    for (int s = 0; s < 2 && !found; s++) {
+        const AstNode *ld = NULL;
+        const char *cr = element_read(p, value->children[s], p->i, p->j, &ld);
+        const AstNode *prod = value->children[1 - s];
+        if (!cr || strcmp(cr, p->c) != 0 || (p->list_form && !same_ld(ld, p->ldc)) || !is_binary(prod, "*")) continue;
+        for (int t = 0; t < 2 && !found; t++) {
+            const AstNode *left = prod->children[t], *right = prod->children[1 - t];
+            const AstNode *ldb = NULL, *lda = NULL;
+            const char *b = element_read(p, right, p->k, p->j, &ldb);
+            if (!b) continue;
+            if (aik) {
+                if (!is_ident(left, aik)) continue;
+            } else {
+                p->a = element_read(p, left, p->i, p->k, &lda);
+                if (!p->a) continue;
+                p->lda = lda;
+            }
+            p->b = b;
+            p->ldb = ldb;
+            found = 1;
+        }
+    }
+    if (!found) return 0;
+    if (!value->type_name || strcmp(value->type_name, "float") != 0) return 0;
+
+    return matmul_bound_ok(p->m_stop, p, aik) && matmul_bound_ok(p->k_stop, p, aik) &&
+           matmul_bound_ok(p->n_stop, p, aik) &&
+           (!p->list_form || (matmul_bound_ok(p->lda, p, aik) && matmul_bound_ok(p->ldb, p, aik) &&
+                              matmul_bound_ok(p->ldc, p, aik)));
+}
+
+static int program_has_matmul(const AstNode *n) {
+    if (!n) return 0;
+    MatmulPattern p;
+    if (n->kind == AST_FOR && matmul_pattern(n, &p)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (program_has_matmul(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Expression precedence, so the C reads like hand-written code       */
 /* (parentheses only where C needs them).                             */
 /* ------------------------------------------------------------------ */
@@ -2701,6 +2897,56 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
         case AST_FOR: {
             if (!n->text || n->child_count < 2 || n->child_count > 4) return 0;
 
+            MatmulPattern mm;
+            if (!matmul_suppress && !fast_suppress && matmul_pattern(n, &mm)) {
+                /*
+                 * Matrix product: when the shapes fit and c is neither a nor b,
+                 * the blocked kernel does exactly the additions of the loops
+                 * below, in the same order for each c[i][j].
+                 */
+                const char *a = mm.a, *b = mm.b, *c = mm.c;
+                if (mm.list_form) {
+                    fprintf(f, "if (clair_rt_matmul_list_ok(%s, ", a);
+                    if (!emit_expr(f, mm.lda)) return 0;
+                    fprintf(f, ", %s, ", b);
+                    if (!emit_expr(f, mm.ldb)) return 0;
+                    fprintf(f, ", %s, ", c);
+                    if (!emit_expr(f, mm.ldc)) return 0;
+                } else {
+                    fprintf(f, "if (clair_rt_matmul_ok(%s, %s, %s", a, b, c);
+                }
+                const AstNode *dims[3] = { mm.m_stop, mm.n_stop, mm.k_stop };
+                for (int d = 0; d < 3; d++) {
+                    fputs(", ", f);
+                    if (!emit_expr(f, dims[d])) return 0;
+                }
+                fputs(")) {\n", f);
+                indent(f, depth + 1);
+                fputs("clair_rt_matmul_f64(", f);
+                for (int d = 0; d < 3; d++) {
+                    if (!emit_expr(f, dims[d])) return 0;
+                    fputs(d < 2 ? ", " : ",\n", f);
+                }
+                const char *names[3] = { a, b, c };
+                const AstNode *lds[3] = { mm.lda, mm.ldb, mm.ldc };
+                for (int d = 0; d < 3; d++) {
+                    indent(f, depth + 2);
+                    fprintf(f, "(%sdouble *)%s->data, ", d < 2 ? "const " : "", names[d]);
+                    if (mm.list_form) { if (!emit_expr(f, lds[d])) return 0; }
+                    else fprintf(f, "%s->cols", names[d]);
+                    fputs(d < 2 ? ",\n" : ");\n", f);
+                }
+                indent(f, depth);
+                fputs("} else {\n", f);
+                matmul_suppress = 1;
+                int ok = emit_stmt(f, n, depth + 1);
+                matmul_suppress = 0;
+                if (!ok) return 0;
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
+
             size_t argc = n->child_count - 1;
             const AstNode *body = n->children[n->child_count - 1];
             const char *var = n->text;
@@ -3755,6 +4001,87 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "static inline bool clair_rt_affine_ok(ClairList list, int64_t c0, int64_t c1, int64_t first, int64_t stop) {\n"
                 "    return list && list->len <= (size_t)INT64_MAX &&\n"
                 "           clair_rt_affine_in(c0, c1, first, stop, (int64_t)list->len);\n"
+                "}\n\n",
+                f
+            );
+        }
+    }
+
+    if (program_has_matmul(program)) {
+        fputs(
+            "/*\n"
+            " * c[i][j] = c[i][j] + a[i][k] * b[k][j] for i < m, j < n, k < kk.\n"
+            " * Every c[i][j] receives the same additions in the same order (k increasing)\n"
+            " * as with the three plain loops, so the result is identical to the bit; but a\n"
+            " * 4 x 8 block of c stays in registers while k runs over 128 values.\n"
+            " * noinline: compiled once for any shape, so the 4 x 8 block keeps its layout.\n"
+            " */\n"
+            "static __attribute__((noinline)) void clair_rt_matmul_f64(int64_t m, int64_t n, int64_t kk,\n"
+            "                                                        const double *a, int64_t lda, const double *b, int64_t ldb,\n"
+            "                                                        double *c, int64_t ldc) {\n"
+            "    for (int64_t k0 = 0; k0 < kk; k0 += 128) {\n"
+            "        int64_t k1 = kk - k0 < 128 ? kk : k0 + 128;\n"
+            "        int64_t i = 0;\n"
+            "        for (; i + 4 <= m; i += 4) {\n"
+            "            int64_t j = 0;\n"
+            "            for (; j + 8 <= n; j += 8) {\n"
+            "                double acc[4][8];\n"
+            "                for (int r = 0; r < 4; r++)\n"
+            "                    for (int q = 0; q < 8; q++) acc[r][q] = c[(i + r) * ldc + j + q];\n"
+            "                for (int64_t k = k0; k < k1; k++) {\n"
+            "                    const double *bk = b + k * ldb + j;\n"
+            "                    for (int r = 0; r < 4; r++) {\n"
+            "                        double air = a[(i + r) * lda + k];\n"
+            "                        for (int q = 0; q < 8; q++) acc[r][q] = acc[r][q] + air * bk[q];\n"
+            "                    }\n"
+            "                }\n"
+            "                for (int r = 0; r < 4; r++)\n"
+            "                    for (int q = 0; q < 8; q++) c[(i + r) * ldc + j + q] = acc[r][q];\n"
+            "            }\n"
+            "            for (; j < n; j++) {\n"
+            "                for (int r = 0; r < 4; r++) {\n"
+            "                    double s = c[(i + r) * ldc + j];\n"
+            "                    for (int64_t k = k0; k < k1; k++) s = s + a[(i + r) * lda + k] * b[k * ldb + j];\n"
+            "                    c[(i + r) * ldc + j] = s;\n"
+            "                }\n"
+            "            }\n"
+            "        }\n"
+            "        for (; i < m; i++) {\n"
+            "            for (int64_t k = k0; k < k1; k++) {\n"
+            "                double aik = a[i * lda + k];\n"
+            "                for (int64_t j = 0; j < n; j++) c[i * ldc + j] = c[i * ldc + j] + aik * b[k * ldb + j];\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n\n",
+            f
+        );
+        if (node_uses_matrix_kind(program, "[float]")) {
+            fputs(
+                "/* The kernel may replace the loops: shapes large enough, c distinct from a and b. */\n"
+                "static inline bool clair_rt_matmul_ok(ClairMatrix a, ClairMatrix b, ClairMatrix c,\n"
+                "                                      int64_t m, int64_t n, int64_t k) {\n"
+                "    return m > 0 && n > 0 && k > 0 &&\n"
+                "           m <= a->rows && k <= a->cols && k <= b->rows && n <= b->cols &&\n"
+                "           m <= c->rows && n <= c->cols && c->data != a->data && c->data != b->data;\n"
+                "}\n\n",
+                f
+            );
+        }
+        if (node_uses_list(program)) {
+            fputs(
+                "/* Same for flat lists x[i * ld + j]: rows of c must not overlap. */\n"
+                "static inline bool clair_rt_matmul_list_fits(ClairList x, int64_t ld, int64_t rows, int64_t cols) {\n"
+                "    int64_t last;\n"
+                "    return ld >= cols && x->len <= (size_t)INT64_MAX &&\n"
+                "           !__builtin_mul_overflow(rows - 1, ld, &last) && !__builtin_add_overflow(last, cols - 1, &last) &&\n"
+                "           last < (int64_t)x->len;\n"
+                "}\n\n"
+                "static inline bool clair_rt_matmul_list_ok(ClairList a, int64_t lda, ClairList b, int64_t ldb,\n"
+                "                                           ClairList c, int64_t ldc, int64_t m, int64_t n, int64_t k) {\n"
+                "    return m > 0 && n > 0 && k > 0 &&\n"
+                "           clair_rt_matmul_list_fits(a, lda, m, k) && clair_rt_matmul_list_fits(b, ldb, k, n) &&\n"
+                "           clair_rt_matmul_list_fits(c, ldc, m, n) && c->data != a->data && c->data != b->data;\n"
                 "}\n\n",
                 f
             );
