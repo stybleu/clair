@@ -75,6 +75,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.29](docs/README_V0.29.md) : boucles alignées, même vitesse quelle que soit la place du code
 - [Clair V0.28](docs/README_V0.28.md) : mémoire rendue pendant le programme, rapport plus long
 - [Clair V0.27](docs/README_V0.27.md) : couche dense calculée 4 lignes à la fois, calculs à virgule identiques partout
 - [Clair V0.26](docs/README_V0.26.md) : grands entiers int128 à int1024, nombres trop grands pour int refusés

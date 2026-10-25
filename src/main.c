@@ -52,6 +52,7 @@ static int run_clang(const char *cpath, const char *output) {
             "-Wno-unused-function",
             "-fno-math-errno",   /* Clair never reads errno: lets Clang vectorize sqrt() and friends */
             allow_fma ? "-ffp-contract=on" : "-ffp-contract=off",
+            "-falign-loops=64",  /* hot loops start on a 64-byte line: same speed whatever the code layout */
             (char *)cpath,
             "-o",
             (char *)output,

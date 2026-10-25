@@ -63,15 +63,15 @@ for name in collatz dot axpy while forin matmul matrice couche reseau; do
         printf '%-9s ECHEC de compilation Clair\n' "$name"
         continue
     fi
-    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" -lm 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" -lm 2>> "$WORK/$name.log"
 
     # Keep the hot functions out of line so their machine code can be read alone.
     sed -E "s/^static ([a-z0-9_]+) clair_fn_${kernel}\(/static __attribute__((noinline)) \1 clair_fn_${kernel}(/" \
         "$WORK/$name.generated.c" > "$WORK/$name.noinline.c"
-    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
     sed -E "s/^static ([a-z0-9_]+) ${ref_kernel}\(/static __attribute__((noinline)) \1 ${ref_kernel}(/" \
         "$BENCH/${name}_ref.c" > "$WORK/${name}_ref.noinline.c"
-    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -S "$WORK/${name}_ref.noinline.c" -o "$WORK/${name}_ref.s" 2>> "$WORK/$name.log"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 -S "$WORK/${name}_ref.noinline.c" -o "$WORK/${name}_ref.s" 2>> "$WORK/$name.log"
     v_clair=$(vectorized "$WORK/$name.s" "clair_fn_${kernel}")
     v_ref=$(vectorized "$WORK/${name}_ref.s" "${ref_kernel}")
 

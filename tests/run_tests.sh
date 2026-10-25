@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.28 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.29 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
