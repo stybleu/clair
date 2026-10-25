@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.41 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.42 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -800,6 +800,30 @@ if ./build/clair tests/big_numbers_invalid_v040.cl -o build/test_big_numbers_inv
     exit 1
 fi
 printf '%s\n' 'big_numbers_v040.cl : OK -> entiers et flottants dynamiques'
+
+# V0.42 : compile depuis un autre dossier (plus besoin de src/ a cote)
+(cd tests && ../build/clair big_numbers_v040.cl -o ../build/test_big_ailleurs) > build/big_ailleurs.log 2>&1
+[ "$(./build/test_big_ailleurs | tail -n 1)" = 'CLAIR V0.40 : TESTS OK' ]
+./build/clair tests/big_numbers_memory_v040.cl -o build/test_big_numbers_memory_v040
+./build/test_big_numbers_memory_v040 | grep -Fq 'RESULTATS EXACTS'
+./build/clair tests/grands_nombres_memoire.cl -o build/test_grands_nombres_memoire
+[ "$(./build/test_grands_nombres_memoire)" = "$(cat tests/grands_nombres_memoire.expected)" ]
+grep -Fq 'return clair_rt_num_keep(&__clair_num_frame, ' build/test_grands_nombres_memoire.generated.c
+grep -Fq -e '->solde = clair_rt_num_pin(' build/test_grands_nombres_memoire.generated.c
+printf '%s\n' 'grands_nombres_memoire.cl : OK -> recursion, boucles, break, continue, masquage, alias, champs ; identique a Python'
+./build/clair tests/grands_nombres_longue_boucle.cl -o build/test_grands_nombres_longue_boucle
+clang -std=c11 -O2 tests/memoire_max.c -o build/memoire_max
+out_longue="$(./build/memoire_max ./build/test_grands_nombres_longue_boucle 2> build/longue_boucle.kio)"
+[ "$out_longue" = "$(printf '%s\n%s' 82818552207703176060326495834588033747 82818552207703176060326495834588033747)" ]
+kio_longue="$(cat build/longue_boucle.kio)"
+if [ "$kio_longue" -gt 100000 ]; then
+    printf '%s\n' "grands_nombres_longue_boucle.cl : ECHEC -> $kio_longue Kio de memoire (moins de 100000 attendus)" >&2
+    exit 1
+fi
+printf '%s\n' "grands_nombres_longue_boucle.cl : OK -> 3 millions de calculs dans une fonction et une methode, $kio_longue Kio au plus"
+./build/clair tests/masquage_init.cl -o build/test_masquage_init
+[ "$(./build/test_masquage_init)" = "$(cat tests/masquage_init.expected)" ]
+printf '%s\n' 'masquage_init.cl : OK -> let x = x + 1 dans un bloc lit le x du dessus'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

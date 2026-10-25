@@ -3,16 +3,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stddef.h>
 
-/* Objets immuables : une racine est l'adresse d'une variable Clair vivante.
- * Balayage uniquement aux fins de blocs du code genere, jamais pendant une
- * expression C. Les appels de fonctions imbriques suspendent la collecte. */
+/* Objets immuables.
+ *
+ * Chaque nombre porte un numero croissant. Chaque appel de fonction note, en
+ * entrant, le dernier numero distribue : les nombres plus recents forment sa
+ * zone. Aux fins de blocs (aucun temporaire d'expression en cours), la collecte
+ * garde les nombres de la zone que montrent les racines de l'appel et libere
+ * les autres. En sortie d'appel, seule la valeur rendue par return est gardee.
+ * Les temporaires des appelants sont plus anciens : jamais touches.
+ * Un nombre range dans un champ d'objet est epingle : garde jusqu'a la fin. */
 struct ClairDynInt { ClairBigInt v; };
 struct ClairDynFloat { ClairBigFloat v; uint32_t precision; };
-typedef struct ClairNumNode { struct ClairNumNode *next; void *value; int is_float; int marked; } ClairNumNode;
-static ClairNumNode *clair_num_nodes;
+typedef struct ClairNumNode {
+    struct ClairNumNode *next;
+    uint64_t serial;
+    unsigned char is_float, marked, pinned;
+    union { struct ClairDynInt i; struct ClairDynFloat f; } u;
+} ClairNumNode;
+#define CLAIR_NUM_NODE(v) ((ClairNumNode *)((char *)(v) - offsetof(ClairNumNode, u)))
+static ClairNumNode *clair_num_nodes;      /* du plus recent au plus ancien */
+static ClairNumNode *clair_num_pinned;
 static ClairNumRoot *clair_num_roots;
-static unsigned clair_num_frame_depth;
+static ClairNumFrameGuard *clair_num_frame;
+static uint64_t clair_num_serial;
 
 void clair_rt_num_root_enter(ClairNumRoot *root, const void *slot) {
     root->previous = clair_num_roots;
@@ -28,53 +43,76 @@ void clair_rt_num_root_cleanup(ClairNumRoot *root) {
     root->previous = NULL;
     root->slot = NULL;
 }
-void clair_rt_num_frame_enter(ClairNumFrameGuard *guard) {
-    guard->active = 1;
-    ++clair_num_frame_depth;
-}
-void clair_rt_num_frame_cleanup(ClairNumFrameGuard *guard) {
-    if (guard->active && clair_num_frame_depth) --clair_num_frame_depth;
-    guard->active = 0;
-}
 static void clair_num_destroy_node(ClairNumNode *n) {
-    if (n->is_float) {
-        ClairDynFloat *x = (ClairDynFloat *)n->value;
-        clair_bf_clear(&x->v);
-    } else {
-        ClairDynInt *x = (ClairDynInt *)n->value;
-        clair_big_clear(&x->v);
-    }
-    free(n->value);
+    if (n->is_float) clair_bf_clear(&n->u.f.v);
+    else clair_big_clear(&n->u.i.v);
     free(n);
 }
-
-/* Appeler seulement a une frontiere entre instructions Clair et dans main :
- * la pile d'expressions est vide, aucun resultat temporaire n'est suspendu
- * pendant l'execution d'un appel imbrique. */
-void clair_rt_num_collect(void) {
-    if (clair_num_frame_depth != 1) return;
-    for (ClairNumNode *n = clair_num_nodes; n; n = n->next) n->marked = 0;
-    for (ClairNumRoot *root = clair_num_roots; root; root = root->previous) {
-        const void *value = NULL;
-        /* memcpy evite le strict-aliasing entre pointeur typé et void*. */
-        memcpy(&value, root->slot, sizeof(value));
-        for (ClairNumNode *n = clair_num_nodes; n; n = n->next)
-            if (n->value == value) { n->marked = 1; break; }
+static void clair_num_mark(const ClairNumFrameGuard *g, const void *value) {
+    if (!value) return;
+    ClairNumNode *n = CLAIR_NUM_NODE(value);
+    if (n->serial > g->serial && !n->pinned) n->marked = 1;
+}
+/* la zone de g : garde les nombres marques, epingle a part, libere le reste */
+static void clair_num_sweep(ClairNumFrameGuard *g, int with_roots) {
+    if (with_roots) {
+        for (ClairNumRoot *root = clair_num_roots; root && root != g->roots; root = root->previous) {
+            const void *value = NULL;
+            memcpy(&value, root->slot, sizeof(value));   /* evite le strict-aliasing */
+            clair_num_mark(g, value);
+        }
     }
+    clair_num_mark(g, g->keep);
     ClairNumNode **p = &clair_num_nodes;
-    while (*p) {
+    while (*p && (*p)->serial > g->serial) {
         ClairNumNode *n = *p;
-        if (n->marked) p = &n->next;
+        if (n->pinned) { *p = n->next; n->next = clair_num_pinned; clair_num_pinned = n; }
+        else if (n->marked) { n->marked = 0; p = &n->next; }
         else { *p = n->next; clair_num_destroy_node(n); }
     }
+    g->clean = clair_num_serial;
+}
+void clair_rt_num_frame_enter(ClairNumFrameGuard *guard) {
+    guard->active = 1;
+    guard->previous = clair_num_frame;
+    guard->serial = guard->clean = clair_num_serial;
+    guard->roots = clair_num_roots;
+    guard->keep = NULL;
+    clair_num_frame = guard;
+}
+/* sortie de l'appel (return, fin de fonction) : les racines locales sont deja parties */
+void clair_rt_num_frame_cleanup(ClairNumFrameGuard *guard) {
+    if (!guard->active) return;
+    if (clair_num_frame == guard && clair_num_serial != guard->clean) clair_num_sweep(guard, 0);
+    clair_num_frame = guard->previous;
+    guard->active = 0;
+}
+/* Appeler seulement entre deux instructions Clair : aucun temporaire suspendu
+ * dans l'appel en cours. Rien a faire si aucun nombre n'a ete cree depuis. */
+void clair_rt_num_collect(void) {
+    ClairNumFrameGuard *g = clair_num_frame;
+    if (!g || clair_num_serial == g->clean) return;
+    clair_num_sweep(g, 1);
+}
+void *clair_rt_num_keep(ClairNumFrameGuard *guard, const void *value) {
+    guard->keep = value;
+    return (void *)value;
+}
+void *clair_rt_num_pin(const void *value) {
+    if (value) CLAIR_NUM_NODE(value)->pinned = 1;
+    return (void *)value;
 }
 static int clair_num_registered;
 
 static void clair_num_destroy_all(void) {
-    while (clair_num_nodes) {
-        ClairNumNode *n = clair_num_nodes;
-        clair_num_nodes = n->next;
-        clair_num_destroy_node(n);
+    ClairNumNode *lists[2] = { clair_num_nodes, clair_num_pinned };
+    clair_num_nodes = clair_num_pinned = NULL;
+    for (int k = 0; k < 2; k++) {
+        while (lists[k]) {
+            ClairNumNode *n = lists[k];
+            lists[k] = n->next;
+            clair_num_destroy_node(n);
+        }
     }
 }
 static void clair_num_fail(const char *msg) {
@@ -91,24 +129,23 @@ static void clair_num_check(int rc) {
         default: clair_num_fail("erreur arithmetique");
     }
 }
-static void *clair_num_alloc(size_t size, int flt) {
-    void *value=calloc(1,size);
-    ClairNumNode *n=(ClairNumNode*)malloc(sizeof(*n));
-    if (!value || !n) {free(value);free(n);clair_num_fail("memoire insuffisante");}
+static ClairNumNode *clair_num_alloc(int flt) {
+    ClairNumNode *n=(ClairNumNode*)calloc(1,sizeof(*n));
+    if (!n) clair_num_fail("memoire insuffisante");
     if (!clair_num_registered) {
-        if (atexit(clair_num_destroy_all)) {free(value);free(n);clair_num_fail("atexit a echoue");}
+        if (atexit(clair_num_destroy_all)) {free(n);clair_num_fail("atexit a echoue");}
         clair_num_registered=1;
     }
-    n->value=value;n->is_float=flt;n->next=clair_num_nodes;clair_num_nodes=n;
-    return value;
+    n->is_float=(unsigned char)flt;n->serial=++clair_num_serial;n->next=clair_num_nodes;clair_num_nodes=n;
+    return n;
 }
 static ClairDynInt *clair_new_int(void) {
-    ClairDynInt *v=(ClairDynInt*)clair_num_alloc(sizeof(*v),0);
+    ClairDynInt *v=&clair_num_alloc(0)->u.i;
     clair_big_init(&v->v);
     return v;
 }
 static ClairDynFloat *clair_new_float(uint32_t precision) {
-    ClairDynFloat *v=(ClairDynFloat*)clair_num_alloc(sizeof(*v),1);
+    ClairDynFloat *v=&clair_num_alloc(1)->u.f;
     clair_bf_init(&v->v);v->precision=precision;
     return v;
 }

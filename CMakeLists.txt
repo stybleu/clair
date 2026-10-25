@@ -11,3 +11,18 @@ add_executable(clair
     src/codegen_c.c
 )
 target_compile_options(clair PRIVATE -Wall -Wextra -Wpedantic)
+
+# V0.42 : the bigint/bigfloat runtime is copied into the generated C,
+# so `clair` works from any folder (no src/ needed next to the program).
+set(CLAIR_BIG_PARTS
+    src/clair_bigint.h src/clair_bigint.c src/clair_bigfloat.h src/clair_bigfloat.c
+    src/clair_big_numbers_rt.h src/clair_big_numbers_rt.c)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_big_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_big_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_runtime.cmake
+    DEPENDS ${CLAIR_BIG_PARTS} tools/embed_runtime.cmake
+    COMMENT "Embedding the big-number runtime")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_big_runtime.h)
+target_include_directories(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

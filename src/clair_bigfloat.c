@@ -141,7 +141,7 @@ int clair_bf_format(const ClairBigFloat *x, char **out) {
     memcpy(p,suffix,sl+1);
     *out=buf;free(raw);return 0;
 }
-static int pow10(ClairBigInt *out, uint64_t exponent) {
+static int clair_bf_pow10(ClairBigInt *out, uint64_t exponent) {
     ClairBigInt base;clair_big_init(&base);
     int rc=clair_big_from_i64(&base,10);
     if(!rc)rc=clair_big_pow_u64(out,&base,exponent);
@@ -151,7 +151,7 @@ static int scale_coeff(ClairBigInt *out,const ClairBigInt *a,uint64_t shift) {
     if(!a->sign)return clair_big_from_i64(out,0);
     if(!shift)return clair_big_copy(out,a);
     ClairBigInt power;clair_big_init(&power);
-    int rc=pow10(&power,shift);
+    int rc=clair_bf_pow10(&power,shift);
     if(!rc)rc=clair_big_mul(out,a,&power);
     clair_big_clear(&power);return rc;
 }

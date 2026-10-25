@@ -11,12 +11,24 @@ typedef struct ClairNumRoot {
     struct ClairNumRoot *previous;
     const void *slot;
 } ClairNumRoot;
-typedef struct ClairNumFrameGuard { int active; } ClairNumFrameGuard;
+/* V0.42 : chaque appel de fonction a sa zone, les nombres crees pendant l'appel.
+ * Une collecte ne touche que la zone de l'appel en cours : les temporaires des
+ * appelants (a * b dans a * b + f(c)) sont plus anciens et ne sont jamais vus. */
+typedef struct ClairNumFrameGuard {
+    int active;
+    struct ClairNumFrameGuard *previous;
+    uint64_t serial;          /* les nombres plus recents appartiennent a l'appel */
+    uint64_t clean;           /* numero du dernier nombre a la derniere collecte */
+    ClairNumRoot *roots;      /* racines d'avant l'appel */
+    const void *keep;         /* valeur rendue par return, gardee a la sortie */
+} ClairNumFrameGuard;
 void clair_rt_num_root_enter(ClairNumRoot *root, const void *slot);
 void clair_rt_num_root_cleanup(ClairNumRoot *root);
 void clair_rt_num_frame_enter(ClairNumFrameGuard *guard);
 void clair_rt_num_frame_cleanup(ClairNumFrameGuard *guard);
 void clair_rt_num_collect(void);
+void *clair_rt_num_keep(ClairNumFrameGuard *guard, const void *value);   /* return v */
+void *clair_rt_num_pin(const void *value);                                /* objet.champ = v */
 ClairDynInt *clair_rt_bigint_parse(const char *s);
 ClairDynInt *clair_rt_bigint_neg(const ClairDynInt *v);
 ClairDynInt *clair_rt_bigint_add(const ClairDynInt *a, const ClairDynInt *b);
