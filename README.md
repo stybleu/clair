@@ -6,12 +6,13 @@ Son compilateur est écrit en C et utilise Clang.
 ## Fonctionnalités
 
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON
+- Entiers machine `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32` (`i64` = `int`) qui font le tour comme en C et NumPy ; opérations sur les bits `& | ^ ~ << >>` ; nombres `0xFF`, `0b1010`, `0o755`, `1_000_000`
 - Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres) et sans signe `uint128` .. `uint1024`, avec `abs`, `min`, `max`, `pow` exacts ; dépassements détectés
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
 - Fonctions, conditions et boucles, dont `for v in liste` et `for i, v in enumerate(liste)` comme en Python
 - `x += v`, `-=`, `*=`, `/=`, `%=` ; tranches `xs[a:b:pas]` sur les listes et les chaînes, avec les règles de Python
 - Listes et dictionnaires typés
-- Matrices `matrix[float]` et `matrix[int]` : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
+- Matrices `matrix[float]`, `matrix[int]`, `matrix[u8]`... : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
 - Écriture directe dans les champs : `self.w[i][j] = x`, `self.items.append(x)`
 - Exemple complet : réseau de neurones entraîné sur XOR (`tests/xor_training.cl`)
@@ -67,7 +68,7 @@ fusionner `a * b + c` (un peu plus rapide sur ARM, dernier chiffre parfois diff�
 bash tools/rapport_code_machine.sh
 ```
 
-Compare dix programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé. Un second tableau donne le gain des programmes de matrices sur tous les cœurs.
+Compare onze programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé. Un second tableau donne le gain des programmes de matrices sur tous les cœurs.
 
 ## Tests
 
@@ -84,6 +85,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.35](docs/README_V0.35.md) : entiers machine `u8` .. `u64` et `i8` .. `i32`, opérations sur les bits, nombres en hexadécimal, binaire et octal
 - [Clair V0.34](docs/README_V0.34.md) : `float32`, listes et matrices `float32`, résultats identiques à NumPy
 - [Clair V0.33](docs/README_V0.33.md) : `+=` et ses cousins, `enumerate`, tranches `xs[a:b:pas]`
 - [Clair V0.32](docs/README_V0.32.md) : entiers sans signe `uint128` .. `uint1024`, `abs`, `min`, `max`, `pow` exacts sur les grands entiers

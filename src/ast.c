@@ -1,4 +1,5 @@
 #include "ast.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -107,3 +108,74 @@ int clair_decimal_to_words(const char *text, uint64_t *out, int words, int is_un
     }
     return 1;
 }
+
+int clair_integer_to_decimal(const char *text, size_t len, char *out, size_t out_size) {
+    /* the number as 32-bit halves (1056 bits: anything Clair can hold, int1024 included) */
+    uint32_t half[33] = { 0 };
+    const int halves = 33;
+    unsigned base = 10;
+    size_t i = 0;
+    if (len > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) { base = 16; i = 2; }
+    else if (len > 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B')) { base = 2; i = 2; }
+    else if (len > 2 && text[0] == '0' && (text[1] == 'o' || text[1] == 'O')) { base = 8; i = 2; }
+    int digits = 0;
+    /* like Python: 1_000 and 0x_FF, but not 1__0 nor 1_; no 007 (in C it would be octal) */
+    int after_digit = base != 10;
+    if (base == 10 && len > 1 && text[0] == '0') {
+        for (size_t k = 1; k < len; k++) if (text[k] != '0' && text[k] != '_') return 0;
+    }
+    for (; i < len; i++) {
+        char c = text[i];
+        if (c == '_') {
+            if (!after_digit) return 0;
+            after_digit = 0;
+            continue;
+        }
+        after_digit = 1;
+        unsigned d;
+        if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+        else return 0;
+        if (d >= base) return 0;
+        uint64_t carry = d;
+        for (int k = 0; k < halves; k++) {
+            uint64_t v = (uint64_t)half[k] * base + carry;
+            half[k] = (uint32_t)v;
+            carry = v >> 32;
+        }
+        if (carry) return 0;                          /* far too large */
+        digits++;
+    }
+    if (!digits || !after_digit) return 0;
+    /* to decimal: divide by 10^9 until nothing is left */
+    char groups[40][10];
+    int count = 0;
+    for (;;) {
+        uint64_t rem = 0;
+        int more = 0;
+        for (int k = halves - 1; k >= 0; k--) {
+            uint64_t cur = (rem << 32) | half[k];
+            half[k] = (uint32_t)(cur / 1000000000u);
+            rem = cur % 1000000000u;
+            if (half[k]) more = 1;
+        }
+        snprintf(groups[count], sizeof(groups[0]), "%09u", (unsigned)rem);
+        count++;
+        if (!more) break;
+    }
+    size_t used = 0;
+    for (int k = count - 1; k >= 0; k--) {
+        const char *g = groups[k];
+        if (k == count - 1) {               /* the leading group without its zeros */
+            while (g[0] == '0' && g[1]) g++;
+        }
+        size_t n = strlen(g);
+        if (used + n + 1 > out_size) return 0;
+        memcpy(out + used, g, n);
+        used += n;
+    }
+    out[used] = '\0';
+    return 1;
+}
+

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.34 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.35 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -261,7 +261,7 @@ if ./build/clair tests/invalid_list_type.cl -o build/test_invalid_list_type >bui
     printf '%s\n' 'invalid_list_type.cl : ECHEC -> liste imbriquee aurait du etre refusee en V0.13' >&2
     exit 1
 fi
-grep -Fq 'list element type must be int, float, float32, bool or string' build/invalid_list_type.stderr
+grep -Fq 'list element type must be int, float, float32, bool, string or u8 ... u64, i8 ... i32' build/invalid_list_type.stderr
 printf '%s\n' 'invalid_list_type.cl : OK -> listes imbriquees reportees'
 
 if ./build/clair tests/invalid_list_equality.cl -o build/test_invalid_list_equality >build/invalid_list_equality.stdout 2>build/invalid_list_equality.stderr; then
@@ -632,6 +632,23 @@ grep -Fq 'axpy(0.25f, x, y)' build/test_float32.generated.c
 grep -Fq 'sqrtf(s)' build/test_float32.generated.c
 printf '%s\n' 'float32.cl : OK -> float32 identique a NumPy : calculs, listes, matrices, couche dense, boucles rapides en float'
 expect_compile_error invalid_float32_to_int "cannot initialize int 'n' with float32"
+
+./build/clair tests/entiers_machine.cl -o build/test_entiers_machine
+[ "$(./build/test_entiers_machine)" = "$(cat tests/entiers_machine.expected)" ]
+grep -Fq 'return (uint8_t)(a * 31 + b);' build/test_entiers_machine.generated.c
+grep -Fq 'x ^= x << 13;' build/test_entiers_machine.generated.c
+grep -Fq 'return clair_rt_shl_u32(x, r) | clair_rt_shr_u32(x, 32 - r);' build/test_entiers_machine.generated.c
+printf '%s\n' 'entiers_machine.cl : OK -> u8 a u64, i8 a i32, & | ^ ~ << >>, 0x 0b 0o ; identique a Python (calculs qui font le tour)'
+expect_runtime_error machine_div_zero_runtime '44' 'Clair runtime error: division by zero'
+expect_runtime_error machine_shift_negative_runtime '128' 'Clair runtime error: negative shift count'
+expect_runtime_error machine_int_range_runtime '9223372036854775807' 'Clair runtime error: int() argument out of range'
+expect_compile_error invalid_machine_mix "operator '+' cannot mix u32 and i32: convert one of them first, e.g. int(x)"
+expect_compile_error invalid_machine_literal "integer 256 does not fit in u8"
+expect_compile_error invalid_machine_negative "u16 cannot hold the negative integer -1"
+expect_compile_error invalid_bit_float "operator '&' works on integers (int, u8 ... u64, i8 ... i32), got float and int"
+expect_compile_error invalid_machine_narrow "cannot initialize u8 'petit' with int"
+expect_compile_error invalid_number_literal "invalid number 0x1G"
+expect_compile_error invalid_leading_zero "invalid number 007"
 
 ./build/clair tests/matmul_blocks.cl -o build/test_matmul_blocks
 out_matmul_blocks="$(./build/test_matmul_blocks)"

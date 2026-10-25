@@ -23,8 +23,45 @@ static int set_type(AstNode *node, const char *type) {
     return ast_set_type(node, type, strlen(type));
 }
 
+/*
+ * Machine integers: int (64 bits, signed), i8 i16 i32, u8 u16 u32 u64.  Their
+ * bits, 0 for any other type.  Their arithmetic wraps around like in C.
+ */
+static int machine_bits(const char *t) {
+    if (!t) return 0;
+    if (strcmp(t, "int") == 0 || strcmp(t, "u64") == 0) return 64;
+    if (strcmp(t, "i8") == 0 || strcmp(t, "u8") == 0) return 8;
+    if (strcmp(t, "i16") == 0 || strcmp(t, "u16") == 0) return 16;
+    if (strcmp(t, "i32") == 0 || strcmp(t, "u32") == 0) return 32;
+    return 0;
+}
+
+static int machine_unsigned(const char *t) { return machine_bits(t) && t[0] == 'u'; }
+
+/* i8 .. u64 but not int */
+static int is_small_machine(const char *t) { return machine_bits(t) && strcmp(t, "int") != 0; }
+
+/* src converts to dst without losing anything (u8 -> u16, u8 -> i16, i32 -> int) */
+static int machine_widens(const char *src, const char *dst) {
+    int bs = machine_bits(src), bd = machine_bits(dst);
+    if (!bs || !bd) return 0;
+    if (strcmp(src, dst) == 0) return 1;
+    if (machine_unsigned(src) == machine_unsigned(dst)) return bd > bs;
+    return !machine_unsigned(dst) && bd > bs;
+}
+
+/* where two machine integers meet: the one the other widens into, or NULL (u32 and i32) */
+static const char *machine_meet(const char *left, const char *right) {
+    if (machine_widens(left, right)) return right;
+    if (machine_widens(right, left)) return left;
+    return NULL;
+}
+
+/* an index, a size or a range bound: int or a machine integer that fits in it */
+static int is_index_type(const char *t) { return machine_widens(t, "int"); }
+
 static int is_numeric(const char *type) {
-    return type && (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0);
+    return type && (machine_bits(type) || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0);
 }
 
 static int is_float_type(const char *type) {
@@ -37,8 +74,19 @@ static int is_float_type(const char *type) {
  */
 static const char *numeric_result(const char *left, const char *right) {
     if (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) return "float";
-    if (strcmp(left, "float32") == 0 || strcmp(right, "float32") == 0) return "float32";
-    return "int";
+    if (strcmp(left, "float32") == 0 || strcmp(right, "float32") == 0) {
+        /* i8, u8, i16, u16 and int fit with a float32; i32, u32, u64 go to float (like NumPy) */
+        const char *other = strcmp(left, "float32") == 0 ? right : left;
+        if (strcmp(other, "float32") == 0 || strcmp(other, "int") == 0 || machine_bits(other) <= 16) return "float32";
+        return "float";
+    }
+    return machine_meet(left, right);   /* NULL: u32 with i32, u64 with int... */
+}
+
+static void mix_error(Semantic *s, const char *what, const char *left, const char *right) {
+    fprintf(stderr, "semantic error: %s cannot mix %s and %s: convert one of them first, e.g. %s(x)\n",
+            what, left, right, machine_bits(left) >= machine_bits(right) && !machine_unsigned(left) ? left : "int");
+    s->had_error = 1;
 }
 
 /*
@@ -65,40 +113,45 @@ static int int_bits(const char *type) {
     return big_bits(type);
 }
 
-static int is_list_type(const char *type) {
-    return type && (
-        strcmp(type, "list[int]") == 0 ||
-        strcmp(type, "list[float]") == 0 ||
-        strcmp(type, "list[float32]") == 0 ||
-        strcmp(type, "list[bool]") == 0 ||
-        strcmp(type, "list[string]") == 0
-    );
-}
+/* what a list can hold, and the matching list types */
+static const char *const list_elements[][2] = {
+    { "int", "list[int]" }, { "float", "list[float]" }, { "float32", "list[float32]" },
+    { "bool", "list[bool]" }, { "string", "list[string]" },
+    { "i8", "list[i8]" }, { "i16", "list[i16]" }, { "i32", "list[i32]" },
+    { "u8", "list[u8]" }, { "u16", "list[u16]" }, { "u32", "list[u32]" }, { "u64", "list[u64]" },
+};
 
 static const char *list_element_type(const char *type) {
     if (!type) return NULL;
-    if (strcmp(type, "list[int]") == 0) return "int";
-    if (strcmp(type, "list[float]") == 0) return "float";
-    if (strcmp(type, "list[float32]") == 0) return "float32";
-    if (strcmp(type, "list[bool]") == 0) return "bool";
-    if (strcmp(type, "list[string]") == 0) return "string";
+    for (size_t i = 0; i < sizeof(list_elements) / sizeof(list_elements[0]); i++) {
+        if (strcmp(type, list_elements[i][1]) == 0) return list_elements[i][0];
+    }
     return NULL;
 }
+
+static int is_list_type(const char *type) { return list_element_type(type) != NULL; }
 
 static const char *list_type_for_element(const char *type) {
     if (!type) return NULL;
-    if (strcmp(type, "int") == 0) return "list[int]";
-    if (strcmp(type, "float") == 0) return "list[float]";
-    if (strcmp(type, "float32") == 0) return "list[float32]";
-    if (strcmp(type, "bool") == 0) return "list[bool]";
-    if (strcmp(type, "string") == 0) return "list[string]";
+    for (size_t i = 0; i < sizeof(list_elements) / sizeof(list_elements[0]); i++) {
+        if (strcmp(type, list_elements[i][0]) == 0) return list_elements[i][1];
+    }
     return NULL;
 }
 
-static int is_matrix_type(const char *type) {
-    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[float32]") == 0 ||
-                    strcmp(type, "matrix[int]") == 0);
+/* what a matrix can hold: numbers */
+static const char *matrix_element_of(const char *type, const char *prefix) {
+    static const char *const elements[] = { "float", "float32", "int", "i8", "i16", "i32", "u8", "u16", "u32", "u64", NULL };
+    size_t len = strlen(prefix);
+    if (!type || strncmp(type, prefix, len) != 0) return NULL;
+    for (size_t i = 0; elements[i]; i++) {
+        size_t n = strlen(elements[i]);
+        if (strncmp(type + len, elements[i], n) == 0 && strcmp(type + len + n, "]") == 0) return elements[i];
+    }
+    return NULL;
 }
+
+static int is_matrix_type(const char *type) { return matrix_element_of(type, "matrix[") != NULL; }
 
 /* m[i] alone is only an intermediate step of m[i][j] */
 static int is_matrix_row_type(const char *type) {
@@ -106,11 +159,8 @@ static int is_matrix_row_type(const char *type) {
 }
 
 static const char *matrix_element_type(const char *type) {
-    if (!type) return NULL;
-    if (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix_row[float]") == 0) return "float";
-    if (strcmp(type, "matrix[float32]") == 0 || strcmp(type, "matrix_row[float32]") == 0) return "float32";
-    if (strcmp(type, "matrix[int]") == 0 || strcmp(type, "matrix_row[int]") == 0) return "int";
-    return NULL;
+    const char *e = matrix_element_of(type, "matrix[");
+    return e ? e : matrix_element_of(type, "matrix_row[");
 }
 
 static int is_dict_type(const char *type) {
@@ -145,6 +195,7 @@ static const char *dict_type_for_value(const char *type) {
 static int assignable(const char *dst, const char *src) {
     if (!dst || !src) return 0;
     if (strcmp(dst, src) == 0) return 1;
+    if (machine_widens(src, dst)) return 1;
     return is_float_type(dst) && is_numeric(src);
 }
 
@@ -180,7 +231,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
-    if (is_big(type)) return 1;
+    if (is_big(type) || machine_bits(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
         (is_list_type(type) || is_dict_type(type) || is_matrix_type(type))) {
@@ -267,13 +318,18 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
         return NULL;
     }
 
-    int numeric_float = strcmp(element, "float") == 0;
     for (size_t i = 1; i < n->child_count; i++) {
         const char *item = expr_type(s, n->children[i]);
         if (!item) return NULL;
 
         if (is_numeric(element) && is_numeric(item)) {
-            if (strcmp(item, "float") == 0) numeric_float = 1;
+            /* [1, 2.5] is a list[float], [b, 300] with b a u8 a list[int] */
+            const char *meet = numeric_result(element, item);
+            if (!meet) {
+                mix_error(s, "a list literal", element, item);
+                return NULL;
+            }
+            element = meet;
             continue;
         }
 
@@ -285,7 +341,6 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
         }
     }
 
-    if (is_numeric(element) && numeric_float) element = "float";
     const char *list_type = list_type_for_element(element);
     if (!list_type) return NULL;
     set_type(n, list_type);
@@ -420,6 +475,7 @@ static int check_matrix_builtin(Semantic *s, AstNode *n) {
 
 static int is_int_literal(const AstNode *n);
 static const char *type_int_literal(Semantic *s, AstNode *n, const char *type);
+static const char *machine_literal(Semantic *s, AstNode *n, const char *type);
 
 /* 0.5 or -0.5 written directly in the program */
 static int is_float_literal(const AstNode *n) {
@@ -481,6 +537,8 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     if (strcmp(name, "int") == 0) { kind = 5; want = 1; }
     if (strcmp(name, "float") == 0) { kind = 6; want = 1; }
     if (strcmp(name, "float32") == 0) { kind = 7; want = 1; }
+    if (strcmp(name, "i64") == 0) { kind = 5; want = 1; }                 /* i64 is int */
+    if (is_small_machine(name)) { kind = 8; want = 1; }                 /* u8(x): keeps the low bits, like C */
     if (!kind) return 0;
 
     if (n->child_count != want) {
@@ -518,7 +576,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
             n->text = renamed;
             return set_type(n, kind == 5 ? "int" : "float") ? 1 : -1;
         }
-        int ok = is_numeric(args[i]) || (kind == 5 && strcmp(args[i], "bool") == 0);
+        int ok = is_numeric(args[i]) || ((kind == 5 || kind == 8) && strcmp(args[i], "bool") == 0);
         if (!ok) {
             fprintf(stderr, "semantic error: argument %zu of %s() expects int or float, got %s\n",
                     i + 1, name, args[i]);
@@ -538,11 +596,22 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     }
     const char *result = "float";
     if (kind == 1 && strcmp(args[0], "float32") == 0) result = "float32";
-    if (kind == 2 && strcmp(numeric_result(args[0], args[1]), "float32") == 0) result = "float32";
+    if (kind == 2 && numeric_result(args[0], args[1]) && strcmp(numeric_result(args[0], args[1]), "float32") == 0) result = "float32";
     if (kind == 3) result = args[0];
     if (kind == 4) result = numeric_result(args[0], args[1]);
+    if (kind == 4 && !result && !any_big) {
+        mix_error(s, strcmp(name, "min") == 0 ? "min()" : "max()", args[0], args[1]);
+        return -1;
+    }
     if (kind == 5) result = "int";
     if (kind == 7) result = "float32";
+    if (kind == 8) {
+        /* the type's own name (n->text is replaced below) */
+        static const char *const machine_names[] = { "i8", "i16", "i32", "u8", "u16", "u32", "u64" };
+        for (size_t i = 0; i < sizeof(machine_names) / sizeof(machine_names[0]); i++) {
+            if (strcmp(name, machine_names[i]) == 0) result = machine_names[i];
+        }
+    }
     if (any_big && kind == 4) {
         char what[16];
         snprintf(what, sizeof(what), "%s()", name);
@@ -558,6 +627,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
         result = args[0];
     }
 
+    if (strcmp(name, "i64") == 0) name = "int";
     char *renamed = malloc(strlen(name) + 2);
     if (!renamed) return -1;
     renamed[0] = '@';
@@ -617,6 +687,52 @@ static const char *type_int_literal(Semantic *s, AstNode *n, const char *type) {
     } else {
         free(text);
         if (negative && !set_type(digits, type)) return NULL;
+    }
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
+/*
+ * A number written next to (or into) a u8, i32...: it must fit, and takes
+ * that type; -5 becomes a single literal.
+ */
+static const char *machine_literal(Semantic *s, AstNode *n, const char *type) {
+    int negative = n->kind == AST_UNARY;
+    const AstNode *digits = negative ? n->children[0] : n;
+    if (!digits->text) return NULL;
+    int bits = machine_bits(type);
+    uint64_t w[2];
+    char text[64];
+    snprintf(text, sizeof(text), "%s%s", negative ? "-" : "", digits->text);
+    /* the value as a signed 128-bit number: enough for every machine integer */
+    int ok = strlen(digits->text) <= 40 && clair_decimal_to_words(text, w, 2, 0);
+    if (ok) {
+        int neg = (w[1] >> 63) != 0;
+        uint64_t mag = neg ? (uint64_t)0 - w[0] : w[0];
+        if (neg && w[1] != UINT64_MAX) ok = 0;
+        else if (!neg && w[1] != 0) ok = 0;
+        else if (machine_unsigned(type)) ok = !neg && (bits == 64 || mag < ((uint64_t)1 << bits));
+        else ok = neg ? mag <= ((uint64_t)1 << (bits - 1)) : mag < ((uint64_t)1 << (bits - 1));
+        if (neg && machine_unsigned(type)) {
+            fprintf(stderr, "semantic error: %s cannot hold the negative integer %s\n", type, text);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "semantic error: integer %s does not fit in %s\n", text, type);
+        s->had_error = 1;
+        return NULL;
+    }
+    if (negative) {
+        ast_free(n->children[0]);
+        free(n->children);
+        n->children = NULL;
+        n->child_count = n->child_capacity = 0;
+        n->kind = AST_INTEGER;
+        free(n->text);
+        n->text = malloc(strlen(text) + 1);
+        if (!n->text) return NULL;
+        strcpy(n->text, text);
     }
     return set_type(n, type) ? n->type_name : NULL;
 }
@@ -696,15 +812,21 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     if (n->child_count != 2 || !n->text) return NULL;
     AstNode *lhs = n->children[0], *rhs = n->children[1];
     const char *left, *right;
-    /* a literal next to a big integer takes its type (it may be too large for int) */
+    /*
+     * A number written next to a big integer or a machine integer (u8, i32...)
+     * takes its type (it must fit).  Not for shifts: in 1 << n, 1 is an int.
+     */
+    int shift = strcmp(n->text, "<<") == 0 || strcmp(n->text, ">>") == 0;
     if (is_int_literal(lhs) && !is_int_literal(rhs)) {
         right = expr_type(s, rhs);
         if (!right) return NULL;
-        left = is_big(right) ? type_int_literal(s, lhs, right) : expr_type(s, lhs);
+        left = is_big(right) ? type_int_literal(s, lhs, right)
+             : (!shift && is_small_machine(right)) ? machine_literal(s, lhs, right) : expr_type(s, lhs);
     } else if (is_int_literal(rhs) && !is_int_literal(lhs)) {
         left = expr_type(s, lhs);
         if (!left) return NULL;
-        right = is_big(left) ? type_int_literal(s, rhs, left) : expr_type(s, rhs);
+        right = is_big(left) ? type_int_literal(s, rhs, left)
+              : (!shift && is_small_machine(left)) ? machine_literal(s, rhs, left) : expr_type(s, rhs);
     } else {
         left = expr_type(s, lhs);
         right = expr_type(s, rhs);
@@ -717,6 +839,24 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     } else if (strcmp(right, "float32") == 0 && is_float_literal(lhs)) {
         if (!set_float32_literal(lhs)) return NULL;
         left = "float32";
+    }
+
+    if (strcmp(n->text, "&") == 0 || strcmp(n->text, "|") == 0 || strcmp(n->text, "^") == 0 || shift) {
+        char what[32];
+        snprintf(what, sizeof(what), "operator '%s'", n->text);
+        if (!machine_bits(left) || !machine_bits(right)) {
+            fprintf(stderr, "semantic error: %s works on integers (int, u8 ... u64, i8 ... i32), got %s and %s\n",
+                    what, left, right);
+            s->had_error = 1;
+            return NULL;
+        }
+        /* a << n has the type of a; & | ^ meet like + */
+        const char *type = shift ? left : machine_meet(left, right);
+        if (!type) {
+            mix_error(s, what, left, right);
+            return NULL;
+        }
+        return set_type(n, type) ? n->type_name : NULL;
     }
 
     if (strcmp(n->text, "and") == 0 || strcmp(n->text, "or") == 0) {
@@ -741,6 +881,12 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "arithmetic operators require int or float operands");
             return NULL;
         }
+        if (!numeric_result(left, right)) {
+            char what[32];
+            snprintf(what, sizeof(what), "operator '%s'", n->text);
+            mix_error(s, what, left, right);
+            return NULL;
+        }
         set_type(n, numeric_result(left, right));
         return n->type_name;
     }
@@ -751,6 +897,12 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "arithmetic operators '-', '*' and '/' require int or float operands");
             return NULL;
         }
+        if (!numeric_result(left, right)) {
+            char what[32];
+            snprintf(what, sizeof(what), "operator '%s'", n->text);
+            mix_error(s, what, left, right);
+            return NULL;
+        }
         set_type(n, numeric_result(left, right));
         return n->type_name;
     }
@@ -758,6 +910,12 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     if (strcmp(n->text, "%") == 0) {
         if (!is_numeric(left) || !is_numeric(right)) {
             error_type(s, "operator '%' requires int or float operands");
+            return NULL;
+        }
+        if (!numeric_result(left, right)) {
+            char what[32];
+            snprintf(what, sizeof(what), "operator '%s'", n->text);
+            mix_error(s, what, left, right);
             return NULL;
         }
         set_type(n, numeric_result(left, right));
@@ -784,6 +942,10 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "incompatible operands for equality comparison");
             return NULL;
         }
+        if (is_numeric(left) && is_numeric(right) && !numeric_result(left, right)) {
+            mix_error(s, "comparison", left, right);   /* u32 == i32: -1 would equal 4294967295 in C */
+            return NULL;
+        }
         set_type(n, "bool");
         return n->type_name;
     }
@@ -792,6 +954,10 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         strcmp(n->text, ">") == 0 || strcmp(n->text, ">=") == 0) {
         if (!is_numeric(left) || !is_numeric(right)) {
             error_type(s, "ordered comparisons require int or float operands");
+            return NULL;
+        }
+        if (!numeric_result(left, right)) {
+            mix_error(s, "comparison", left, right);
             return NULL;
         }
         set_type(n, "bool");
@@ -811,7 +977,7 @@ static const char *check_matrix_make(Semantic *s, AstNode *n, const char *matrix
     for (size_t i = 0; i < 2; i++) {
         const char *t = expr_type(s, n->children[i]);
         if (!t) return NULL;
-        if (strcmp(t, "int") != 0) {
+        if (!is_index_type(t)) {
             fprintf(stderr, "semantic error: matrix() %s must be int, got %s\n", i == 0 ? "rows" : "cols", t);
             s->had_error = 1;
             return NULL;
@@ -839,7 +1005,7 @@ static const char *check_slice(Semantic *s, AstNode *n) {
     for (size_t i = 1; i < n->child_count; i++) {
         const char *t = expr_type(s, n->children[i]);
         if (!t) return NULL;
-        if (strcmp(t, "int") != 0) {
+        if (!is_index_type(t)) {
             fprintf(stderr, "semantic error: slice bounds must be int, got %s\n", t);
             s->had_error = 1;
             return NULL;
@@ -862,6 +1028,7 @@ static int implicit_big(const char *actual, const char *expected) {
 
 static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expected) {
     if (is_big(expected) && is_int_literal(n)) return type_int_literal(s, n, expected);
+    if (is_small_machine(expected) && is_int_literal(n)) return machine_literal(s, n, expected);
     if (expected && strcmp(expected, "float32") == 0 && is_float_literal(n)) {
         /* let x: float32 = 0.1 : the number written is a float32 (0.1f in C) */
         if (!expr_type(s, n) || !set_float32_literal(n)) return NULL;
@@ -917,7 +1084,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             const char *index = expr_type(s, n->children[1]);
 
             if (base && is_list_type(base)) {
-                if (!index || strcmp(index, "int") != 0) {
+                if (!index || !is_index_type(index)) {
                     fprintf(stderr, "semantic error: list index must be int, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
@@ -928,7 +1095,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             }
 
             if (base && (is_matrix_type(base) || is_matrix_row_type(base))) {
-                if (!index || strcmp(index, "int") != 0) {
+                if (!index || !is_index_type(index)) {
                     fprintf(stderr, "semantic error: matrix index must be int, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
@@ -1171,6 +1338,14 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 set_type(n, operand);
                 return n->type_name;
             }
+            if (strcmp(n->text, "~") == 0) {
+                if (!machine_bits(operand)) {
+                    error_type(s, "'~' works on integers (int, u8 ... u64, i8 ... i32)");
+                    return NULL;
+                }
+                set_type(n, operand);
+                return n->type_name;
+            }
             if (strcmp(n->text, "not") == 0) {
                 if (strcmp(operand, "bool") != 0) {
                     error_type(s, "'not' requires a bool operand");
@@ -1274,7 +1449,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *index = expr_type(s, n->children[0]);
 
             if (is_list_type(base)) {
-                if (!index || strcmp(index, "int") != 0) {
+                if (!index || !is_index_type(index)) {
                     fprintf(stderr, "semantic error: list index must be int, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
@@ -1327,14 +1502,14 @@ static int check_stmt(Semantic *s, AstNode *n) {
             }
             for (size_t i = 0; i < 2; i++) {
                 const char *idx = expr_type(s, n->children[i]);
-                if (!idx || strcmp(idx, "int") != 0) {
+                if (!idx || !is_index_type(idx)) {
                     fprintf(stderr, "semantic error: matrix index must be int, got %s\n", idx ? idx : "invalid");
                     s->had_error = 1;
                     return 0;
                 }
             }
             const char *element = matrix_element_type(base);
-            const char *value = expr_type(s, n->children[2]);
+            const char *value = expr_type_expected(s, n->children[2], element);
             if (!value || !assignable(element, value)) {
                 fprintf(stderr, "semantic error: %s element assignment expects %s, got %s\n",
                         base, element, value ? value : "invalid");
@@ -1376,7 +1551,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
         case AST_PRINT: {
             const char *type = expr_type(s, n->children[0]);
             if (!type) return 0;
-            if (strcmp(type, "int") != 0 && !is_float_type(type) &&
+            if (!machine_bits(type) && !is_float_type(type) &&
                 strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 && !is_big(type)) {
                 error_type(s, "print() received an unsupported type");
                 return 0;
@@ -1405,7 +1580,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             size_t argc = n->child_count - 1;
             for (size_t i = 0; i < argc; i++) {
                 const char *type = expr_type(s, n->children[i]);
-                if (!type || strcmp(type, "int") != 0) {
+                if (!type || !is_index_type(type)) {
                     error_type(s, "range() arguments must be int");
                     return 0;
                 }

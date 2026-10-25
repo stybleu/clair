@@ -59,6 +59,17 @@ typedef enum {
     TOKEN_STAR_EQUAL,
     TOKEN_SLASH_EQUAL,
     TOKEN_PERCENT_EQUAL,
+    TOKEN_AMP,              /* & | ^ ~ << >> and &= |= ^= <<= >>= */
+    TOKEN_PIPE,
+    TOKEN_CARET,
+    TOKEN_TILDE,
+    TOKEN_SHL,
+    TOKEN_SHR,
+    TOKEN_AMP_EQUAL,
+    TOKEN_PIPE_EQUAL,
+    TOKEN_CARET_EQUAL,
+    TOKEN_SHL_EQUAL,
+    TOKEN_SHR_EQUAL,
     TOKEN_ERROR
 } TokenKind;
 

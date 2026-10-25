@@ -78,11 +78,27 @@ Token lexer_next(Lexer *l) {
 
     if (isdigit((unsigned char)c)) {
         int is_float = 0;
-        while (isdigit((unsigned char)peek(l))) advance(l);
+        char kind = (char)peek(l);
+        if (c == '0' && (kind == 'x' || kind == 'X' || kind == 'b' || kind == 'B' || kind == 'o' || kind == 'O')) {
+            /* 0xFF, 0b1010, 0o17 (checked and turned into decimal by the parser) */
+            advance(l);
+            while (isalnum((unsigned char)peek(l)) || peek(l) == '_') advance(l);
+            return make_token(TOKEN_INTEGER, l->source + start_pos, l->pos - start_pos, line, column);
+        }
+        while (isdigit((unsigned char)peek(l)) || (peek(l) == '_' && isdigit((unsigned char)peek_next(l)))) advance(l);
+        if (isalpha((unsigned char)peek(l)) && peek(l) != 'e' && peek(l) != 'E') {
+            /* 12abc or 1_: kept in one token, refused by the parser as "invalid number" */
+            while (isalnum((unsigned char)peek(l)) || peek(l) == '_') advance(l);
+            return make_token(TOKEN_INTEGER, l->source + start_pos, l->pos - start_pos, line, column);
+        }
+        if (peek(l) == '_') {
+            while (isalnum((unsigned char)peek(l)) || peek(l) == '_') advance(l);
+            return make_token(TOKEN_INTEGER, l->source + start_pos, l->pos - start_pos, line, column);
+        }
         if (peek(l) == '.' && isdigit((unsigned char)peek_next(l))) {
             is_float = 1;
             advance(l);
-            while (isdigit((unsigned char)peek(l))) advance(l);
+            while (isdigit((unsigned char)peek(l)) || (peek(l) == '_' && isdigit((unsigned char)peek_next(l)))) advance(l);
         }
         /* scientific notation: 1e-3, 6.02e23 */
         if (peek(l) == 'e' || peek(l) == 'E') {
@@ -91,7 +107,7 @@ Token lexer_next(Lexer *l) {
             if (isdigit((unsigned char)l->source[look])) {
                 is_float = 1;
                 while (l->pos < look) advance(l);
-                while (isdigit((unsigned char)peek(l))) advance(l);
+                while (isdigit((unsigned char)peek(l)) || (peek(l) == '_' && isdigit((unsigned char)peek_next(l)))) advance(l);
             }
         }
         return make_token(is_float ? TOKEN_FLOAT_LITERAL : TOKEN_INTEGER,
@@ -133,6 +149,16 @@ Token lexer_next(Lexer *l) {
         case '%':
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_PERCENT_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_PERCENT, l->source + start_pos, 1, line, column);
+        case '&':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_AMP_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_AMP, l->source + start_pos, 1, line, column);
+        case '|':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_PIPE_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_PIPE, l->source + start_pos, 1, line, column);
+        case '^':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_CARET_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_CARET, l->source + start_pos, 1, line, column);
+        case '~': return make_token(TOKEN_TILDE, l->source + start_pos, 1, line, column);
         case '=':
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_EQUAL_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_EQUAL, l->source + start_pos, 1, line, column);
@@ -140,9 +166,19 @@ Token lexer_next(Lexer *l) {
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_BANG_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_ERROR, l->source + start_pos, 1, line, column);
         case '<':
+            if (peek(l) == '<') {
+                advance(l);
+                if (peek(l) == '=') { advance(l); return make_token(TOKEN_SHL_EQUAL, l->source + start_pos, 3, line, column); }
+                return make_token(TOKEN_SHL, l->source + start_pos, 2, line, column);
+            }
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_LESS_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_LESS, l->source + start_pos, 1, line, column);
         case '>':
+            if (peek(l) == '>') {
+                advance(l);
+                if (peek(l) == '=') { advance(l); return make_token(TOKEN_SHR_EQUAL, l->source + start_pos, 3, line, column); }
+                return make_token(TOKEN_SHR, l->source + start_pos, 2, line, column);
+            }
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_GREATER_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_GREATER, l->source + start_pos, 1, line, column);
         case '-':
@@ -170,6 +206,10 @@ const char *token_kind_name(TokenKind kind) {
         case TOKEN_PLUS: return "+"; case TOKEN_MINUS: return "-"; case TOKEN_STAR: return "*"; case TOKEN_SLASH: return "/"; case TOKEN_PERCENT: return "%";
         case TOKEN_PLUS_EQUAL: return "+="; case TOKEN_MINUS_EQUAL: return "-="; case TOKEN_STAR_EQUAL: return "*=";
         case TOKEN_SLASH_EQUAL: return "/="; case TOKEN_PERCENT_EQUAL: return "%=";
+        case TOKEN_AMP: return "&"; case TOKEN_PIPE: return "|"; case TOKEN_CARET: return "^"; case TOKEN_TILDE: return "~";
+        case TOKEN_SHL: return "<<"; case TOKEN_SHR: return ">>"; case TOKEN_AMP_EQUAL: return "&=";
+        case TOKEN_PIPE_EQUAL: return "|="; case TOKEN_CARET_EQUAL: return "^="; case TOKEN_SHL_EQUAL: return "<<=";
+        case TOKEN_SHR_EQUAL: return ">>=";
         case TOKEN_ERROR: return "error";
     }
     return "unknown";

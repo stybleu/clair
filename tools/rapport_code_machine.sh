@@ -17,7 +17,7 @@ mkdir -p "$WORK"
 
 case "$(uname -m)" in
     aarch64|arm64) SIMD_NAME="NEON"; SIMD_RE='\bv[0-9]+\.(2d|4s|16b|8h)' ;;
-    x86_64)        SIMD_NAME="SSE"; SIMD_RE='(mul|add|sub|fmadd[0-9]*|fmadd)p[sd]|paddq|vpadd' ;;
+    x86_64)        SIMD_NAME="SSE"; SIMD_RE='(mul|add|sub|fmadd[0-9]*|fmadd)p[sd]|padd[bwdq]|vpadd' ;;
     *)             SIMD_NAME="SIMD"; SIMD_RE='^$' ;;
 esac
 
@@ -57,7 +57,7 @@ printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$version"
 printf '%s\n' "$CORE_INFO"
 printf '%-9s %-11s %-7s %-7s %s\n' "programme" "$SIMD_NAME Cl/C" "Clair" "C" "ecart"
 
-for name in collatz dot axpy axpy32 while forin matmul matrice couche reseau; do
+for name in collatz dot axpy axpy32 octets while forin matmul matrice couche reseau; do
     # hot function: "// noyau: name" in the program, otherwise its first def
     kernel=$(grep -m 1 -oE '^// noyau: [A-Za-z_]+' "$BENCH/$name.cl" | cut -d' ' -f3)
     [ -n "$kernel" ] || kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)

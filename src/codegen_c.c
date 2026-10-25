@@ -9,15 +9,48 @@ static void indent(FILE *f, int depth) {
     for (int i = 0; i < depth; i++) fputs("    ", f);
 }
 
-static int is_list_type(const char *type) {
-    return type && (
-        strcmp(type, "list[int]") == 0 ||
-        strcmp(type, "list[float]") == 0 ||
-        strcmp(type, "list[float32]") == 0 ||
-        strcmp(type, "list[bool]") == 0 ||
-        strcmp(type, "list[string]") == 0
-    );
+/*
+ * Element types of lists and matrices: Clair name, C type, accessor suffix.
+ * Machine integers (u8 .. u64, i8 .. i32) are the C fixed-width types.
+ */
+static const char *const element_kinds[][3] = {
+    { "int", "int64_t", "i64" }, { "float", "double", "f64" }, { "float32", "float", "f32" },
+    { "bool", "bool", "bool" }, { "string", "const char *", "str" },
+    { "i8", "int8_t", "s8" }, { "i16", "int16_t", "s16" }, { "i32", "int32_t", "s32" },
+    { "u8", "uint8_t", "u8" }, { "u16", "uint16_t", "u16" }, { "u32", "uint32_t", "u32" }, { "u64", "uint64_t", "u64" },
+};
+#define ELEMENT_KIND_COUNT (sizeof(element_kinds) / sizeof(element_kinds[0]))
+
+/* row of element_kinds for "list[u8]" / "matrix[u8]" / "matrix_row[u8]", or -1 */
+static int element_kind_of(const char *type, const char *prefix) {
+    size_t len = strlen(prefix);
+    if (!type || strncmp(type, prefix, len) != 0) return -1;
+    for (size_t i = 0; i < ELEMENT_KIND_COUNT; i++) {
+        size_t n = strlen(element_kinds[i][0]);
+        if (strncmp(type + len, element_kinds[i][0], n) == 0 && strcmp(type + len + n, "]") == 0) return (int)i;
+    }
+    return -1;
 }
+
+static int is_list_type(const char *type) { return element_kind_of(type, "list[") >= 0; }
+
+/* u8 .. u64, i8 .. i32 (not int): their bits, 0 otherwise */
+static int small_machine_bits(const char *t) {
+    if (!t) return 0;
+    if (strcmp(t, "i8") == 0 || strcmp(t, "u8") == 0) return 8;
+    if (strcmp(t, "i16") == 0 || strcmp(t, "u16") == 0) return 16;
+    if (strcmp(t, "i32") == 0 || strcmp(t, "u32") == 0) return 32;
+    if (strcmp(t, "u64") == 0) return 64;
+    return 0;
+}
+
+/* int and the small ones */
+static int machine_type_bits(const char *t) {
+    if (t && strcmp(t, "int") == 0) return 64;
+    return small_machine_bits(t);
+}
+
+static int machine_is_unsigned(const char *t) { return small_machine_bits(t) && t[0] == 'u'; }
 
 static int is_dict_type(const char *type) {
     return type && (
@@ -30,8 +63,8 @@ static int is_dict_type(const char *type) {
 
 
 static int is_matrix_type(const char *type) {
-    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[float32]") == 0 ||
-                    strcmp(type, "matrix[int]") == 0);
+    int k = element_kind_of(type, "matrix[");
+    return k >= 0 && strcmp(element_kinds[k][0], "bool") != 0 && strcmp(element_kinds[k][0], "string") != 0;
 }
 
 static int is_matrix_row_type(const char *type) {
@@ -39,19 +72,22 @@ static int is_matrix_row_type(const char *type) {
 }
 
 /* C element type of a matrix or of one of its rows */
+static int matrix_kind(const char *type) {
+    int k = element_kind_of(type, "matrix[");
+    return k >= 0 ? k : element_kind_of(type, "matrix_row[");
+}
+
 static const char *matrix_element_c_type(const char *type) {
-    if (!type) return NULL;
-    if (strstr(type, "[float]")) return "double";
-    if (strstr(type, "[float32]")) return "float";
-    if (strstr(type, "[int]")) return "int64_t";
-    return NULL;
+    int k = matrix_kind(type);
+    return k >= 0 ? element_kinds[k][1] : NULL;
 }
 
 static const char *matrix_accessor_name(const char *type) {
-    const char *e = matrix_element_c_type(type);
-    if (!e) return NULL;
-    if (strcmp(e, "float") == 0) return "clair_rt_matrix_at_f32_checked";
-    return strcmp(e, "double") == 0 ? "clair_rt_matrix_at_f64_checked" : "clair_rt_matrix_at_i64_checked";
+    static char name[64];
+    int k = matrix_kind(type);
+    if (k < 0) return NULL;
+    snprintf(name, sizeof(name), "clair_rt_matrix_at_%s_checked", element_kinds[k][2]);
+    return name;
 }
 
 /* Big integers int128 .. int1024 and uint128 .. uint1024: bits, or 0 for any other type. */
@@ -86,6 +122,11 @@ static const char *c_type_name(const char *clair_type) {
     if (strcmp(clair_type, "float") == 0) return "double";
     if (strcmp(clair_type, "float32") == 0) return "float";
     if (strcmp(clair_type, "bool") == 0) return "bool";
+    if (small_machine_bits(clair_type)) {
+        for (size_t i = 0; i < ELEMENT_KIND_COUNT; i++) {
+            if (strcmp(clair_type, element_kinds[i][0]) == 0) return element_kinds[i][1];
+        }
+    }
     if (strcmp(clair_type, "string") == 0) return "const char *";
     if (is_list_type(clair_type)) return "ClairList";
     if (is_dict_type(clair_type)) return "ClairDict";
@@ -97,13 +138,8 @@ static const char *c_type_name(const char *clair_type) {
 }
 
 static const char *list_element_c_type(const char *list_type) {
-    if (!list_type) return NULL;
-    if (strcmp(list_type, "list[int]") == 0) return "int64_t";
-    if (strcmp(list_type, "list[float]") == 0) return "double";
-    if (strcmp(list_type, "list[float32]") == 0) return "float";
-    if (strcmp(list_type, "list[bool]") == 0) return "bool";
-    if (strcmp(list_type, "list[string]") == 0) return "const char *";
-    return NULL;
+    int k = element_kind_of(list_type, "list[");
+    return k >= 0 ? element_kinds[k][1] : NULL;
 }
 
 static const char *dict_value_c_type(const char *dict_type) {
@@ -169,6 +205,12 @@ static int const_int_value(const AstNode *n, int64_t *out) {
         *out = (int64_t)(0u - (uint64_t)v);
         return 1;
     }
+    if (n->kind == AST_UNARY && n->text && strcmp(n->text, "~") == 0 && n->child_count == 1) {
+        int64_t v;
+        if (!const_int_value(n->children[0], &v)) return 0;
+        *out = ~v;
+        return 1;
+    }
 
     if (n->kind == AST_BINARY && n->text && n->child_count == 2) {
         int64_t a, b;
@@ -180,6 +222,12 @@ static int const_int_value(const AstNode *n, int64_t *out) {
         /* / and % fold only when they cannot fail; otherwise the runtime check stays */
         if (b != 0 && b != -1 && strcmp(n->text, "/") == 0) { *out = a / b; return 1; }
         if (b != 0 && b != -1 && strcmp(n->text, "%") == 0) { *out = a % b; return 1; }
+        if (strcmp(n->text, "&") == 0) { *out = a & b; return 1; }
+        if (strcmp(n->text, "|") == 0) { *out = a | b; return 1; }
+        if (strcmp(n->text, "^") == 0) { *out = a ^ b; return 1; }
+        /* 1 << 20: the count must be known and between 0 and 63 */
+        if (b >= 0 && b < 64 && strcmp(n->text, "<<") == 0) { *out = (int64_t)(ua << b); return 1; }
+        if (b >= 0 && b < 64 && strcmp(n->text, ">>") == 0) { *out = a >> b; return 1; }
         return 0;
     }
 
@@ -203,10 +251,13 @@ static int builtin_cannot_fail(const AstNode *call) {
     if (strcmp(call->text, "@convert") == 0) return 0;     /* narrowing big integers is checked */
     if (strncmp(call->text, "@slice", 6) == 0) return 0;   /* a step of 0 stops the program */
     if (big_bits(call->type_name)) return 0;               /* abs, min, max, pow of big integers */
-    if (strcmp(call->text, "@int") == 0)
-        return call->child_count == 1 && !(call->children[0]->type_name &&
-                                           (strcmp(call->children[0]->type_name, "float") == 0 ||
-                                            strcmp(call->children[0]->type_name, "float32") == 0));
+    if (strcmp(call->text, "@int") == 0 || small_machine_bits(call->text + 1)) {
+        /* int(x) and u8(x) of a float, and int(x) of a u64, are checked */
+        const char *t = call->child_count == 1 ? call->children[0]->type_name : NULL;
+        if (call->child_count != 1) return 0;
+        if (t && strcmp(call->text, "@int") == 0 && strcmp(t, "u64") == 0) return 0;
+        return !(t && (strcmp(t, "float") == 0 || strcmp(t, "float32") == 0));
+    }
     return 1;
 }
 
@@ -1540,6 +1591,9 @@ typedef struct {
 static const char *pure_fn[SAFE_FN_MAX];
 static size_t pure_fn_count = 0;
 
+static int machine_form(const AstNode *n);
+enum { MFORM_NONE, MFORM_PLAIN, MFORM_CAST, MFORM_CALL };
+
 static int is_scalar_type(const char *t) {
     return t && (strcmp(t, "float") == 0 || strcmp(t, "int") == 0 || strcmp(t, "bool") == 0);
 }
@@ -1581,7 +1635,7 @@ static int pure_expr(const AstNode *n, PureCtx *c) {
             if ((strcmp(n->text, "/") == 0 || strcmp(n->text, "%") == 0) && strcmp(n->type_name, "int") == 0) {
                 return int_div_is_safe(n);
             }
-            return 1;
+            return machine_form(n) != MFORM_CALL;      /* x << n: n may be negative */
         case AST_CALL: {
             if (!n->text) return 0;
             if (n->text[0] == '@') {
@@ -1714,9 +1768,132 @@ static int layer_fusable(MatvecPattern *mv, PureCtx *c) {
 /* ------------------------------------------------------------------ */
 
 enum {
-    PREC_OR = 4, PREC_AND = 5, PREC_EQUALITY = 9, PREC_RELATIONAL = 10,
+    PREC_OR = 4, PREC_AND = 5, PREC_BITOR = 6, PREC_BITXOR = 7, PREC_BITAND = 8,
+    PREC_EQUALITY = 9, PREC_RELATIONAL = 10, PREC_SHIFT = 11,
     PREC_ADDITIVE = 12, PREC_MULTIPLICATIVE = 13, PREC_UNARY = 14, PREC_POSTFIX = 16
 };
+
+/* ------------------------------------------------------------------ */
+/* Machine integers (u8 .. u64, i8 .. i32, and int for shifts).       */
+/* Their arithmetic wraps around like in C: u8 and i16 values are     */
+/* computed in C's int, then cut back with a cast, (uint8_t)(a + b).   */
+/* Divisions and shifts by an unknown amount go through small checked */
+/* functions (division by zero, negative shift).                      */
+/* ------------------------------------------------------------------ */
+
+/* value of a number written in the program, whatever its machine type */
+static int literal_int(const AstNode *n, int64_t *out) {
+    if (!n || n->kind != AST_INTEGER || !n->text || !machine_type_bits(n->type_name)) return 0;
+    char *end = NULL;
+    if (n->text[0] == '-') *out = (int64_t)strtoll(n->text, &end, 10);
+    else *out = (int64_t)strtoull(n->text, &end, 10);
+    return end && *end == '\0';
+}
+
+/* unsigned C type of the same width, for left shifts of signed numbers */
+static const char *machine_unsigned_c(const char *t) {
+    switch (machine_type_bits(t)) {
+        case 8: return "uint8_t";
+        case 16: return "uint16_t";
+        case 32: return "uint32_t";
+        default: return "uint64_t";
+    }
+}
+
+static int machine_form(const AstNode *n) {
+    if (!n || n->kind != AST_BINARY || !n->text || n->child_count != 2) return MFORM_NONE;
+    const char *op = n->text, *t = n->type_name;
+    int bits = machine_type_bits(t);
+    if (!bits) return MFORM_NONE;
+    int small = small_machine_bits(t) != 0, narrow = small && bits < 32;
+    int64_t k;
+    if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+        int known = const_int_value(n->children[1], &k) || literal_int(n->children[1], &k);
+        if (!known || k < 0 || k >= bits) return MFORM_CALL;
+        if (strcmp(op, ">>") == 0) return MFORM_PLAIN;
+        /* u8 << 3 is cut back to 8 bits; a signed number is shifted as unsigned (no overflow in C) */
+        return narrow || !machine_is_unsigned(t) ? MFORM_CAST : MFORM_PLAIN;
+    }
+    if (!small) return MFORM_NONE;                 /* int: the usual code */
+    if (strcmp(op, "&") == 0 || strcmp(op, "|") == 0 || strcmp(op, "^") == 0) return MFORM_PLAIN;
+    if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+        /* by a number written other than 0 (and -1 for signed): cannot fail nor grow */
+        if (!literal_int(n->children[1], &k) || k == 0 || (k == -1 && !machine_is_unsigned(t))) return MFORM_CALL;
+        return MFORM_PLAIN;
+    }
+    if (strcmp(op, "+") != 0 && strcmp(op, "-") != 0 && strcmp(op, "*") != 0) return MFORM_NONE;
+    return narrow ? MFORM_CAST : MFORM_PLAIN;
+}
+
+/* f32 + i32 is computed as a float (64 bits): the float32 side is converted first.  1 left, 2 right. */
+static int float32_meets_wide_int(const AstNode *n) {
+    if (!n || n->kind != AST_BINARY || n->child_count != 2) return 0;
+    const char *lt = n->children[0]->type_name, *rt = n->children[1]->type_name;
+    if (!lt || !rt) return 0;
+    int lf = strcmp(lt, "float32") == 0, rf = strcmp(rt, "float32") == 0;
+    if (lf && small_machine_bits(rt) >= 32) return 1;
+    if (rf && small_machine_bits(lt) >= 32) return 2;
+    return 0;
+}
+
+/*
+ * u16 * (1 << 20) is an int (64 bits) in Clair, but both sides are narrower
+ * than 64 bits in C (a number that fits in 32 bits is a C int): the machine
+ * integer is converted first, (int64_t)x * 1048576.
+ */
+static int int_meet_needs_cast(const AstNode *n, size_t side) {
+    int64_t k;
+    if (!n || n->kind != AST_BINARY || n->child_count != 2) return 0;
+    const AstNode *child = n->children[side], *other = n->children[1 - side];
+    return small_machine_bits(child->type_name) && is_int_type(other->type_name) && const_int_value(other, &k);
+}
+
+static int emit_operand(FILE *f, const AstNode *child, int parent_prec, int is_right);
+
+/* one side of a binary operator, after (int64_t) or (double) when C would compute in a narrower type */
+static int emit_side(FILE *f, const AstNode *n, size_t side, int prec) {
+    int widen = float32_meets_wide_int(n);
+    if (int_meet_needs_cast(n, side)) fputs("(int64_t)", f);
+    else if (widen == (int)side + 1) fputs("(double)", f);
+    else return emit_operand(f, n->children[side], prec, side == 1);
+    return emit_operand(f, n->children[side], PREC_UNARY, 0);
+}
+
+static const char *machine_c_type(const char *t) { return strcmp(t, "int") == 0 ? "int64_t" : c_type_name(t); }
+
+static int machine_op_prec(const char *op) {
+    if (strcmp(op, "+") == 0 || strcmp(op, "-") == 0) return PREC_ADDITIVE;
+    if (strcmp(op, "&") == 0) return PREC_BITAND;
+    if (strcmp(op, "|") == 0) return PREC_BITOR;
+    if (strcmp(op, "^") == 0) return PREC_BITXOR;
+    if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) return PREC_SHIFT;
+    return PREC_MULTIPLICATIVE;
+}
+
+/* ~x and -x on u8, i16...: cut back like the other operations */
+static int machine_unary_cast(const AstNode *n) {
+    if (!n || n->kind != AST_UNARY || !n->text) return 0;
+    int bits = small_machine_bits(n->type_name);
+    if (!bits || bits >= 32) return 0;
+    return strcmp(n->text, "-") == 0 || (strcmp(n->text, "~") == 0 && machine_is_unsigned(n->type_name));
+}
+
+/*
+ * Inside (uint8_t)(a * 31 + b), the cut of a * 31 to 8 bits changes nothing:
+ * + - * and ~ keep the low bits (C wraps around with -fwrapv).  That inner
+ * operation is written without its cast: (uint8_t)(a * 31 + b).
+ */
+static const AstNode *cast_skip = NULL;
+
+static int is_wrap_op(const char *op) {
+    return strcmp(op, "+") == 0 || strcmp(op, "-") == 0 || strcmp(op, "*") == 0;
+}
+
+static int cast_is_redundant(const AstNode *child, const char *t) {
+    if (!child->type_name || strcmp(child->type_name, t) != 0) return 0;
+    if (child->kind == AST_BINARY) return machine_form(child) == MFORM_CAST && is_wrap_op(child->text);
+    return machine_unary_cast(child);
+}
 
 static int is_string_type(const char *t) { return t && strcmp(t, "string") == 0; }
 
@@ -1729,7 +1906,10 @@ static int expr_prec(const AstNode *n) {
             if (n->text && strcmp(n->text, "len") == 0) return PREC_UNARY;    /* (int64_t)x->len */
             if (n->text && strcmp(n->text, "@float") == 0) return PREC_UNARY; /* (double)x */
             if (n->text && strcmp(n->text, "@int") == 0 && builtin_cannot_fail(n)) return PREC_UNARY;
+            if (n->text && n->text[0] == '@' && small_machine_bits(n->text + 1)) return PREC_UNARY;  /* (uint8_t)x */
             return PREC_POSTFIX;
+        case AST_INTEGER:
+            return n->text && n->text[0] == '-' ? PREC_UNARY : PREC_POSTFIX;   /* -5 next to an i8 */
         case AST_UNARY:
             if (const_int_value(n, &k) && k >= 0) return PREC_POSTFIX;
             if (big_bits(n->type_name)) return PREC_POSTFIX;               /* clair_i256_neg(x) */
@@ -1737,6 +1917,16 @@ static int expr_prec(const AstNode *n) {
         case AST_BINARY: {
             if (const_int_value(n, &k)) return k >= 0 ? PREC_POSTFIX : PREC_UNARY;
             const char *op = n->text;
+            if (n == cast_skip) return machine_op_prec(op);
+            switch (machine_form(n)) {
+                case MFORM_CAST: return PREC_UNARY;                     /* (uint8_t)(a + b) */
+                case MFORM_CALL: return PREC_POSTFIX;                   /* clair_rt_div_u8(a, b) */
+                case MFORM_PLAIN: return machine_op_prec(op);
+                default: break;
+            }
+            if (strcmp(op, "&") == 0) return PREC_BITAND;
+            if (strcmp(op, "|") == 0) return PREC_BITOR;
+            if (strcmp(op, "^") == 0) return PREC_BITXOR;
             const char *lt = n->children[0]->type_name, *rt = n->children[1]->type_name;
             if (big_bits(n->type_name)) return PREC_POSTFIX;               /* clair_i256_add(a, b) */
             if (strcmp(op, "or") == 0) return PREC_OR;
@@ -2650,7 +2840,12 @@ static int emit_operand(FILE *f, const AstNode *child, int parent_prec, int is_r
                (is_comparison_prec(prec) && is_comparison_prec(parent_prec)) ||
                ((prec == PREC_AND || prec == PREC_OR) &&                  /* a || (b && c) */
                 (parent_prec == PREC_AND || parent_prec == PREC_OR) && prec != parent_prec) ||
-               (is_right && parent_prec == PREC_ADDITIVE && is_negation(child));  /* a - (-b) */
+               (is_right && parent_prec == PREC_ADDITIVE && is_negation(child)) ||  /* a - (-b) */
+               /* a & (b | c), a << (b + c): written out, as C compilers ask */
+               ((parent_prec == PREC_BITOR || parent_prec == PREC_BITXOR || parent_prec == PREC_BITAND ||
+                 parent_prec == PREC_SHIFT) &&
+                (prec == PREC_BITOR || prec == PREC_BITXOR || prec == PREC_BITAND || prec == PREC_SHIFT ||
+                 prec == PREC_ADDITIVE) && prec != parent_prec);
     if (wrap) fputc('(', f);
     if (!emit_expr(f, child)) return 0;
     if (wrap) fputc(')', f);
@@ -2658,19 +2853,90 @@ static int emit_operand(FILE *f, const AstNode *child, int parent_prec, int is_r
 }
 
 static const char *list_accessor_name(const char *list_type) {
-    if (!list_type) return NULL;
-    if (strcmp(list_type, "list[int]") == 0) return "clair_rt_list_at_i64_checked";
-    if (strcmp(list_type, "list[float]") == 0) return "clair_rt_list_at_f64_checked";
-    if (strcmp(list_type, "list[float32]") == 0) return "clair_rt_list_at_f32_checked";
-    if (strcmp(list_type, "list[bool]") == 0) return "clair_rt_list_at_bool_checked";
-    if (strcmp(list_type, "list[string]") == 0) return "clair_rt_list_at_str_checked";
-    return NULL;
+    static char name[64];
+    int k = element_kind_of(list_type, "list[");
+    if (k < 0) return NULL;
+    snprintf(name, sizeof(name), "clair_rt_list_at_%s_checked", element_kinds[k][2]);
+    return name;
+}
+
+/* name of the checked helper of a machine-integer operator: div, mod, shl, shr */
+static const char *machine_helper(const char *op) {
+    if (strcmp(op, "/") == 0) return "div";
+    if (strcmp(op, "%") == 0) return "mod";
+    if (strcmp(op, "<<") == 0) return "shl";
+    return "shr";
+}
+
+/* a shift count: a u64 count is brought into int64_t (64 and more all give the same result) */
+static int emit_shift_count(FILE *f, const AstNode *count) {
+    int big = count->type_name && strcmp(count->type_name, "u64") == 0;
+    if (big) fputs("clair_rt_count_u64(", f);
+    if (!emit_expr(f, count)) return 0;
+    if (big) fputc(')', f);
+    return 1;
+}
+
+/*
+ * u8 + u8 -> (uint8_t)(a + b), i32 << 3 -> (int32_t)((uint32_t)a << 3),
+ * u16 / v -> clair_rt_div_u16(a, v), a & b -> a & b.
+ */
+static int emit_machine_binary(FILE *f, const AstNode *n, int form) {
+    const char *op = n->text, *t = n->type_name;
+    if (form == MFORM_CALL) {
+        int shift = strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0;
+        fprintf(f, "clair_rt_%s_%s(", machine_helper(op), t);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputs(", ", f);
+        if (!(shift ? emit_shift_count(f, n->children[1]) : emit_expr(f, n->children[1]))) return 0;
+        fputc(')', f);
+        return 1;
+    }
+    int prec = machine_op_prec(op);
+    int skipped = n == cast_skip;
+    if (skipped) form = MFORM_PLAIN;
+    if ((form == MFORM_CAST || skipped) && is_wrap_op(op)) {
+        /* cut back by this cast or an enclosing one: the operands need not be cut */
+        if (form == MFORM_CAST) fprintf(f, "(%s)(", machine_c_type(t));
+        for (size_t side = 0; side < 2; side++) {
+            const AstNode *child = n->children[side];
+            const AstNode *saved = cast_skip;
+            if (side) fprintf(f, " %s ", op);
+            if (cast_is_redundant(child, t)) cast_skip = child;
+            int ok = emit_operand(f, child, prec, (int)side);
+            cast_skip = saved;
+            if (!ok) return 0;
+        }
+        if (form == MFORM_CAST) fputc(')', f);
+        return 1;
+    }
+    if (form == MFORM_CAST && strcmp(op, "<<") == 0 && !machine_is_unsigned(t)) {
+        fprintf(f, "(%s)((%s)", machine_c_type(t), machine_unsigned_c(t));
+        if (!emit_operand(f, n->children[0], PREC_UNARY, 0)) return 0;
+        fputs(" << ", f);
+        if (!emit_operand(f, n->children[1], PREC_SHIFT, 1)) return 0;
+        fputc(')', f);
+        return 1;
+    }
+    if (form == MFORM_CAST) fprintf(f, "(%s)(", machine_c_type(t));
+    if (!emit_operand(f, n->children[0], prec, 0)) return 0;
+    fprintf(f, " %s ", op);
+    if (!emit_operand(f, n->children[1], prec, 1)) return 0;
+    if (form == MFORM_CAST) fputc(')', f);
+    return 1;
 }
 
 static int emit_expr(FILE *f, const AstNode *n) {
     switch (n->kind) {
         case AST_INTEGER:
             if (big_bits(n->type_name)) return emit_big_literal(f, n);
+            if (small_machine_bits(n->type_name)) {
+                /* 4000000000u: an unsigned C literal, so that u32 arithmetic stays in 32 bits */
+                int64_t v;
+                int unsigned_type = machine_is_unsigned(n->type_name);
+                if (strcmp(n->text, "-2147483648") == 0) { fputs("INT32_MIN", f); return 1; }
+                if (unsigned_type && (!literal_int(n, &v) || v < 0 || v > INT32_MAX)) { fprintf(f, "%su", n->text); return 1; }
+            }
             fputs(n->text, f);
             return 1;
 
@@ -2877,8 +3143,38 @@ static int emit_expr(FILE *f, const AstNode *n) {
                         fputc(')', f);
                         return 1;
                     }
+                    if (t0 && strcmp(t0, "u64") == 0) {          /* checked: 2^63 and more do not fit */
+                        fputs("clair_rt_u64_to_int(", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputc(')', f);
+                        return 1;
+                    }
                     fputs("(int64_t)", f);
                     return emit_operand(f, n->children[0], PREC_UNARY, 0);
+                }
+                if (small_machine_bits(name)) {
+                    /* u8(x): keeps the low bits, like C; a float is first cut toward zero, like int() */
+                    fprintf(f, "(%s)", c_type_name(name));
+                    if (t0 && (strcmp(t0, "float") == 0 || strcmp(t0, "float32") == 0)) {
+                        fputs("clair_rt_float_to_int(", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputc(')', f);
+                        return 1;
+                    }
+                    return emit_operand(f, n->children[0], PREC_UNARY, 0);
+                }
+                if (small_machine_bits(n->type_name) && (strcmp(name, "abs") == 0 || strcmp(name, "min") == 0 ||
+                                                          strcmp(name, "max") == 0)) {
+                    /* abs of an unsigned number is the number itself: (a + b), not a + b */
+                    if (strcmp(name, "abs") == 0 && machine_is_unsigned(n->type_name))
+                        return emit_operand(f, n->children[0], PREC_POSTFIX, 0);
+                    fprintf(f, "clair_rt_%s_%s(", name, n->type_name);
+                    for (size_t i = 0; i < n->child_count; i++) {
+                        if (i != 0) fputs(", ", f);
+                        if (!emit_expr(f, n->children[i])) return 0;
+                    }
+                    fputc(')', f);
+                    return 1;
                 }
                 if (big_bits(n->type_name) && (strcmp(name, "abs") == 0 || strcmp(name, "min") == 0 ||
                                                strcmp(name, "max") == 0 || strcmp(name, "pow") == 0)) {
@@ -2968,14 +3264,16 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 return 1;
             }
 
+            int form = machine_form(n);
+            if (form != MFORM_NONE) return emit_machine_binary(f, n, form);
 
             if (strcmp(op, "%") == 0) {
                 if (!is_int_type(n->type_name)) {
                     fputs(strcmp(n->type_name, "float32") == 0 ? "fmodf(" : "fmod(", f);
                 } else if (int_div_is_safe(n)) {
-                    if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
+                    if (!emit_side(f, n, 0, PREC_MULTIPLICATIVE)) return 0;
                     fputs(" % ", f);
-                    return emit_operand(f, n->children[1], PREC_MULTIPLICATIVE, 1);
+                    return emit_side(f, n, 1, PREC_MULTIPLICATIVE);
                 } else {
                     fputs("clair_rt_int_mod_checked(", f);
                 }
@@ -2990,15 +3288,13 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 n->type_name &&
                 strcmp(n->type_name, "int") == 0 &&
                 n->children[0] && n->children[1] &&
-                n->children[0]->type_name &&
-                n->children[1]->type_name &&
-                strcmp(n->children[0]->type_name, "int") == 0 &&
-                strcmp(n->children[1]->type_name, "int") == 0) {
+                machine_type_bits(n->children[0]->type_name) &&
+                machine_type_bits(n->children[1]->type_name)) {
                 if (int_div_is_safe(n)) {
                     /* constant divisor other than 0 and -1: cannot fail */
-                    if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
+                    if (!emit_side(f, n, 0, PREC_MULTIPLICATIVE)) return 0;
                     fputs(" / ", f);
-                    return emit_operand(f, n->children[1], PREC_MULTIPLICATIVE, 1);
+                    return emit_side(f, n, 1, PREC_MULTIPLICATIVE);
                 }
                 fputs("clair_rt_int_div_checked(", f);
                 if (!emit_expr(f, n->children[0])) return 0;
@@ -3036,10 +3332,9 @@ if (strcmp(op, "+") == 0 &&
             if (strcmp(op, "and") == 0) op = "&&";
             else if (strcmp(op, "or") == 0) op = "||";
 
-            if (!emit_operand(f, n->children[0], prec, 0)) return 0;
+            if (!emit_side(f, n, 0, prec)) return 0;
             fprintf(f, " %s ", op);
-            if (!emit_operand(f, n->children[1], prec, 1)) return 0;
-            return 1;
+            return emit_side(f, n, 1, prec);
         }
 
         case AST_UNARY: {
@@ -3056,12 +3351,19 @@ if (strcmp(op, "+") == 0 &&
                 return 1;
             }
             const char *op = strcmp(n->text, "not") == 0 ? "!" : n->text;
+            int cut = machine_unary_cast(n);
+            if (cut && n != cast_skip) fprintf(f, "(%s)", machine_c_type(n->type_name));   /* (uint8_t)~x */
             fputs(op, f);
             const AstNode *operand = n->children[0];
+            const AstNode *saved = cast_skip;
+            if (cut && cast_is_redundant(operand, n->type_name)) cast_skip = operand;   /* (uint8_t)-(a + b) */
             /* `- -x` would read as a decrement; keep `-(-x)` */
-            int wrap = expr_prec(operand) < PREC_UNARY || operand->kind == AST_UNARY;
+            int wrap = expr_prec(operand) < PREC_UNARY || operand->kind == AST_UNARY ||
+                       (operand->kind == AST_INTEGER && operand->text && operand->text[0] == '-');
             if (wrap) fputc('(', f);
-            if (!emit_expr(f, operand)) return 0;
+            int ok = emit_expr(f, operand);
+            cast_skip = saved;
+            if (!ok) return 0;
             if (wrap) fputc(')', f);
             return 1;
         }
@@ -3225,6 +3527,7 @@ static int node_may_fail(const AstNode *n) {
     if ((n->kind == AST_BINARY || n->kind == AST_UNARY) && big_bits(n->type_name)) return 1;  /* overflow */
     if (n->kind == AST_BINARY && n->text && (strcmp(n->text, "/") == 0 || strcmp(n->text, "%") == 0) &&
         is_int_type(n->type_name) && !int_div_is_safe(n)) return 1;
+    if (n->kind == AST_BINARY && machine_form(n) == MFORM_CALL) return 1;   /* u8 / 0, x << -1 */
     for (size_t i = 0; i < n->child_count; i++) {
         if (node_may_fail(n->children[i])) return 1;
     }
@@ -3519,7 +3822,14 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                             v->type_name && (strcmp(v->type_name, "int") == 0 || strcmp(v->type_name, "float") == 0 ||
                                              strcmp(v->type_name, "float32") == 0) &&
                             !(op[0] == '%' && strcmp(v->type_name, "int") != 0) &&
-                            !((op[0] == '/' || op[0] == '%') && strcmp(v->type_name, "int") == 0 && !int_div_is_safe(v));
+                            !((op[0] == '/' || op[0] == '%') && strcmp(v->type_name, "int") == 0 && !int_div_is_safe(v)) &&
+                            !float32_meets_wide_int(v) && !int_meet_needs_cast(v, 1);
+                /* u8 and i32: C's x += v cuts the result back into x by itself */
+                int form = machine_form(v);
+                if (op[0] && is_ident(v->children[0], n->text) && small_machine_bits(v->type_name) &&
+                    (form == MFORM_PLAIN || form == MFORM_CAST) && !(op[0] == '<' && !machine_is_unsigned(v->type_name)))
+                    plain = 1;
+                if (op[0] && is_ident(v->children[0], n->text) && strcmp(op, ">>") == 0 && form == MFORM_PLAIN) plain = 1;
                 int64_t folded;
                 if (plain && !const_int_value(v, &folded)) {
                     fprintf(f, "%s %s= ", n->text, op);
@@ -3746,8 +4056,13 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 fputs("printf(\"%d\\n\", (int)(", f);
                 if (!emit_expr(f, value)) return 0;
                 fputs("));\n", f);
-            } else if (strcmp(value->type_name, "int") == 0) {
+            } else if (strcmp(value->type_name, "int") == 0 ||
+                       (small_machine_bits(value->type_name) && !machine_is_unsigned(value->type_name))) {
                 fputs("printf(\"%\" PRId64 \"\\n\", (int64_t)(", f);
+                if (!emit_expr(f, value)) return 0;
+                fputs("));\n", f);
+            } else if (small_machine_bits(value->type_name)) {
+                fputs("printf(\"%\" PRIu64 \"\\n\", (uint64_t)(", f);
                 if (!emit_expr(f, value)) return 0;
                 fputs("));\n", f);
             } else if (big_bits(value->type_name)) {
@@ -4789,10 +5104,10 @@ static int node_uses_math(const AstNode *n) {
     if (n->kind == AST_CALL && n->text && n->text[0] == '@' &&
         strcmp(n->text, "@int") != 0 && strcmp(n->text, "@float") != 0 &&
         strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
-        strncmp(n->text, "@slice", 6) != 0 &&
-        !(is_int_type(n->type_name) &&
+        strncmp(n->text, "@slice", 6) != 0 && !small_machine_bits(n->text + 1) &&
+        !(machine_type_bits(n->type_name) &&
           (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
-    if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !is_int_type(n->type_name)) return 1;
+    if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !machine_type_bits(n->type_name)) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (node_uses_math(n->children[i])) return 1;
     }
@@ -5267,6 +5582,112 @@ static void emit_big_runtime(FILE *f, const AstNode *program) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Runtime of the machine integers: only the helpers the program uses. */
+/* ------------------------------------------------------------------ */
+
+static const char *const machine_names[] = { "int", "i8", "i16", "i32", "u8", "u16", "u32", "u64" };
+static const char *const machine_ops[] = { "div", "mod", "shl", "shr", "abs", "min", "max" };
+#define MACHINE_TYPES (sizeof(machine_names) / sizeof(machine_names[0]))
+#define MACHINE_OPS (sizeof(machine_ops) / sizeof(machine_ops[0]))
+
+typedef struct {
+    unsigned char op[MACHINE_TYPES][MACHINE_OPS];
+    int count_u64, u64_to_int, float_to_int;
+} MachineNeeds;
+
+static void machine_need(MachineNeeds *m, const char *type, const char *op) {
+    for (size_t t = 0; t < MACHINE_TYPES; t++) {
+        if (!type || strcmp(type, machine_names[t]) != 0) continue;
+        for (size_t k = 0; k < MACHINE_OPS; k++) {
+            if (strcmp(op, machine_ops[k]) == 0) m->op[t][k] = 1;
+        }
+    }
+}
+
+static void scan_machine_needs(const AstNode *n, MachineNeeds *m) {
+    if (!n) return;
+    if (n->kind == AST_BINARY && machine_form(n) == MFORM_CALL) {
+        machine_need(m, n->type_name, machine_helper(n->text));
+        if (n->children[1]->type_name && strcmp(n->children[1]->type_name, "u64") == 0 &&
+            (strcmp(n->text, "<<") == 0 || strcmp(n->text, ">>") == 0)) m->count_u64 = 1;
+    }
+    if (n->kind == AST_CALL && n->text && n->text[0] == '@') {
+        const char *name = n->text + 1;
+        const char *t0 = n->child_count == 1 ? n->children[0]->type_name : NULL;
+        if (small_machine_bits(n->type_name) &&
+            ((strcmp(name, "abs") == 0 && !machine_is_unsigned(n->type_name)) ||
+             strcmp(name, "min") == 0 || strcmp(name, "max") == 0)) machine_need(m, n->type_name, name);
+        if ((strcmp(name, "int") == 0 || small_machine_bits(name)) && t0 &&
+            (strcmp(t0, "float") == 0 || strcmp(t0, "float32") == 0)) m->float_to_int = 1;
+        if (strcmp(name, "int") == 0 && t0 && strcmp(t0, "u64") == 0) m->u64_to_int = 1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) scan_machine_needs(n->children[i], m);
+}
+
+static void emit_machine_runtime(FILE *f, const MachineNeeds *m) {
+    int fails = m->u64_to_int;
+    for (size_t t = 0; t < MACHINE_TYPES; t++) {
+        for (size_t k = 0; k < 4; k++) fails |= m->op[t][k];
+    }
+    if (fails) {
+        fputs("/* machine integers (u8 .. u64, i8 .. i32): checked divisions and shifts */\n"
+              "static _Noreturn void clair_rt_machine_fail(const char *message) {\n"
+              "    fprintf(stderr, \"Clair runtime error: %s\\n\", message);\n"
+              "    exit(EXIT_FAILURE);\n"
+              "}\n\n", f);
+    }
+    if (m->count_u64) {
+        fputs("/* a u64 shift count: 64 and more all give the same result */\n"
+              "static inline int64_t clair_rt_count_u64(uint64_t n) { return n > 64 ? 64 : (int64_t)n; }\n\n", f);
+    }
+    if (m->u64_to_int) {
+        fputs("static int64_t clair_rt_u64_to_int(uint64_t x) {\n"
+              "    if (x > INT64_MAX) clair_rt_machine_fail(\"int() argument out of range\");\n"
+              "    return (int64_t)x;\n"
+              "}\n\n", f);
+    }
+    for (size_t t = 0; t < MACHINE_TYPES; t++) {
+        const char *name = machine_names[t];
+        const char *ct = machine_c_type(name), *ut = machine_unsigned_c(name);
+        int bits = machine_type_bits(name), is_unsigned = machine_is_unsigned(name);
+        char min_name[16];
+        snprintf(min_name, sizeof(min_name), "INT%d_MIN", bits);
+        if (m->op[t][0]) {
+            fprintf(f, "static %s clair_rt_div_%s(%s a, %s b) {\n", ct, name, ct, ct);
+            fputs("    if (b == 0) clair_rt_machine_fail(\"division by zero\");\n", f);
+            if (!is_unsigned)
+                fprintf(f, "    if (a == %s && b == -1) clair_rt_machine_fail(\"integer division overflow\");\n", min_name);
+            fputs("    return a / b;\n}\n\n", f);
+        }
+        if (m->op[t][1]) {
+            fprintf(f, "static %s clair_rt_mod_%s(%s a, %s b) {\n", ct, name, ct, ct);
+            fputs("    if (b == 0) clair_rt_machine_fail(\"modulo by zero\");\n", f);
+            fputs(is_unsigned ? "    return a % b;\n}\n\n" : "    return b == -1 ? 0 : a % b;\n}\n\n", f);
+        }
+        if (m->op[t][2]) {
+            /* shifted as unsigned: no overflow in C; 'bits' and more push every bit out */
+            fprintf(f, "static %s clair_rt_shl_%s(%s a, int64_t n) {\n", ct, name, ct);
+            fputs("    if (n < 0) clair_rt_machine_fail(\"negative shift count\");\n", f);
+            if (is_unsigned && bits >= 32) fprintf(f, "    return n >= %d ? 0 : a << n;\n}\n\n", bits);
+            else if (is_unsigned) fprintf(f, "    return n >= %d ? 0 : (%s)(a << n);\n}\n\n", bits, ct);
+            else fprintf(f, "    return n >= %d ? 0 : (%s)((%s)a << n);\n}\n\n", bits, ct, ut);
+        }
+        if (m->op[t][3]) {
+            fprintf(f, "static %s clair_rt_shr_%s(%s a, int64_t n) {\n", ct, name, ct);
+            fputs("    if (n < 0) clair_rt_machine_fail(\"negative shift count\");\n", f);
+            if (is_unsigned) fprintf(f, "    return n >= %d ? 0 : a >> n;\n}\n\n", bits);
+            else fprintf(f, "    return n >= %d ? (a < 0 ? -1 : 0) : a >> n;\n}\n\n", bits);
+        }
+        if (m->op[t][4])
+            fprintf(f, "static inline %s clair_rt_abs_%s(%s x) { return x < 0 ? -x : x; }\n\n", ct, name, ct);
+        if (m->op[t][5])
+            fprintf(f, "static inline %s clair_rt_min_%s(%s a, %s b) { return a < b ? a : b; }\n\n", ct, name, ct, ct);
+        if (m->op[t][6])
+            fprintf(f, "static inline %s clair_rt_max_%s(%s a, %s b) { return a > b ? a : b; }\n\n", ct, name, ct, ct);
+    }
+}
+
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
     stack_list_counter = 0;
@@ -5297,6 +5718,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
     if (node_uses_type(program, "uint1024")) fputs("#include <float.h>\n", f);
     fputc('\n', f);
     if (program_uses_big(program)) emit_big_runtime(f, program);
+    MachineNeeds machine_needs;
+    memset(&machine_needs, 0, sizeof(machine_needs));
+    scan_machine_needs(program, &machine_needs);
+    emit_machine_runtime(f, &machine_needs);
 
     if (node_uses_int_mod(program)) {
         fputs(
@@ -5330,7 +5755,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
             f
         );
     }
-    if (node_uses_call_named(program, "@int")) {
+    if (node_uses_call_named(program, "@int") || machine_needs.float_to_int) {
         fputs(
             "static int64_t clair_rt_float_to_int(double x) {\n"
             "    if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) {  /* also rejects NaN */\n"
@@ -5497,21 +5922,17 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "}\n\n",
                 f
             );
-            static const char *const kinds[5][3] = {
-                { "list[int]", "i64", "int64_t" },
-                { "list[float]", "f64", "double" },
-                { "list[float32]", "f32", "float" },
-                { "list[bool]", "bool", "bool" },
-                { "list[string]", "str", "const char *" },
-            };
-            for (size_t k = 0; k < 5; k++) {
-                if (!node_indexes_list_type(program, kinds[k][0])) continue;
+            for (size_t e = 0; e < ELEMENT_KIND_COUNT; e++) {
+                char list_type[32];
+                snprintf(list_type, sizeof(list_type), "list[%s]", element_kinds[e][0]);
+                if (!node_indexes_list_type(program, list_type)) continue;
+                const char *ctype = element_kinds[e][1], *suffix = element_kinds[e][2];
                 if (unchecked_mode) {
                     fprintf(f,
                         "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
                         "    return (%s *)list->data + index;  /* --sans-verif */\n"
                         "}\n\n",
-                        kinds[k][2], kinds[k][1], kinds[k][2]);
+                        ctype, suffix, ctype);
                     continue;
                 }
                 fprintf(f,
@@ -5519,7 +5940,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
                     "    if (!list || index < 0 || (uint64_t)index >= list->len) clair_rt_index_error(list, index, list ? list->len : 0);\n"
                     "    return (%s *)list->data + index;\n"
                     "}\n\n",
-                    kinds[k][2], kinds[k][1], kinds[k][2]);
+                    ctype, suffix, ctype);
             }
         }
 
@@ -5678,12 +6099,11 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "}\n\n",
             f
         );
-        static const char *const mkinds[3][3] = {
-            { "[float]", "f64", "double" },
-            { "[float32]", "f32", "float" },
-            { "[int]", "i64", "int64_t" },
-        };
-        for (size_t k = 0; k < 3; k++) {
+        for (size_t e = 0; e < ELEMENT_KIND_COUNT; e++) {
+            char bracketed[32];
+            snprintf(bracketed, sizeof(bracketed), "[%s]", element_kinds[e][0]);
+            const char *mkinds[1][3] = { { bracketed, element_kinds[e][2], element_kinds[e][1] } };
+            const size_t k = 0;
             if (!node_uses_matrix_kind(program, mkinds[k][0])) continue;
             fprintf(f,
                 "static inline %s *clair_rt_matrix_at_%s_checked(ClairMatrix m, int64_t i, int64_t j) {\n"

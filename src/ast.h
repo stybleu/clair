@@ -65,4 +65,10 @@ AstNode *ast_clone(const AstNode *node);
  */
 int clair_decimal_to_words(const char *text, uint64_t *out, int words, int is_unsigned);
 
+/*
+ * An integer as written (12, 1_000, 0xFF, 0b1010, 0o17) to plain decimal
+ * digits.  Returns 0 for a malformed or absurdly large number.
+ */
+int clair_integer_to_decimal(const char *text, size_t len, char *out, size_t out_size);
+
 #endif

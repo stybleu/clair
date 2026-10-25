@@ -63,13 +63,26 @@ static AstNode *parse_atom(Parser *p) {
     Token t = p->current;
 
     if (t.kind == TOKEN_INTEGER) {
+        /* 1_000, 0xFF, 0b1010, 0o17: kept as plain decimal digits */
+        char digits[400];
+        if (!clair_integer_to_decimal(t.start, t.length, digits, sizeof(digits))) {
+            fprintf(stderr, "parse error at %zu:%zu: invalid number %.*s\n", t.line, t.column, (int)t.length, t.start);
+            p->had_error = 1;
+            return NULL;
+        }
         next(p);
-        return ast_new(AST_INTEGER, t.start, t.length);
+        return ast_new(AST_INTEGER, digits, strlen(digits));
     }
 
     if (t.kind == TOKEN_FLOAT_LITERAL) {
+        /* 1_000.5: the underscores only help reading */
+        char text[400];
+        size_t n = 0;
+        for (size_t i = 0; i < t.length && n + 1 < sizeof(text); i++) {
+            if (t.start[i] != '_') text[n++] = t.start[i];
+        }
         next(p);
-        return ast_new(AST_FLOAT, t.start, t.length);
+        return ast_new(AST_FLOAT, text, n);
     }
 
     if (t.kind == TOKEN_TRUE || t.kind == TOKEN_FALSE) {
@@ -335,7 +348,7 @@ static AstNode *parse_primary(Parser *p) {
 }
 
 static AstNode *parse_unary(Parser *p) {
-    if (p->current.kind == TOKEN_MINUS) {
+    if (p->current.kind == TOKEN_MINUS || p->current.kind == TOKEN_TILDE) {
         Token op = p->current;
         next(p);
 
@@ -395,15 +408,41 @@ static int is_comparison(TokenKind kind) {
            kind == TOKEN_GREATER || kind == TOKEN_GREATER_EQUAL;
 }
 
+/*
+ * Bit operators, with Python's priorities (not C's): below + and -, above the
+ * comparisons, so a & b == c means (a & b) == c.
+ *   shift: << >>   then &   then ^   then |
+ */
+static AstNode *parse_binary_level(Parser *p, int level);
+
+static AstNode *parse_binary_level(Parser *p, int level) {
+    static const TokenKind ops[4][2] = {
+        { TOKEN_SHL, TOKEN_SHR }, { TOKEN_AMP, TOKEN_AMP }, { TOKEN_CARET, TOKEN_CARET }, { TOKEN_PIPE, TOKEN_PIPE },
+    };
+    AstNode *left = level == 0 ? parse_additive(p) : parse_binary_level(p, level - 1);
+    if (!left) return NULL;
+    while (p->current.kind == ops[level][0] || p->current.kind == ops[level][1]) {
+        Token op = p->current;
+        next(p);
+        AstNode *right = level == 0 ? parse_additive(p) : parse_binary_level(p, level - 1);
+        if (!right) { ast_free(left); return NULL; }
+        left = make_binary(op, left, right);
+        if (!left) return NULL;
+    }
+    return left;
+}
+
+static AstNode *parse_bitor(Parser *p) { return parse_binary_level(p, 3); }
+
 static AstNode *parse_comparison(Parser *p) {
-    AstNode *left = parse_additive(p);
+    AstNode *left = parse_bitor(p);
     if (!left) return NULL;
 
     if (is_comparison(p->current.kind)) {
         Token op = p->current;
         next(p);
 
-        AstNode *right = parse_additive(p);
+        AstNode *right = parse_bitor(p);
         if (!right) { ast_free(left); return NULL; }
         left = make_binary(op, left, right);
         if (!left) return NULL;
@@ -835,6 +874,18 @@ static int is_float32_token(Token t) {
     return t.kind == TOKEN_IDENTIFIER && t.length == 7 && strncmp(t.start, "float32", 7) == 0;
 }
 
+/* machine integers u8 .. u64, i8 .. i32 (i64 is int): their name, or NULL */
+static const char *machine_type_token(Token t) {
+    static const char *const names[] = { "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", NULL };
+    if (t.kind != TOKEN_IDENTIFIER) return NULL;
+    for (size_t i = 0; names[i]; i++) {
+        if (t.length == strlen(names[i]) && strncmp(t.start, names[i], t.length) == 0) {
+            return strcmp(names[i], "i64") == 0 ? "int" : names[i];
+        }
+    }
+    return NULL;
+}
+
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
 
@@ -847,8 +898,13 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
             if (p->current.kind == TOKEN_FLOAT) matrix_type = "matrix[float]";
             else if (p->current.kind == TOKEN_INT) matrix_type = "matrix[int]";
             else if (is_float32_token(p->current)) matrix_type = "matrix[float32]";
+            else if (machine_type_token(p->current)) {
+                static char machine_matrix[32];
+                snprintf(machine_matrix, sizeof(machine_matrix), "matrix[%s]", machine_type_token(p->current));
+                matrix_type = machine_matrix;
+            }
             else {
-                fprintf(stderr, "parse error at %zu:%zu: matrix element type must be float, float32 or int\n",
+                fprintf(stderr, "parse error at %zu:%zu: matrix element type must be float, float32, int or u8 ... u64, i8 ... i32\n",
                         p->current.line, p->current.column);
                 p->had_error = 1;
                 return 0;
@@ -858,6 +914,12 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
             return ast_set_type(node, matrix_type, strlen(matrix_type));
         }
         return ast_set_type(node, t.start, t.length);  /* a class named matrix */
+    }
+
+    if (machine_type_token(t)) {
+        const char *name = machine_type_token(t);
+        next(p);
+        return ast_set_type(node, name, strlen(name));
     }
 
     if (t.kind == TOKEN_INT || t.kind == TOKEN_FLOAT ||
@@ -884,8 +946,15 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
                     list_type_len = 13;
                     break;
                 }
+                if (machine_type_token(p->current)) {
+                    static char machine_list[32];
+                    snprintf(machine_list, sizeof(machine_list), "list[%s]", machine_type_token(p->current));
+                    list_type = machine_list;
+                    list_type_len = strlen(machine_list);
+                    break;
+                }
                 fprintf(stderr,
-                        "parse error at %zu:%zu: list element type must be int, float, float32, bool or string\n",
+                        "parse error at %zu:%zu: list element type must be int, float, float32, bool, string or u8 ... u64, i8 ... i32\n",
                         p->current.line, p->current.column);
                 p->had_error = 1;
                 return 0;
@@ -996,6 +1065,11 @@ static const char *compound_operator(TokenKind kind) {
         case TOKEN_STAR_EQUAL: return "*";
         case TOKEN_SLASH_EQUAL: return "/";
         case TOKEN_PERCENT_EQUAL: return "%";
+        case TOKEN_AMP_EQUAL: return "&";
+        case TOKEN_PIPE_EQUAL: return "|";
+        case TOKEN_CARET_EQUAL: return "^";
+        case TOKEN_SHL_EQUAL: return "<<";
+        case TOKEN_SHR_EQUAL: return ">>";
         default: return NULL;
     }
 }
@@ -1084,7 +1158,7 @@ static AstNode *parse_identifier_statement(Parser *p) {
                 return NULL;
             }
             AstNode *current = ast_clone(lhs);
-            AstNode *bin = current ? ast_new(AST_BINARY, compound, 1) : NULL;
+            AstNode *bin = current ? ast_new(AST_BINARY, compound, strlen(compound)) : NULL;
             if (!bin || !ast_add_child(bin, current)) {
                 ast_free(bin);
                 ast_free(current);
