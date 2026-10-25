@@ -57,6 +57,7 @@ static int run_clang(const char *cpath, const char *output) {
             "-o",
             (char *)output,
             "-lm",
+            "-pthread",          /* big matrix products and dense layers use every core */
             NULL
         };
         execvp("clang", args);

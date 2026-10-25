@@ -1319,9 +1319,10 @@ static int program_has_matmul(const AstNode *n) {
 /* ------------------------------------------------------------------ */
 /* Matrix x vector (a dense layer of a neural network):               */
 /*     for i { let s = b[i]; for j { s = s + w[i][j] * x[j] }; ... }  */
-/* runs 4 rows at once.  Each row keeps its own additions in the same */
-/* order, so the result is identical to the bit; the 4 independent    */
-/* sums no longer wait for each other.                                */
+/* computes every sum first (4 rows at once, on all cores for a big   */
+/* layer), then runs the "..." row by row.  Each row keeps its own    */
+/* additions in the same order, so the result is identical to the    */
+/* bit whatever the number of cores.                                  */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -2962,7 +2963,7 @@ static int node_may_fail(const AstNode *n) {
 }
 
 /* Lists and matrices owned by the variables of the blocks being written (see compute_ownership). */
-typedef struct { const char *name; int matrix; } OwnedVar;
+typedef struct { const char *name; int matrix; } OwnedVar;   /* matrix: 0 list, 1 matrix, 2 sums of a layer */
 static OwnedVar owned_live[OWN_MAX];
 static size_t owned_live_count = 0;
 static size_t loop_marks[1024];          /* owned_live_count when each enclosing loop started */
@@ -2972,8 +2973,9 @@ static const char *current_return_type = NULL;
 static void emit_free_since(FILE *f, size_t mark, int depth) {
     for (size_t i = owned_live_count; i > mark; i--) {
         indent(f, depth);
-        fprintf(f, "%s(%s);\n", owned_live[i - 1].matrix ? "clair_rt_matrix_free" : "clair_rt_list_free",
-                owned_live[i - 1].name);
+        int kind = owned_live[i - 1].matrix;
+        if (kind == 2) fprintf(f, "clair_rt_sums_free(%s, %s_small);\n", owned_live[i - 1].name, owned_live[i - 1].name);
+        else fprintf(f, "%s(%s);\n", kind ? "clair_rt_matrix_free" : "clair_rt_list_free", owned_live[i - 1].name);
     }
 }
 
@@ -3568,7 +3570,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             memset(&mv, 0, sizeof(mv));
             int is_matvec = !matvec_suppress && !matmul_suppress && !fast_suppress && matvec_pattern(n, &mv);
             if (is_matvec) {
-                /* Matrix x vector: 4 rows at once when the shapes fit and nothing written aliases w, x, b. */
+                /* Matrix x vector: the sums by the kernel when the shapes fit and nothing written aliases w, x, b. */
                 const AstNode *body = mv.body;
                 int first = 1;
                 #define MV_AND() do { if (!first) { fputs(" &&\n", f); indent(f, depth + 1); } first = 0; } while (0)
@@ -3628,84 +3630,60 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                     indent(f, depth + 1);
                     fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.b_name, mv.b_expr);
                 }
+                /*
+                 * 1. every sum, on all cores (nothing else happens meanwhile:
+                 *    the sums only read w, x and their starting values);
+                 * 2. what followed each sum, row by row, in the original order.
+                 */
                 indent(f, depth + 1);
-                fputs("int64_t clair_row = 0;\n", f);
+                fputs("double clair_sums_small[CLAIR_SUMS_SMALL];\n", f);
                 indent(f, depth + 1);
-                fputs("for (; clair_row + 4 <= ", f);
-                if (!emit_operand(f, mv.m_stop, PREC_ADDITIVE, 1)) return 0;
-                fputs("; clair_row += 4) {\n", f);
-                for (int r = 0; r < 4; r++) {
-                    indent(f, depth + 2);
-                    fprintf(f, "double clair_s%d = ", r);
-                    if (mv.b_expr) fprintf(f, "clair_data_%s[clair_row%s]", mv.b_name, r == 0 ? "" : r == 1 ? " + 1" : r == 2 ? " + 2" : " + 3");
-                    else if (!emit_expr(f, mv.init)) return 0;
-                    fputs(";\n", f);
-                }
-                for (int r = 0; r < 4; r++) {
-                    indent(f, depth + 2);
-                    if (r == 0) {
-                        fprintf(f, "const double *clair_w0 = clair_data_%s + clair_row * ", mv.w_name);
-                        if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
-                        else if (!emit_operand(f, mv.ld, PREC_MULTIPLICATIVE, 1)) return 0;
-                    } else {
-                        fprintf(f, "const double *clair_w%d = clair_w%d + ", r, r - 1);
-                        if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
-                        else if (!emit_operand(f, mv.ld, PREC_ADDITIVE, 1)) return 0;
-                    }
-                    fputs(";\n", f);
-                }
-                indent(f, depth + 2);
-                fprintf(f, "for (int64_t %s = 0; %s < ", mv.j, mv.j);
-                if (!emit_operand(f, mv.n_stop, PREC_RELATIONAL, 1)) return 0;
-                fprintf(f, "; %s++) {\n", mv.j);
-                indent(f, depth + 3);
-                fprintf(f, "double clair_x = clair_data_%s[%s];\n", mv.x_name, mv.j);
-                for (int r = 0; r < 4; r++) {
-                    indent(f, depth + 3);
-                    fprintf(f, "clair_s%d = clair_s%d + clair_w%d[%s] * clair_x;\n", r, r, r, mv.j);
-                }
-                indent(f, depth + 2);
-                fputs("}\n", f);
-                /* what followed the sum, row by row, in the original order */
-                for (int r = 0; r < 4; r++) {
-                    int uses_i = 0, uses_s = 0;
-                    for (size_t st = 2; st < body->child_count; st++) {
-                        uses_i |= name_mentioned_in(body->children[st], mv.i);
-                        uses_s |= name_mentioned_in(body->children[st], mv.s);
-                    }
-                    if (body->child_count == 2) break;
-                    indent(f, depth + 2);
-                    fputs("{\n", f);
-                    if (uses_i) {
-                        indent(f, depth + 3);
-                        if (r == 0) fprintf(f, "int64_t %s = clair_row;\n", mv.i);
-                        else fprintf(f, "int64_t %s = clair_row + %d;\n", mv.i, r);
-                    }
+                fputs("double *clair_sums = clair_rt_sums_make(", f);
+                if (!emit_expr(f, mv.m_stop)) return 0;
+                fputs(", clair_sums_small);\n", f);
+                if (owned_live_count >= OWN_MAX) return 0;
+                owned_live[owned_live_count++] = (OwnedVar){ "clair_sums", 2 };
+                indent(f, depth + 1);
+                fprintf(f, "for (int64_t %s = 0; %s < ", mv.i, mv.i);
+                if (!emit_operand(f, mv.m_stop, PREC_RELATIONAL, 1)) return 0;
+                fprintf(f, "; %s++) clair_sums[%s] = ", mv.i, mv.i);
+                if (mv.b_expr) fprintf(f, "clair_data_%s[%s]", mv.b_name, mv.i);
+                else if (!emit_expr(f, mv.init)) return 0;
+                fputs(";\n", f);
+                indent(f, depth + 1);
+                fputs("clair_rt_matvec_f64(", f);
+                if (!emit_expr(f, mv.m_stop)) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, mv.n_stop)) return 0;
+                fprintf(f, ", clair_data_%s, ", mv.w_name);
+                if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
+                else if (!emit_expr(f, mv.ld)) return 0;
+                fprintf(f, ", clair_data_%s, clair_sums);\n", mv.x_name);
+                int ok = 1;
+                if (body->child_count > 2) {
+                    int uses_s = 0;
+                    for (size_t st = 2; st < body->child_count; st++) uses_s |= name_mentioned_in(body->children[st], mv.s);
+                    indent(f, depth + 1);
+                    fprintf(f, "for (int64_t %s = 0; %s < ", mv.i, mv.i);
+                    if (!emit_operand(f, mv.m_stop, PREC_RELATIONAL, 1)) return 0;
+                    fprintf(f, "; %s++) {\n", mv.i);
                     if (uses_s) {
-                        indent(f, depth + 3);
-                        fprintf(f, "double %s = clair_s%d;\n", mv.s, r);
+                        indent(f, depth + 2);
+                        fprintf(f, "double %s = clair_sums[%s];\n", mv.s, mv.i);
                     }
                     size_t own_mark = owned_live_count;
-                    for (size_t st = 2; st < body->child_count; st++) {
-                        if (!emit_stmt(f, body->children[st], depth + 3)) return 0;
-                    }
-                    emit_free_since(f, own_mark, depth + 3);
+                    for (size_t st = 2; st < body->child_count && ok; st++) ok = emit_stmt(f, body->children[st], depth + 2);
+                    if (!ok) return 0;
+                    if (body->children[body->child_count - 1]->kind != AST_RETURN) emit_free_since(f, own_mark, depth + 2);
                     owned_live_count = own_mark;
-                    indent(f, depth + 2);
-                    fputs("}\n", f);
-                }
-                indent(f, depth + 1);
-                fputs("}\n", f);
-                /* the last rows (fewer than 4), as written */
-                indent(f, depth + 1);
-                fprintf(f, "for (int64_t %s = clair_row; %s < ", mv.i, mv.i);
-                if (!emit_operand(f, mv.m_stop, PREC_RELATIONAL, 1)) return 0;
-                fprintf(f, "; %s++) {\n", mv.i);
-                matvec_suppress = 1;
-                int ok = emit_block(f, body, depth + 2);
-                if (ok) {
                     indent(f, depth + 1);
                     fputs("}\n", f);
+                }
+                owned_live_count--;                     /* clair_sums */
+                indent(f, depth + 1);
+                fputs("clair_rt_sums_free(clair_sums, clair_sums_small);\n", f);
+                matvec_suppress = 1;
+                if (ok) {
                     indent(f, depth);
                     fputs("} else {\n", f);
                     ok = emit_stmt(f, n, depth + 1);
@@ -4721,6 +4699,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     fputs(unchecked_mode ? "/* Generated by the Clair compiler (--sans-verif: no bounds checks). */\n"
                          : "/* Generated by the Clair compiler. */\n", f);
+    int uses_cores = program_has_matmul(program) || program_has_matvec(program);
+    if (uses_cores) fputs("#define _GNU_SOURCE   /* sched_getaffinity: how many cores the program may use */\n", f);
     fputs(
         "#include <inttypes.h>\n"
         "#include <stdbool.h>\n"
@@ -4731,6 +4711,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
         f
     );
     if (uses_input_int) fputs("#include <errno.h>\n", f);
+    if (uses_cores) fputs("#include <pthread.h>\n#include <sched.h>\n#include <stdatomic.h>\n", f);
     if (node_uses_math(program) || program_uses_big(program)) fputs("#include <math.h>\n", f);
     fputc('\n', f);
     if (program_uses_big(program)) emit_big_runtime(f, program);
@@ -5169,22 +5150,231 @@ int codegen_c_file(const AstNode *program, const char *path) {
         );
     }
 
-    if (program_has_matmul(program)) {
+    if (program_has_matmul(program) || program_has_matvec(program)) {
         fputs(
             "/*\n"
-            " * c[i][j] = c[i][j] + a[i][k] * b[k][j] for i < m, j < n, k < kk.\n"
-            " * Every c[i][j] receives the same additions in the same order (k increasing)\n"
-            " * as with the three plain loops, so the result is identical to the bit; but a\n"
-            " * 4 x 8 block of c stays in registers while k runs over 128 values.\n"
-            " * noinline: compiled once for any shape, so the 4 x 8 block keeps its layout.\n"
+            " * Several cores: a pool of threads started the first time it is needed.  A\n"
+            " * job is cut into chunks of rows; every thread (the caller too) takes the next\n"
+            " * free chunk until none is left, so fast and slow cores share the work.  Each\n"
+            " * row is computed by one thread exactly as in a single loop, so the result\n"
+            " * does not depend on the number of threads.  CLAIR_THREADS=1 uses one core.\n"
             " */\n"
-            "static __attribute__((noinline)) void clair_rt_matmul_f64(int64_t m, int64_t n, int64_t kk,\n"
-            "                                                        const double *a, int64_t lda, const double *b, int64_t ldb,\n"
-            "                                                        double *c, int64_t ldc) {\n"
+            "typedef void (*ClairTask)(const void *job, int64_t first, int64_t last);\n"
+            "\n"
+            "static struct {\n"
+            "    pthread_mutex_t lock;\n"
+            "    pthread_cond_t wake, idle;\n"
+            "    pthread_once_t once;\n"
+            "    int workers;                         /* threads besides the caller */\n"
+            "    ClairTask task;\n"
+            "    const void *job;\n"
+            "    int64_t count, chunk;\n"
+            "    _Atomic unsigned generation;         /* +1 for every job */\n"
+            "    _Atomic int64_t next;                /* first row of the next free chunk */\n"
+            "    _Atomic int busy;                    /* workers still on the current job */\n"
+            "} clair_rt_pool = {\n"
+            "    .lock = PTHREAD_MUTEX_INITIALIZER,\n"
+            "    .wake = PTHREAD_COND_INITIALIZER,\n"
+            "    .idle = PTHREAD_COND_INITIALIZER,\n"
+            "    .once = PTHREAD_ONCE_INIT,\n"
+            "};\n"
+            "\n"
+            "/* waiting actively: a short pause first, then let another thread use the core */\n"
+            "static inline void clair_rt_relax(int spins) {\n"
+            "    if (spins > 64) {\n"
+            "        sched_yield();\n"
+            "        return;\n"
+            "    }\n"
+            "#if defined(__aarch64__)\n"
+            "    __asm__ __volatile__(\"yield\");\n"
+            "#elif defined(__x86_64__)\n"
+            "    __asm__ __volatile__(\"pause\");\n"
+            "#endif\n"
+            "}\n"
+            "\n"
+            "static void clair_rt_pool_work(void) {\n"
+            "    for (;;) {\n"
+            "        int64_t first = atomic_fetch_add_explicit(&clair_rt_pool.next, clair_rt_pool.chunk, memory_order_relaxed);\n"
+            "        if (first >= clair_rt_pool.count) return;\n"
+            "        int64_t last = clair_rt_pool.count - first < clair_rt_pool.chunk ? clair_rt_pool.count : first + clair_rt_pool.chunk;\n"
+            "        clair_rt_pool.task(clair_rt_pool.job, first, last);\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "static void *clair_rt_pool_worker(void *unused) {\n"
+            "    (void)unused;\n"
+            "    unsigned seen = 0;\n"
+            "    for (;;) {\n"
+            "        unsigned g;\n"
+            "        int spins = 0;\n"
+            "        while ((g = atomic_load_explicit(&clair_rt_pool.generation, memory_order_acquire)) == seen) {\n"
+            "            if (++spins < 2000) {              /* jobs often follow each other: wait actively a little */\n"
+            "                clair_rt_relax(spins);\n"
+            "                continue;\n"
+            "            }\n"
+            "            pthread_mutex_lock(&clair_rt_pool.lock);\n"
+            "            while ((g = atomic_load_explicit(&clair_rt_pool.generation, memory_order_acquire)) == seen) {\n"
+            "                pthread_cond_wait(&clair_rt_pool.wake, &clair_rt_pool.lock);\n"
+            "            }\n"
+            "            pthread_mutex_unlock(&clair_rt_pool.lock);\n"
+            "            break;\n"
+            "        }\n"
+            "        seen = g;\n"
+            "        clair_rt_pool_work();\n"
+            "        if (atomic_fetch_sub_explicit(&clair_rt_pool.busy, 1, memory_order_acq_rel) == 1) {\n"
+            "            pthread_mutex_lock(&clair_rt_pool.lock);\n"
+            "            pthread_cond_signal(&clair_rt_pool.idle);\n"
+            "            pthread_mutex_unlock(&clair_rt_pool.lock);\n"
+            "        }\n"
+            "    }\n"
+            "    return NULL;\n"
+            "}\n"
+            "\n"
+            "static void clair_rt_pool_start(void) {\n"
+            "    int cores = 1;\n"
+            "    cpu_set_t allowed;\n"
+            "    if (sched_getaffinity(0, sizeof(allowed), &allowed) == 0) cores = CPU_COUNT(&allowed);\n"
+            "    const char *wanted = getenv(\"CLAIR_THREADS\");\n"
+            "    if (wanted && atoi(wanted) > 0) cores = atoi(wanted);\n"
+            "    if (cores > 16) cores = 16;\n"
+            "    for (int i = 0; i < cores - 1; i++) {\n"
+            "        pthread_t thread;\n"
+            "        if (pthread_create(&thread, NULL, clair_rt_pool_worker, NULL) != 0) break;\n"
+            "        pthread_detach(thread);\n"
+            "        clair_rt_pool.workers++;\n"
+            "    }\n"
+            "}\n",
+            f
+        );
+        fputs(
+            "\n"
+            "/* task(job, first, last) for every chunk of [0, count): on all cores when the pool has workers */\n"
+            "static void clair_rt_parallel_for(ClairTask task, const void *job, int64_t count, int64_t chunk) {\n"
+            "    pthread_once(&clair_rt_pool.once, clair_rt_pool_start);\n"
+            "    if (clair_rt_pool.workers == 0 || count <= chunk) {\n"
+            "        task(job, 0, count);\n"
+            "        return;\n"
+            "    }\n"
+            "    clair_rt_pool.task = task;\n"
+            "    clair_rt_pool.job = job;\n"
+            "    clair_rt_pool.count = count;\n"
+            "    clair_rt_pool.chunk = chunk;\n"
+            "    atomic_store_explicit(&clair_rt_pool.next, 0, memory_order_relaxed);\n"
+            "    atomic_store_explicit(&clair_rt_pool.busy, clair_rt_pool.workers, memory_order_relaxed);\n"
+            "    pthread_mutex_lock(&clair_rt_pool.lock);\n"
+            "    atomic_fetch_add_explicit(&clair_rt_pool.generation, 1, memory_order_release);\n"
+            "    pthread_cond_broadcast(&clair_rt_pool.wake);\n"
+            "    pthread_mutex_unlock(&clair_rt_pool.lock);\n"
+            "    clair_rt_pool_work();\n"
+            "    int spins = 0;\n"
+            "    while (atomic_load_explicit(&clair_rt_pool.busy, memory_order_acquire) != 0) {\n"
+            "        if (++spins < 2000) {\n"
+            "            clair_rt_relax(spins);\n"
+            "            continue;\n"
+            "        }\n"
+            "        pthread_mutex_lock(&clair_rt_pool.lock);\n"
+            "        while (atomic_load_explicit(&clair_rt_pool.busy, memory_order_acquire) != 0) {\n"
+            "            pthread_cond_wait(&clair_rt_pool.idle, &clair_rt_pool.lock);\n"
+            "        }\n"
+            "        pthread_mutex_unlock(&clair_rt_pool.lock);\n"
+            "    }\n"
+            "}\n",
+            f
+        );
+    }
+
+    if (program_has_matvec(program)) {
+        fputs(
+            "typedef struct {\n"
+            "    int64_t n, ldw;\n"
+            "    const double *w, *x;\n"
+            "    double *s;\n"
+            "} ClairMatvecJob;\n"
+            "\n"
+            "/*\n"
+            " * Rows [first, last) of s[i] = s[i] + w[i][0] * x[0] + w[i][1] * x[1] + ...\n"
+            " * 4 rows at once: each keeps its own additions in the same order as the\n"
+            " * plain loop (identical result), and the 4 sums no longer wait for each other.\n"
+            " */\n"
+            "static void clair_rt_matvec_rows(const void *job, int64_t first, int64_t last) {\n"
+            "    const ClairMatvecJob *p = job;\n"
+            "    const int64_t n = p->n, ldw = p->ldw;\n"
+            "    const double *w = p->w, *x = p->x;\n"
+            "    double *s = p->s;\n"
+            "    int64_t i = first;\n"
+            "    for (; i + 4 <= last; i += 4) {\n"
+            "        double s0 = s[i], s1 = s[i + 1], s2 = s[i + 2], s3 = s[i + 3];\n"
+            "        const double *w0 = w + i * ldw, *w1 = w0 + ldw, *w2 = w1 + ldw, *w3 = w2 + ldw;\n"
+            "        for (int64_t j = 0; j < n; j++) {\n"
+            "            double xj = x[j];\n"
+            "            s0 = s0 + w0[j] * xj;\n"
+            "            s1 = s1 + w1[j] * xj;\n"
+            "            s2 = s2 + w2[j] * xj;\n"
+            "            s3 = s3 + w3[j] * xj;\n"
+            "        }\n"
+            "        s[i] = s0;\n"
+            "        s[i + 1] = s1;\n"
+            "        s[i + 2] = s2;\n"
+            "        s[i + 3] = s3;\n"
+            "    }\n"
+            "    for (; i < last; i++) {\n"
+            "        double si = s[i];\n"
+            "        const double *wi = w + i * ldw;\n"
+            "        for (int64_t j = 0; j < n; j++) si = si + wi[j] * x[j];\n"
+            "        s[i] = si;\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "/* the sums of a dense layer, on all cores once the layer is big enough */\n"
+            "static inline void clair_rt_matvec_f64(int64_t m, int64_t n, const double *w, int64_t ldw, const double *x,\n"
+            "                                       double *s) {\n"
+            "    ClairMatvecJob job = { n, ldw, w, x, s };\n"
+            "    if ((double)m * (double)n < 32768.0) clair_rt_matvec_rows(&job, 0, m);\n"
+            "    else clair_rt_parallel_for(clair_rt_matvec_rows, &job, m, 16);\n"
+            "}\n"
+            "\n"
+            "/* room for the sums: on the stack for a small layer (no malloc at each call) */\n"
+            "#define CLAIR_SUMS_SMALL 64\n"
+            "static inline double *clair_rt_sums_make(int64_t m, double *small) {\n"
+            "    if (m <= CLAIR_SUMS_SMALL) return small;\n"
+            "    double *s = malloc((size_t)m * sizeof(double));\n"
+            "    if (!s) {\n"
+            "        fputs(\"Clair runtime error: out of memory\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n"
+            "\n"
+            "static inline void clair_rt_sums_free(double *s, const double *small) {\n"
+            "    if (s != small) free(s);\n"
+            "}\n",
+            f
+        );
+    }
+
+    if (program_has_matmul(program)) {
+        fputs(
+            "typedef struct {\n"
+            "    int64_t n, kk, lda, ldb, ldc;\n"
+            "    const double *a, *b;\n"
+            "    double *c;\n"
+            "} ClairMatmulJob;\n"
+            "\n"
+            "/*\n"
+            " * Rows [first, last) of c[i][j] = c[i][j] + a[i][k] * b[k][j].  Every c[i][j]\n"
+            " * receives the same additions in the same order (k increasing) as with the\n"
+            " * three plain loops, so the result is identical to the bit; but a 4 x 8 block\n"
+            " * of c stays in registers while k runs over 128 values.\n"
+            " */\n"
+            "static void clair_rt_matmul_rows(const void *job, int64_t first, int64_t last) {\n"
+            "    const ClairMatmulJob *p = job;\n"
+            "    const int64_t n = p->n, kk = p->kk, lda = p->lda, ldb = p->ldb, ldc = p->ldc;\n"
+            "    const double *a = p->a, *b = p->b;\n"
+            "    double *c = p->c;\n"
             "    for (int64_t k0 = 0; k0 < kk; k0 += 128) {\n"
             "        int64_t k1 = kk - k0 < 128 ? kk : k0 + 128;\n"
-            "        int64_t i = 0;\n"
-            "        for (; i + 4 <= m; i += 4) {\n"
+            "        int64_t i = first;\n"
+            "        for (; i + 4 <= last; i += 4) {\n"
             "            int64_t j = 0;\n"
             "            for (; j + 8 <= n; j += 8) {\n"
             "                double acc[4][8];\n"
@@ -5208,14 +5398,23 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "                }\n"
             "            }\n"
             "        }\n"
-            "        for (; i < m; i++) {\n"
+            "        for (; i < last; i++) {\n"
             "            for (int64_t k = k0; k < k1; k++) {\n"
             "                double aik = a[i * lda + k];\n"
             "                for (int64_t j = 0; j < n; j++) c[i * ldc + j] = c[i * ldc + j] + aik * b[k * ldb + j];\n"
             "            }\n"
             "        }\n"
             "    }\n"
-            "}\n\n",
+            "}\n"
+            "\n"
+            "/* the matrix product, on all cores once it is big enough to be worth it */\n"
+            "static __attribute__((noinline)) void clair_rt_matmul_f64(int64_t m, int64_t n, int64_t kk,\n"
+            "                                                        const double *a, int64_t lda, const double *b, int64_t ldb,\n"
+            "                                                        double *c, int64_t ldc) {\n"
+            "    ClairMatmulJob job = { n, kk, lda, ldb, ldc, a, b, c };\n"
+            "    if ((double)m * (double)n * (double)kk < 1048576.0) clair_rt_matmul_rows(&job, 0, m);\n"
+            "    else clair_rt_parallel_for(clair_rt_matmul_rows, &job, m, 8);\n"
+            "}\n",
             f
         );
         if (node_uses_matrix_kind(program, "[float]")) {

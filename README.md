@@ -19,6 +19,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Doubles boucles (produit de matrices) vérifiées une seule fois avant la boucle extérieure
 - Produit de matrices reconnu et calculé en blocs : plus rapide que la triple boucle en C, résultat identique au bit près
 - Couche dense (matrice × vecteur) calculée 4 lignes à la fois : environ 2 fois plus rapide, résultat identique au bit près
+- Grands produits de matrices et grandes couches denses sur tous les cœurs, même résultat quel que soit le nombre de cœurs (`CLAIR_THREADS=1` pour un seul)
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
 - Listes et matrices rendues pendant le programme quand plus rien ne les utilise (fin de bloc, `break`, `return`, remplacement)
 - C généré lisible, proche du C écrit à la main
@@ -49,6 +50,13 @@ n'est alors plus détecté) :
 ./build/clair calcul.cl -o calcul --sans-verif
 ```
 
+Les grands produits de matrices et les grandes couches denses utilisent tous les cœurs. Pour en
+choisir le nombre :
+
+```sh
+CLAIR_THREADS=1 ./calcul
+```
+
 Les calculs à virgule donnent le même résultat partout, comme en Python. `--fma` laisse Clang
 fusionner `a * b + c` (un peu plus rapide sur ARM, dernier chiffre parfois différent).
 
@@ -58,7 +66,7 @@ fusionner `a * b + c` (un peu plus rapide sur ARM, dernier chiffre parfois diff�
 bash tools/rapport_code_machine.sh
 ```
 
-Compare neuf programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé.
+Compare neuf programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé. Un second tableau donne le gain des programmes de matrices sur tous les cœurs.
 
 ## Tests
 
@@ -75,6 +83,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.30](docs/README_V0.30.md) : grands produits de matrices et couches denses sur tous les cœurs
 - [Clair V0.29](docs/README_V0.29.md) : boucles alignées, même vitesse quelle que soit la place du code
 - [Clair V0.28](docs/README_V0.28.md) : mémoire rendue pendant le programme, rapport plus long
 - [Clair V0.27](docs/README_V0.27.md) : couche dense calculée 4 lignes à la fois, calculs à virgule identiques partout

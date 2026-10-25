@@ -6,6 +6,7 @@
 # and one lucky run (memory placed favourably by chance) does not decide.
 # Every run is pinned to the same core, the fastest one (tools/pin_core.c):
 # otherwise the phone may give the fast core to one program and not the other.
+# A last table runs the matrix programs on every core and gives the gain.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -89,4 +90,25 @@ for name in collatz dot axpy while forin matmul matrice couche reseau; do
     gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
     printf '%-9s %-11s %-7s %-7s %s%s\n' "$name" "$v_clair/$v_ref" \
         "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"
+done
+
+# Several cores: the big matrix products and dense layers share their rows
+# between all the cores. Same programs, one core (pinned) against all of them.
+cores=$(nproc 2>/dev/null || echo 1)
+printf '\nPLUSIEURS COEURS (%s coeurs)\n' "$cores"
+printf '%-9s %-7s %-7s %s\n' "programme" "1 coeur" "tous" "gain"
+for name in matmul matrice couche; do
+    [ -x "$WORK/$name" ] || continue
+    out_one=$(CLAIR_THREADS=1 "$WORK/$name"); out_all=$("$WORK/$name")
+    same=""
+    [ "$out_one" = "$out_all" ] || same=" RESULTAT DIFFERENT"
+    times_one=(); times_all=()
+    for _ in $(seq "$ROUNDS"); do
+        times_one+=("$(seconds env CLAIR_THREADS=1 ${PIN[@]+"${PIN[@]}"} "$WORK/$name")")
+        times_all+=("$(seconds "$WORK/$name")")
+    done
+    t_one=$(median "${times_one[@]}")
+    t_all=$(median "${times_all[@]}")
+    gain=$(awk -v a="$t_one" -v b="$t_all" 'BEGIN { printf "x%.1f", a / b }')
+    printf '%-9s %-7s %-7s %s%s\n' "$name" "$(printf '%.3f' "$t_one")" "$(printf '%.3f' "$t_all")" "$gain" "$same"
 done
