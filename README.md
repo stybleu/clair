@@ -8,6 +8,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON
 - Entiers machine `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32` (`i64` = `int`) qui font le tour comme en C et NumPy ; opérations sur les bits `& | ^ ~ << >>` ; nombres `0xFF`, `0b1010`, `0o755`, `1_000_000`
 - Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres) et sans signe `uint128` .. `uint1024`, avec `abs`, `min`, `max`, `pow` exacts ; dépassements détectés
+- `str(x)` et `format(x, ".9f")` comme en Python
 - Fichiers CSV de nombres (`load_csv`, `save_csv`), lignes de texte (`read_lines`, `split`, `strip`), `int("42")` et `float("2.5")` comme en Python
 - Nombres aléatoires `seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice` : mêmes tirages que Python pour la même graine
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
@@ -28,6 +29,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
 - Blocs `absolue { }` : la mémoire comme en C (`ptr[float32]`, `p[i]`, `p + k`, `address(xs)`, `alloc(n, 64)` aligné, `copy`, `fill`, `free`, `bytes`), sans aucune vérification, et `absolue def`
 - Listes et matrices rendues pendant le programme quand plus rien ne les utilise (fin de bloc, `break`, `return`, remplacement)
+- Jeux de tests des langages (n-body, spectral-norm, fannkuch-redux, pidigits, nqueen, matmul de PLB2) comparés au C dans le rapport
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
 - Optimisations SIMD ARM64 NEON
@@ -91,6 +93,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.43](docs/README_V0.43.md) : jeux de tests des langages (Benchmarks Game, PLB2) dans le rapport, `str()`, `format()`, `bigint(k)`, boucles triangulaires et à deux bouts vérifiées une fois
 - [Clair V0.42](docs/README_V0.42.md) : mémoire des `bigint` et `bigfloat` rendue dans toutes les fonctions, `clair` depuis n'importe quel dossier, `let x = x + 1` dans un bloc
 - [Clair V0.41](docs/README_V0.41.md) : blocs `absolue { }`, `ptr[T]`, `address`, `alloc` aligné, `copy`, `fill`, `free`, `bytes`, `absolue def`
 - [Clair V0.40](docs/README_V0.40.md) : grands entiers dynamiques, flottants decimaux precis (experimental)

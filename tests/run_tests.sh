@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.42 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.43 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -824,6 +824,37 @@ printf '%s\n' "grands_nombres_longue_boucle.cl : OK -> 3 millions de calculs dan
 ./build/clair tests/masquage_init.cl -o build/test_masquage_init
 [ "$(./build/test_masquage_init)" = "$(cat tests/masquage_init.expected)" ]
 printf '%s\n' 'masquage_init.cl : OK -> let x = x + 1 dans un bloc lit le x du dessus'
+
+# V0.43 : str(), format(), boucles triangulaires et a deux bouts
+./build/clair tests/texte_nombres.cl -o build/test_texte_nombres
+[ "$(./build/test_texte_nombres)" = "$(cat tests/texte_nombres.expected)" ]
+printf '%s\n' 'texte_nombres.cl : OK -> str() et format() identiques a Python (et NumPy pour float32)'
+./build/clair tests/boucles_bornes.cl -o build/test_boucles_bornes
+[ "$(./build/test_boucles_bornes)" = "$(cat tests/boucles_bornes.expected)" ]
+grep -Fq 'clair_rt_edge_lo(1, 1, 0, n)' build/test_boucles_bornes.generated.c
+grep -Fq 'if (lo >= hi || (lo >= 0 && xs->len <= (size_t)INT64_MAX && hi < (int64_t)xs->len)) {' build/test_boucles_bornes.generated.c
+printf '%s\n' 'boucles_bornes.cl : OK -> for j in range(i + 1, n) et while lo < hi verifies une seule fois'
+expect_runtime_error triangle_bounds_runtime '' 'Clair runtime error: list index 3 out of bounds for length 3'
+expect_runtime_error two_ends_bounds_runtime '1' 'Clair runtime error: list index 3 out of bounds for length 3'
+expect_compile_error invalid_format_spec 'format(x, ".3x"): write [width][.precision] then f, e, g or d'
+expect_compile_error invalid_format_int_d "format(x, \"d\"): 'd' writes an integer: use .Nf for a float"
+expect_compile_error invalid_format_dynamic 'argument 2 of format() must be written in the program'
+expect_compile_error invalid_str_list 'str() cannot write list[int]'
+
+# V0.43 : les jeux de tests des langages, sorties officielles sur de petites tailles
+jeu() {
+    local name="$1" size="$2" expected="$3"
+    ./build/clair "tools/jeux/$name.cl" -o "build/jeu_$name"
+    [ "$(./build/jeu_$name <<< "$size")" = "$(printf '%b' "$expected")" ] ||
+        { printf '%s\n' "tools/jeux/$name.cl : ECHEC -> sortie differente pour $size" >&2; exit 1; }
+    printf '%s\n' "jeu $name ($size) : OK -> sortie officielle"
+}
+jeu nbody 1000 '-0.169075164\n-0.169087605'
+jeu spectral 100 '1.274219991'
+jeu fannkuch 7 '228\nPfannkuchen(7) = 16'
+jeu pidigits 27 '3141592653\t:10\n5897932384\t:20\n6264338   \t:27'
+jeu nqueen 8 '92'
+jeu plbmatmul 100 '-9.335833'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

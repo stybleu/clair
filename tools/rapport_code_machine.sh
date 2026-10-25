@@ -133,3 +133,53 @@ for name in matmul matmul32 matrice couche couche32; do
     gain=$(awk -v a="$t_one" -v b="$t_all" 'BEGIN { printf "x%.1f", a / b }')
     printf '%-9s %-7s %-7s %s%s\n' "$name" "$(printf '%.3f' "$t_one")" "$(printf '%.3f' "$t_all")" "$gain" "$same"
 done
+
+# The tests used to compare languages (V0.43): the Computer Language Benchmarks
+# Game and PLB2, the same algorithm in Clair and in plain C.  The size is read
+# on the standard input; both programs must write exactly the same thing.
+JEUX="$ROOT/tools/jeux"
+seconds_in() {
+    local input="$1" start end
+    shift
+    start=$EPOCHREALTIME
+    "$@" <<< "$input" > /dev/null 2>&1
+    end=$EPOCHREALTIME
+    awk -v s="$start" -v e="$end" 'BEGIN { printf "%.4f", e - s }'
+}
+printf '\nJEUX DE TESTS DES LANGAGES (memes algorithmes en Clair et en C)\n'
+printf '%-10s %-8s %-7s %-7s %s\n' "programme" "taille" "Clair" "C" "ecart"
+while read -r name size _; do
+    case "$name" in ''|'#'*) continue ;; esac
+    if ! "$ROOT/build/clair" "$JEUX/$name.cl" -o "$WORK/jeu_$name" > "$WORK/jeu_$name.log" 2>&1; then
+        printf '%-10s ECHEC de compilation Clair\n' "$name"
+        continue
+    fi
+    libs="-lm"
+    [ "$name" = pidigits ] && libs="-lgmp"
+    if ! clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 \
+            "$JEUX/${name}_ref.c" -o "$WORK/jeu_${name}_ref" $libs >> "$WORK/jeu_$name.log" 2>&1; then
+        t_clair=$(seconds_in "$size" ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")
+        if [ "$name" = pidigits ]; then
+            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$size" "$(printf '%.3f' "$t_clair")" "-" "C sans GMP (pkg install libgmp)"
+        else
+            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$size" "$(printf '%.3f' "$t_clair")" "-" "ECHEC de compilation C"
+        fi
+        continue
+    fi
+    out_clair=$("$WORK/jeu_$name" <<< "$size"); out_ref=$("$WORK/jeu_${name}_ref" <<< "$size")
+    same=""
+    [ "$out_clair" = "$out_ref" ] || same=" RESULTAT DIFFERENT"
+    if ! core_ok; then
+        printf '%-10s coeur %s indisponible\n' "$name" "${PIN[1]}"
+        continue
+    fi
+    times_clair=(); times_ref=()
+    for _ in $(seq "$ROUNDS"); do
+        times_clair+=("$(seconds_in "$size" ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")")
+        times_ref+=("$(seconds_in "$size" ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_${name}_ref")")
+    done
+    t_clair=$(median "${times_clair[@]}")
+    t_ref=$(median "${times_ref[@]}")
+    gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
+    printf '%-10s %-8s %-7s %-7s %s%s\n' "$name" "$size" "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"
+done < "$JEUX/tailles.txt"

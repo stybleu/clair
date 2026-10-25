@@ -566,6 +566,81 @@ static int check_random_call(Semantic *s, AstNode *n) {
 }
 
 /*
+ * format(x, "spec"): the common part of Python's format mini-language,
+ * [width][.precision][f|e|g|d]. 1 when spec is valid for a value of type t.
+ */
+static int format_spec_ok(const char *spec, const char *t, const char **why) {
+    const char *p = spec;
+    int width = 0, precision = -1;
+    while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); if (width > 1000) break; p++; }
+    if (*p == '.') {
+        p++;
+        if (*p < '0' || *p > '9') { *why = "a precision needs digits, e.g. \".3f\""; return 0; }
+        precision = 0;
+        while (*p >= '0' && *p <= '9') { precision = precision * 10 + (*p - '0'); if (precision > 1000) break; p++; }
+    }
+    char kind = *p ? *p++ : 0;
+    if (width > 1000 || precision > 1000) { *why = "width and precision go up to 1000"; return 0; }
+    if (*p || (kind && !strchr("fegd", kind))) {
+        *why = "write [width][.precision] then f, e, g or d, e.g. \".9f\", \"10.3e\", \"5d\"";
+        return 0;
+    }
+    if (kind == 'd' && !machine_bits(t)) { *why = "'d' writes an integer: use .Nf for a float"; return 0; }
+    if (kind == 'd' && precision >= 0) { *why = "'d' has no precision"; return 0; }
+    if (!kind && precision >= 0) { *why = "say how to write it: \".3f\", \".3e\" or \".3g\""; return 0; }
+    if (!kind && !machine_bits(t) && width) { *why = "say how to write the float: \"10f\", \"10e\" or \"10g\""; return 0; }
+    return 1;
+}
+
+/*
+ * str(x) -> string, like Python (int, float, float32, u8 .. u64, bool, string, bigint, bigfloat)
+ * format(x, "spec") -> string, spec written in the program: format(e, ".9f"), format(n, "5d")
+ * 1 when n is one of them (renamed @str, @format), 0 otherwise, -1 on error.
+ */
+static int check_format_call(Semantic *s, AstNode *n) {
+    int is_str = strcmp(n->text, "str") == 0, is_format = strcmp(n->text, "format") == 0;
+    if (!is_str && !is_format) return 0;
+    size_t want = is_str ? 1 : 2;
+    if (n->child_count != want) {
+        fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", n->text, want, n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *t = expr_type(s, n->children[0]);
+    if (!t) return -1;
+    int number = is_numeric(t);
+    int text = strcmp(t, "string") == 0 || strcmp(t, "bool") == 0 ||
+               strcmp(t, "bigint") == 0 || strcmp(t, "bigfloat") == 0;
+    if (!number && !(is_str && text)) {
+        fprintf(stderr, "semantic error: %s() cannot write %s\n", n->text, t);
+        s->had_error = 1;
+        return -1;
+    }
+    if (is_format) {
+        const AstNode *spec = n->children[1];
+        const char *why = NULL;
+        if (spec->kind != AST_STRING || !spec->text) {
+            fprintf(stderr, "semantic error: argument 2 of format() must be written in the program, e.g. format(x, \".3f\")\n");
+            s->had_error = 1;
+            return -1;
+        }
+        if (!set_type((AstNode *)spec, "string")) return -1;
+        if (!format_spec_ok(spec->text, t, &why)) {
+            fprintf(stderr, "semantic error: format(x, \"%s\"): %s\n", spec->text, why);
+            s->had_error = 1;
+            return -1;
+        }
+    }
+    char *renamed = malloc(strlen(n->text) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, n->text);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, "string") ? 1 : -1;
+}
+
+/*
  * Files and text:
  *   load_csv(path) -> matrix[float], load_csv(path, "float32" / "int") -> matrix[...]
  *   save_csv(path, m), read_lines(path) -> list[string],
@@ -1654,8 +1729,13 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                     s->had_error = 1; return NULL;
                 }
                 const char *arg = expr_type(s, n->children[0]);
+                if (!flt && arg && is_index_type(arg)) {          /* bigint(k): an int, exactly (V0.43) */
+                    set_type(n, "bigint");
+                    return n->type_name;
+                }
                 if (!arg || strcmp(arg, "string") != 0) {
-                    fprintf(stderr, "semantic error: %s() expects a decimal string\n", n->text);
+                    fprintf(stderr, "semantic error: %s() expects a decimal string%s\n", n->text,
+                            flt ? "" : " or an int");
                     s->had_error = 1; return NULL;
                 }
                 if (flt) {
@@ -1734,6 +1814,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
                 if (builtin == 0) builtin = check_absolue_call(s, n);
+                if (builtin == 0) builtin = check_format_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
                 fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);

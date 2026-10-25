@@ -1,0 +1,7 @@
+# programme  taille du rapport  source
+nbody      5000000  Computer Language Benchmarks Game
+spectral   3000     Computer Language Benchmarks Game
+fannkuch   10       Computer Language Benchmarks Game
+pidigits   3000     Computer Language Benchmarks Game
+nqueen     14       PLB2
+plbmatmul  800      PLB2

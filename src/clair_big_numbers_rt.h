@@ -30,6 +30,9 @@ void clair_rt_num_collect(void);
 void *clair_rt_num_keep(ClairNumFrameGuard *guard, const void *value);   /* return v */
 void *clair_rt_num_pin(const void *value);                                /* objet.champ = v */
 ClairDynInt *clair_rt_bigint_parse(const char *s);
+ClairDynInt *clair_rt_bigint_from_int(int64_t x);                 /* bigint(k) */
+char *clair_rt_bigint_str(const ClairDynInt *v);                  /* str(b) : malloc */
+char *clair_rt_bigfloat_str(const ClairDynFloat *v);
 ClairDynInt *clair_rt_bigint_neg(const ClairDynInt *v);
 ClairDynInt *clair_rt_bigint_add(const ClairDynInt *a, const ClairDynInt *b);
 ClairDynInt *clair_rt_bigint_sub(const ClairDynInt *a, const ClairDynInt *b);

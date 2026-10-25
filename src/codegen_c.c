@@ -664,6 +664,7 @@ typedef struct {
     char *owned[FAST_MAX * 2];         /* strings built for field chains */
     size_t owned_count;
     const AstNode *inner_loop;         /* double loop: the inner for, whose range is checked too */
+    char *inner_edge[4];               /* inner range moving with k: start c0, c1 and stop c0, c1 (V0.43) */
 } FastPlan;
 
 /* Set while emitting the unchecked copy of a double loop: its inner loop needs no plan of its own. */
@@ -676,6 +677,7 @@ static void fast_plan_free(FastPlan *plan) {
         free(plan->checks[i].c2);
     }
     for (size_t i = 0; i < plan->owned_count; i++) free(plan->owned[i]);
+    for (int i = 0; i < 4; i++) { free(plan->inner_edge[i]); plan->inner_edge[i] = NULL; }
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
     plan->inner_loop = NULL;
 }
@@ -956,6 +958,68 @@ static int fast_plan_while(const AstNode *loop, FastPlan *plan, const char **var
 }
 
 
+/* is stmt `name = name + 1` (step 1) or `name = name - 1` (step -1)? */
+static int is_step_of(const AstNode *stmt, const char *name, int step) {
+    if (!stmt || stmt->kind != AST_ASSIGN || !stmt->text || strcmp(stmt->text, name) != 0 || stmt->child_count != 1) return 0;
+    const AstNode *e = stmt->children[0];
+    int64_t one;
+    if (e->kind != AST_BINARY || !e->text || e->child_count != 2) return 0;
+    if (strcmp(e->text, step > 0 ? "+" : "-") != 0) return 0;
+    int left = e->children[0]->kind == AST_IDENTIFIER && strcmp(e->children[0]->text, name) == 0 &&
+               const_int_value(e->children[1], &one) && one == 1;
+    int right = step > 0 && e->children[1]->kind == AST_IDENTIFIER && strcmp(e->children[1]->text, name) == 0 &&
+                const_int_value(e->children[0], &one) && one == 1;
+    return left || right;
+}
+
+static void two_ends_collect(FastPlan *plan, const AstNode *n, const char *lo, const char *hi, const AstNode *body) {
+    if (!n) return;
+    const AstNode *index = NULL;
+    const char *base = NULL, *type = NULL;
+    if (n->kind == AST_INDEX && n->child_count == 2 && n->children[0]->kind == AST_IDENTIFIER &&
+        is_list_type(n->children[0]->type_name)) {
+        base = n->children[0]->text; type = n->children[0]->type_name; index = n->children[1];
+    } else if (n->kind == AST_INDEX_ASSIGN && n->child_count == 2 && n->text && is_list_type(n->type_name)) {
+        base = n->text; type = n->type_name; index = n->children[0];
+    }
+    if (base && index->kind == AST_IDENTIFIER && (strcmp(index->text, lo) == 0 || strcmp(index->text, hi) == 0) &&
+        strcmp(base, lo) != 0 && strcmp(base, hi) != 0 && !name_changes_in(body, base))
+        fast_plan_add(plan, n, base, base, type, str_dup("0"), str_dup("0"), NULL);
+    for (size_t i = 0; i < n->child_count; i++) two_ends_collect(plan, n->children[i], lo, hi, body);
+}
+
+/*
+ * while lo < hi { ... xs[lo] ... xs[hi] ...; lo += 1; hi -= 1 }   (reversing, a palindrome)
+ * lo only goes up and hi only goes down, one step each per turn, and a turn
+ * starts only while lo < hi: every lo and hi of the loop stays between the lo
+ * and the hi of the entry.  Checking those two once covers every xs[lo], xs[hi].
+ */
+static int fast_plan_two_ends(const AstNode *loop, FastPlan *plan, const char **lo, const char **hi) {
+    plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
+    plan->inner_loop = NULL;
+    for (int i = 0; i < 4; i++) plan->inner_edge[i] = NULL;
+    if (fast_suppress || !loop || loop->kind != AST_WHILE || loop->child_count != 2) return 0;
+    const AstNode *cond = loop->children[0], *body = loop->children[1];
+    if (cond->kind != AST_BINARY || !cond->text || strcmp(cond->text, "<") != 0 || cond->child_count != 2) return 0;
+    const AstNode *a = cond->children[0], *b = cond->children[1];
+    if (a->kind != AST_IDENTIFIER || b->kind != AST_IDENTIFIER || strcmp(a->text, b->text) == 0) return 0;
+    if (!a->type_name || !b->type_name || strcmp(a->type_name, "int") != 0 || strcmp(b->type_name, "int") != 0) return 0;
+    if (!body || body->kind != AST_BLOCK || has_nested_loop(body) || tree_may_grow_lists(body)) return 0;
+    int ups = 0, downs = 0;
+    for (size_t i = 0; i < body->child_count; i++) {
+        const AstNode *st = body->children[i];
+        if (is_step_of(st, a->text, 1)) ups++;
+        else if (is_step_of(st, b->text, -1)) downs++;
+        else if (name_changes_in(st, a->text) || name_changes_in(st, b->text)) return 0;
+    }
+    if (ups != 1 || downs != 1) return 0;
+    two_ends_collect(plan, body, a->text, b->text, body);
+    if (plan->access_count == 0) { fast_plan_free(plan); return 0; }
+    *lo = a->text;
+    *hi = b->text;
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Double loops: one bounds proof for  for k { ...; for j { ... } }   */
 /* ------------------------------------------------------------------ */
@@ -1178,11 +1242,14 @@ static void nest_collect(FastPlan *plan, const AstNode *n, const char *k, const 
 /*
  * for k in range(a, b) { ...; for j in range(c, d) { ... } }
  * One proof before the outer loop covers every access of both loops, so the
- * inner loop runs without any check at all (its range must not depend on k).
+ * inner loop runs without any check at all.  The inner range may move with k
+ * (for j in range(i + 1, n), a triangle): the proof then covers the smallest
+ * start and the largest stop over every k, a rectangle around the triangle.
  */
 static int fast_plan_nest(const AstNode *loop, FastPlan *plan) {
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
     plan->inner_loop = NULL;
+    for (int i = 0; i < 4; i++) plan->inner_edge[i] = NULL;
     if (fast_suppress) return 0;
     if (!loop || loop->kind != AST_FOR || !loop->text) return 0;
     if (loop->child_count != 2 && loop->child_count != 3) return 0;
@@ -1204,7 +1271,14 @@ static int fast_plan_nest(const AstNode *loop, FastPlan *plan) {
     size_t argc = inner->child_count - 1;
     const AstNode *start = argc == 1 ? NULL : inner->children[0];
     const AstNode *stop = inner->children[argc == 1 ? 0 : 1];
-    if (!nest_bound_is_invariant(start, k, body) || !nest_bound_is_invariant(stop, k, body)) return 0;
+    if (!nest_bound_is_invariant(start, k, body) || !nest_bound_is_invariant(stop, k, body)) {
+        /* start and stop of the form c0 + c1 * k, with c0 and c1 fixed during the loop */
+        char *e[4] = { NULL, NULL, NULL, NULL };
+        int ok = start ? affine_split(start, k, body, &e[0], &e[1]) : ((e[0] = str_dup("0")) && (e[1] = str_dup("0")));
+        if (ok) ok = affine_split(stop, k, body, &e[2], &e[3]);
+        if (!ok) { for (int i = 0; i < 4; i++) free(e[i]); return 0; }
+        for (int i = 0; i < 4; i++) plan->inner_edge[i] = e[i];
+    }
 
     plan->inner_loop = inner;
     nest_collect(plan, body, k, j, body, 0);
@@ -1225,6 +1299,21 @@ static int program_has_nest_loop(const AstNode *n) {
     }
     for (size_t i = 0; i < n->child_count; i++) {
         if (program_has_nest_loop(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* a double loop whose inner range moves with the outer variable (for j in range(i + 1, n)) */
+static int program_has_moving_nest(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_FOR) {
+        FastPlan plan;
+        int ok = fast_plan_nest(n, &plan) && plan.inner_edge[0];
+        fast_plan_free(&plan);
+        if (ok) return 1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (program_has_moving_nest(n->children[i])) return 1;
     }
     return 0;
 }
@@ -2865,6 +2954,7 @@ static int emit_param_list(FILE *f, const AstNode *fn) {
 }
 
 static int emit_pinned(FILE *f, const AstNode *value);          /* V0.42 big numbers */
+static int emit_str_call(FILE *f, const AstNode *n);            /* V0.43 str(), format() */
 static int emit_return_value(FILE *f, const AstNode *value);
 static int clair_num_frame_open;     /* the function being written has a ClairNumFrameGuard */
 static int emit_expr(FILE *f, const AstNode *n);
@@ -3190,6 +3280,13 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_CALL:
+            if (n->text && !strcmp(n->text,"bigint") && n->child_count == 1 &&
+                n->children[0]->type_name && strcmp(n->children[0]->type_name, "string") != 0) {
+                fputs("clair_rt_bigint_from_int((int64_t)(", f);          /* bigint(k) */
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs("))", f);
+                return 1;
+            }
             if (n->text && (!strcmp(n->text,"bigint") || !strcmp(n->text,"bigfloat"))) {
                 fprintf(f,"clair_rt_%s_parse(",n->text);
                 for (size_t i=0;i<n->child_count;i++) {
@@ -3231,6 +3328,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
                     fprintf(f, "->%s", name);
                     return 1;
                 }
+                if (strcmp(name, "str") == 0 || strcmp(name, "format") == 0) return emit_str_call(f, n);
                 if (is_absolue_call(name)) {
                     const char *pt = n->type_name;
                     if (strcmp(name, "address") == 0 || strcmp(name, "bytes") == 0) {
@@ -3795,6 +3893,61 @@ static int clair_num_uses(const AstNode *n) {
     return uses;
 }
 static size_t clair_num_root_serial;
+/*
+ * str(x) and format(x, "spec"), like Python:
+ *   str(42) -> clair_rt_str_int(42), str(0.1) -> clair_rt_str_float(0.1, false) ("0.1"),
+ *   format(e, ".9f") -> clair_rt_format_float(e, "%.9f"), format(n, "5d") -> clair_rt_format_int(n, "%5" PRId64)
+ */
+static int emit_str_call(FILE *f, const AstNode *n) {
+    const AstNode *x = n->children[0];
+    const char *t = x->type_name;
+    if (!t) return 0;
+    int is_format = strcmp(n->text, "@format") == 0;
+    const char *spec = is_format ? n->children[1]->text : "";
+    if (is_format && !spec[0]) is_format = 0;                     /* format(x, "") is str(x) */
+    if (!is_format) {
+        if (strcmp(t, "string") == 0) return emit_expr(f, x);
+        if (strcmp(t, "bool") == 0) {
+            fputs("((", f);
+            if (!emit_expr(f, x)) return 0;
+            fputs(") ? \"True\" : \"False\")", f);
+            return 1;
+        }
+        if (strcmp(t, "bigint") == 0 || strcmp(t, "bigfloat") == 0) fprintf(f, "clair_rt_%s_str(", t);
+        else if (strcmp(t, "u64") == 0) fputs("clair_rt_str_u64(", f);
+        else if (strcmp(t, "float") == 0 || strcmp(t, "float32") == 0) fputs("clair_rt_str_float(", f);
+        else fputs("clair_rt_str_int((int64_t)(", f);
+        if (!emit_expr(f, x)) return 0;
+        if (strcmp(t, "float") == 0) fputs(", false)", f);
+        else if (strcmp(t, "float32") == 0) fputs(", true)", f);
+        else if (strcmp(t, "bigint") == 0 || strcmp(t, "bigfloat") == 0 || strcmp(t, "u64") == 0) fputc(')', f);
+        else fputs("))", f);
+        return 1;
+    }
+    /* [width][.precision][f|e|g|d], checked by the semantic pass */
+    const char *p = spec;
+    char width[8] = "", precision[8] = "";
+    size_t w = 0;
+    while (*p >= '0' && *p <= '9' && w < sizeof(width) - 1) width[w++] = *p++;
+    if (*p == '.') {
+        size_t q = 0;
+        precision[q++] = *p++;
+        while (*p >= '0' && *p <= '9' && q < sizeof(precision) - 1) precision[q++] = *p++;
+    }
+    char kind = *p ? *p : 'd';
+    if (kind == 'd') {
+        fprintf(f, "clair_rt_format_%s((%s)(", strcmp(t, "u64") == 0 ? "u64" : "int",
+                strcmp(t, "u64") == 0 ? "uint64_t" : "int64_t");
+        if (!emit_expr(f, x)) return 0;
+        fprintf(f, "), \"%%%s\" %s)", width, strcmp(t, "u64") == 0 ? "PRIu64" : "PRId64");
+        return 1;
+    }
+    fputs("clair_rt_format_float((double)(", f);
+    if (!emit_expr(f, x)) return 0;
+    fprintf(f, "), \"%%%s%s%c\")", width, precision, kind);
+    return 1;
+}
+
 /* objet.champ = v, Classe(v) : le nombre vit dans un objet, il est epingle */
 static int emit_pinned(FILE *f, const AstNode *value) {
     if (!clair_num_gc_enabled || !clair_num_type_dynamic(value->type_name)) return emit_expr(f, value);
@@ -4440,6 +4593,54 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             if (n->child_count != 2) return 0;
             {
                 FastPlan plan;
+                const char *lo = NULL, *hi = NULL;
+                if (fast_plan_two_ends(n, &plan, &lo, &hi)) {
+                    /* lo and hi of the entry checked once: every turn stays between them */
+                    if (unchecked_mode) fputs("{\n", f);
+                    else {
+                        fprintf(f, "if (%s >= %s || (%s >= 0", lo, hi, lo);
+                        for (size_t i = 0; i < plan.base_count; i++)
+                            fprintf(f, " && %s->len <= (size_t)INT64_MAX && %s < (int64_t)%s->len", plan.base_exprs[i], hi, plan.base_exprs[i]);
+                        fputs(")) {\n", f);
+                    }
+                    for (size_t i = 0; i < plan.base_count; i++) {
+                        const char *elem = list_element_c_type(plan.base_types[i]);
+                        indent(f, depth + 1);
+                        fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n", elem, plan.bases[i], elem, plan.base_exprs[i]);
+                    }
+                    for (size_t i = 0; i < plan.access_count; i++) fast_access[i] = plan.accesses[i];
+                    fast_access_count = plan.access_count;
+                    indent(f, depth + 1);
+                    fputs("while (", f);
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fputs(") {\n", f);
+                    fast_access_active = 1;
+                    int ok = emit_block(f, n->children[1], depth + 2);
+                    fast_access_active = 0;
+                    fast_access_count = 0;
+                    if (!ok) { fast_plan_free(&plan); return 0; }
+                    indent(f, depth + 1);
+                    fputs("}\n", f);
+                    indent(f, depth);
+                    if (unchecked_mode) fputs("}\n", f);
+                    else {
+                        fputs("} else {\n", f);
+                        indent(f, depth + 1);
+                        fputs("while (", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputs(") {\n", f);
+                        if (!emit_block(f, n->children[1], depth + 2)) return 0;
+                        indent(f, depth + 1);
+                        fputs("}\n", f);
+                        indent(f, depth);
+                        fputs("}\n", f);
+                    }
+                    fast_plan_free(&plan);
+                    return 1;
+                }
+            }
+            {
+                FastPlan plan;
                 const char *var = NULL;
                 const AstNode *stop = NULL;
                 if (fast_plan_while(n, &plan, &var, &stop)) {
@@ -4847,7 +5048,22 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                         fputs(", ", f);
                         if (stop_text) fputs(stop_text, f);
                         else if (!emit_expr(f, stop_node)) return 0;
-                        if (b->c2) {
+                        if (b->c2 && plan.inner_edge[0]) {
+                            /* inner loop moving with the outer one: smallest start, largest stop */
+                            fprintf(f, ", %s, ", b->c2);
+                            for (int edge = 0; edge < 2; edge++) {
+                                if (edge) fputs(", ", f);
+                                fprintf(f, "clair_rt_edge_%s(%s, %s, ", edge ? "hi" : "lo",
+                                        plan.inner_edge[2 * edge], plan.inner_edge[2 * edge + 1]);
+                                if (start_text) fputs(start_text, f);
+                                else if (!start_node) fputs("0", f);
+                                else if (!emit_expr(f, start_node)) return 0;
+                                fputs(", ", f);
+                                if (stop_text) fputs(stop_text, f);
+                                else if (!emit_expr(f, stop_node)) return 0;
+                                fputc(')', f);
+                            }
+                        } else if (b->c2) {
                             /* inner loop: its coefficient and its range */
                             size_t iargc = nest_inner->child_count - 1;
                             fprintf(f, ", %s, ", b->c2);
@@ -6256,6 +6472,104 @@ static int node_iterates_dict(const AstNode *n) {
     return 0;
 }
 
+/* which str() and format() helpers the program needs */
+static void str_needs(const AstNode *n, unsigned *need) {
+    if (!n) return;
+    if (n->kind == AST_CALL && n->text && n->child_count >= 1 && n->children[0]->type_name &&
+        (strcmp(n->text, "@str") == 0 || strcmp(n->text, "@format") == 0)) {
+        const char *t = n->children[0]->type_name;
+        int is_format = strcmp(n->text, "@format") == 0 && n->children[1]->text && n->children[1]->text[0];
+        char kind = 0;
+        if (is_format) {
+            const char *p = n->children[1]->text;
+            while (*p && !strchr("fegd", *p)) p++;
+            kind = *p ? *p : 'd';
+        }
+        if (!is_format) {
+            if (strcmp(t, "float") == 0 || strcmp(t, "float32") == 0) *need |= 1;
+            else if (strcmp(t, "u64") == 0) *need |= 2;
+            else if (strcmp(t, "int") == 0 || small_machine_bits(t)) *need |= 4;
+        } else if (kind == 'd') *need |= strcmp(t, "u64") == 0 ? 16 : 8;
+        else *need |= 32;
+    }
+    for (size_t i = 0; i < n->child_count; i++) str_needs(n->children[i], need);
+}
+
+static void emit_str_runtime(FILE *f, const AstNode *program) {
+    unsigned need = 0;
+    str_needs(program, &need);
+    if (!need) return;
+    fputs("/* str() and format(): the text lives in the arena, like other strings */\n"
+          "static char *clair_rt_text_copy(const char *text, size_t length) {\n"
+          "    char *out = clair_rt_arena_alloc(length + 1);\n"
+          "    memcpy(out, text, length + 1);\n"
+          "    return out;\n"
+          "}\n\n", f);
+    if (need & 1) {
+        fputs("/* str(x) of a float like Python: fewest digits that read back the same, 0.1, 100.0, 1e+20 */\n"
+              "static const char *clair_rt_str_float(double x, bool f32) {\n"
+              "    if (x != x) return \"nan\";\n"
+              "    if (x - x != 0) return x > 0 ? \"inf\" : \"-inf\";\n"
+              "    char text[40], out[400];\n"
+              "    for (int p = 1; p <= 17; p++) {\n"
+              "        snprintf(text, sizeof(text), \"%.*e\", p - 1, x);\n"
+              "        if (f32 ? strtof(text, NULL) == (float)x : strtod(text, NULL) == x) break;\n"
+              "    }\n"
+              "    char digits[24];\n"
+              "    int count = 0;\n"
+              "    size_t n = 0;\n"
+              "    const char *q = text;\n"
+              "    if (*q == '-') { out[n++] = '-'; q++; }\n"
+              "    for (; *q && *q != 'e'; q++) if (*q != '.') digits[count++] = *q;\n"
+              "    int e = atoi(q + 1);\n"
+              "    while (count > 1 && digits[count - 1] == '0') count--;\n"
+              "    double a = x < 0 ? -x : x;   /* a float32 is written like NumPy: positional in [1e-4, 1e6) */\n"
+              "    if (f32 ? a == 0 || (a >= 1e-4 && a < 1e6) : e >= -4 && e < 16) {\n"
+              "        if (e < 0) {\n"
+              "            out[n++] = '0'; out[n++] = '.';\n"
+              "            for (int i = 0; i < -e - 1; i++) out[n++] = '0';\n"
+              "            for (int i = 0; i < count; i++) out[n++] = digits[i];\n"
+              "        } else {\n"
+              "            for (int i = 0; i <= e; i++) out[n++] = i < count ? digits[i] : '0';\n"
+              "            out[n++] = '.';\n"
+              "            if (count > e + 1) for (int i = e + 1; i < count; i++) out[n++] = digits[i];\n"
+              "            else out[n++] = '0';\n"
+              "        }\n"
+              "        out[n] = 0;\n"
+              "    } else {\n"
+              "        out[n++] = digits[0];\n"
+              "        if (count > 1) { out[n++] = '.'; for (int i = 1; i < count; i++) out[n++] = digits[i]; }\n"
+              "        snprintf(out + n, sizeof(out) - n, \"e%c%02d\", e < 0 ? '-' : '+', e < 0 ? -e : e);\n"
+              "        n = strlen(out);\n"
+              "    }\n"
+              "    return clair_rt_text_copy(out, n);\n"
+              "}\n\n", f);
+    }
+    if (need & 2) fputs("static const char *clair_rt_str_u64(uint64_t x) {\n"
+                        "    char text[24];\n"
+                        "    return clair_rt_text_copy(text, (size_t)snprintf(text, sizeof(text), \"%\" PRIu64, x));\n"
+                        "}\n\n", f);
+    if (need & 4) fputs("static const char *clair_rt_str_int(int64_t x) {\n"
+                        "    char text[24];\n"
+                        "    return clair_rt_text_copy(text, (size_t)snprintf(text, sizeof(text), \"%\" PRId64, x));\n"
+                        "}\n\n", f);
+    if (need & 8) fputs("static const char *clair_rt_format_int(int64_t x, const char *how) {\n"
+                        "    char text[1100];\n"
+                        "    return clair_rt_text_copy(text, (size_t)snprintf(text, sizeof(text), how, x));\n"
+                        "}\n\n", f);
+    if (need & 16) fputs("static const char *clair_rt_format_u64(uint64_t x, const char *how) {\n"
+                         "    char text[1100];\n"
+                         "    return clair_rt_text_copy(text, (size_t)snprintf(text, sizeof(text), how, x));\n"
+                         "}\n\n", f);
+    if (need & 32) fputs("/* format(x, \".9f\"): printf rounds exactly, like Python */\n"
+                         "static const char *clair_rt_format_float(double x, const char *how) {\n"
+                         "    int length = snprintf(NULL, 0, how, x);\n"
+                         "    char *out = clair_rt_arena_alloc((size_t)length + 1);\n"
+                         "    snprintf(out, (size_t)length + 1, how, x);\n"
+                         "    return out;\n"
+                         "}\n\n", f);
+}
+
 /* fill(p, v, n) for every element type used */
 static void absolue_fill_kinds(const AstNode *n, unsigned *kinds) {
     if (!n) return;
@@ -7084,6 +7398,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     int uses_text_pieces = node_uses_call_named(program, "@read_lines") || node_uses_call_named(program, "@split") ||
                            node_uses_call_named(program, "@strip");
+    uses_text_pieces = uses_text_pieces || node_uses_call_named(program, "@str") || node_uses_call_named(program, "@format");
     if (uses_objects || uses_concat || uses_matrix || uses_string_slice || uses_text_pieces) {
         /*
          * Bump-pointer arena shared by objects and concatenated strings.
@@ -7241,6 +7556,25 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "}\n\n",
                 f
             );
+            if (program_has_moving_nest(program)) {
+                fputs(
+                    "/* Smallest and largest c0 + c1 * k for k in [k0, k1): the edges of an inner range\n"
+                    " * that moves with k (for j in range(i + 1, n)).  Saturated: a huge edge fails the proof. */\n"
+                    "static inline int64_t clair_rt_edge_lo(int64_t c0, int64_t c1, int64_t k0, int64_t k1) {\n"
+                    "    if (k0 >= k1) return 0;\n"
+                    "    __int128 a = (__int128)c0 + (__int128)c1 * k0, b = (__int128)c0 + (__int128)c1 * (k1 - 1);\n"
+                    "    __int128 m = a < b ? a : b;\n"
+                    "    return m < INT64_MIN ? INT64_MIN : m > INT64_MAX ? INT64_MAX : (int64_t)m;\n"
+                    "}\n\n"
+                    "static inline int64_t clair_rt_edge_hi(int64_t c0, int64_t c1, int64_t k0, int64_t k1) {\n"
+                    "    if (k0 >= k1) return 0;\n"
+                    "    __int128 a = (__int128)c0 + (__int128)c1 * k0, b = (__int128)c0 + (__int128)c1 * (k1 - 1);\n"
+                    "    __int128 m = a > b ? a : b;\n"
+                    "    return m < INT64_MIN ? INT64_MIN : m > INT64_MAX ? INT64_MAX : (int64_t)m;\n"
+                    "}\n\n",
+                    f
+                );
+            }
             if (node_uses_list(program)) {
                 fputs(
                     "static inline bool clair_rt_affine2_ok(ClairList list, int64_t c0, int64_t ck, int64_t k0, int64_t k1,\n"
@@ -7693,6 +8027,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
     emit_random_runtime(f, program);
     emit_membership_runtime(f, program);
     emit_absolue_runtime(f, program);
+    emit_str_runtime(f, program);
     {
         int csv = node_uses_call_named(program, "@load_csv"), lines = node_uses_call_named(program, "@read_lines");
         int split = node_uses_call_named(program, "@split"), strip = node_uses_call_named(program, "@strip");

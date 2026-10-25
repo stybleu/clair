@@ -152,6 +152,15 @@ static ClairDynFloat *clair_new_float(uint32_t precision) {
 ClairDynInt *clair_rt_bigint_parse(const char *s) {
     ClairDynInt *r=clair_new_int();clair_num_check(clair_big_from_decimal(&r->v,s));return r;
 }
+ClairDynInt *clair_rt_bigint_from_int(int64_t x) {
+    ClairDynInt *r=clair_new_int();clair_num_check(clair_big_from_i64(&r->v,x));return r;
+}
+char *clair_rt_bigint_str(const ClairDynInt *v) {
+    char *str=NULL;clair_num_check(clair_big_to_decimal(&v->v,&str));return str;
+}
+char *clair_rt_bigfloat_str(const ClairDynFloat *v) {
+    char *str=NULL;clair_num_check(clair_bf_format(&v->v,&str));return str;
+}
 ClairDynInt *clair_rt_bigint_neg(const ClairDynInt *v) {
     ClairDynInt *r=clair_new_int();clair_num_check(clair_big_copy(&r->v,&v->v));r->v.sign=-r->v.sign;return r;
 }
