@@ -32,6 +32,8 @@ Son compilateur est écrit en C et utilise Clang.
 - Optimisations SIMD ARM64 NEON
 - Division entière contrôlée
 
+- Grands nombres dynamiques experimentaux `bigint` et `bigfloat` (V0.40 candidate ; voir limites memoire).
+
 ## Compilation sous Termux
 
 Installer Clang, CMake et Make.
@@ -88,6 +90,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.40](docs/README_V0.40.md) : grands entiers dynamiques, flottants decimaux precis (experimental)
 - [Clair V0.39](docs/README_V0.39.md) : `xs[-1]`, `x in xs`, listes en compréhension `[x * x for x in xs if ...]`, `for k in dico`
 - [Clair V0.38](docs/README_V0.38.md) : fichiers CSV (`load_csv`, `save_csv`), `read_lines`, `split`, `strip`, `int()` et `float()` de chaînes, `\t` et `\n` dans les chaînes
 - [Clair V0.37](docs/README_V0.37.md) : nombres aléatoires (`seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice`), mêmes tirages que Python ; couches denses 8 lignes à la fois

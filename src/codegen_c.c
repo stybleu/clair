@@ -110,6 +110,8 @@ static const char *c_type_name(const char *clair_type) {
     static char class_type[512];
 
     if (!clair_type) return NULL;
+    if (strcmp(clair_type, "bigint") == 0) return "ClairDynInt *";
+    if (strcmp(clair_type, "bigfloat") == 0) return "ClairDynFloat *";
     if (strcmp(clair_type, "int128") == 0) return "ClairInt128";
     if (strcmp(clair_type, "int256") == 0) return "ClairInt256";
     if (strcmp(clair_type, "int512") == 0) return "ClairInt512";
@@ -3157,6 +3159,14 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_CALL:
+            if (n->text && (!strcmp(n->text,"bigint") || !strcmp(n->text,"bigfloat"))) {
+                fprintf(f,"clair_rt_%s_parse(",n->text);
+                for (size_t i=0;i<n->child_count;i++) {
+                    if(i) fputs(", ",f);
+                    if(!emit_expr(f,n->children[i])) return 0;
+                }
+                fputc(')',f);return 1;
+            }
             if (n->text && strcmp(n->text, "@convert") == 0) return emit_convert(f, n);
             if (n->text && strncmp(n->text, "@slice", 6) == 0) {
                 /* xs[a:b:c]: clair_rt_list_slice(xs, a, b, c, missing bounds) like Python */
@@ -3347,6 +3357,23 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 return 1;
             }
 
+            const char *dyn = n->children[0]->type_name;
+            if (dyn && (!strcmp(dyn,"bigint") || !strcmp(dyn,"bigfloat"))) {
+                const char *name = !strcmp(dyn,"bigint") ? "bigint" : "bigfloat";
+                const char *fn = NULL;
+                if(!strcmp(op,"+")) fn="add";
+                else if(!strcmp(op,"-")) fn="sub";
+                else if(!strcmp(op,"*")) fn="mul";
+                else if(!strcmp(op,"/")) fn="div";
+                else if(!strcmp(op,"%")) fn="mod";
+                fprintf(f,"clair_rt_%s_%s(",name,fn?fn:"cmp");
+                if(!emit_expr(f,n->children[0])) return 0;
+                fputs(", ",f);
+                if(!emit_expr(f,n->children[1])) return 0;
+                fputc(')',f);
+                if(!fn)fprintf(f," %s 0",op);
+                return 1;
+            }
             int bits = big_bits(n->children[0]->type_name);
             char tag = big_tag(n->children[0]->type_name);
             if (bits) {
@@ -3452,6 +3479,11 @@ if (strcmp(op, "+") == 0 &&
             if (const_int_value(n, &folded)) {
                 emit_int_literal(f, folded);
                 return 1;
+            }
+            if (n->type_name && (!strcmp(n->type_name,"bigint") || !strcmp(n->type_name,"bigfloat"))) {
+                fprintf(f,"clair_rt_%s_neg(",n->type_name);
+                if(!emit_expr(f,n->children[0])) return 0;
+                fputc(')',f);return 1;
             }
             if (big_bits(n->type_name)) {
                 fprintf(f, "clair_i%d_neg(", big_bits(n->type_name));
@@ -3676,6 +3708,33 @@ static int emit_jump(FILE *f, const char *jump, size_t mark, int depth) {
     return 1;
 }
 
+/* CLAIR_NUM_GC_BEGIN */
+/* La collecte est reservee aux programmes sans champs d'objets dynamiques :
+ * le support des champs de classes exige un traceur supplementaire. */
+static int clair_num_gc_enabled;
+static int clair_num_type_dynamic(const char *type) {
+    return type && (!strcmp(type, "bigint") || !strcmp(type, "bigfloat"));
+}
+static void clair_num_scan_ast(const AstNode *n, int *uses, int *field) {
+    if (!n) return;
+    if (clair_num_type_dynamic(n->type_name)) {
+        *uses = 1;
+        if (n->kind == AST_FIELD) *field = 1;
+    }
+    for (size_t i=0; i<n->child_count; ++i)
+        clair_num_scan_ast(n->children[i], uses, field);
+}
+static size_t clair_num_root_serial;
+static void clair_num_emit_root(FILE *f, const char *name, int depth) {
+    indent(f, depth);
+    fprintf(f, "ClairNumRoot __attribute__((cleanup(clair_rt_num_root_cleanup))) "
+               "__clair_num_root_%zu;\n", clair_num_root_serial);
+    indent(f, depth);
+    fprintf(f, "clair_rt_num_root_enter(&__clair_num_root_%zu, &%s);\n",
+            clair_num_root_serial++, name);
+}
+/* CLAIR_NUM_GC_END */
+
 static int emit_block(FILE *f, const AstNode *block, int depth) {
     if (!block || block->kind != AST_BLOCK) return 0;
     size_t mark = owned_live_count;
@@ -3684,7 +3743,15 @@ static int emit_block(FILE *f, const AstNode *block, int depth) {
     }
     const AstNode *last = block->child_count ? block->children[block->child_count - 1] : NULL;
     int jumps = last && (last->kind == AST_RETURN || last->kind == AST_BREAK || last->kind == AST_CONTINUE);
-    if (!jumps) emit_free_since(f, mark, depth);   /* after a jump the frees were already written */
+    if (!jumps) {
+        /* Une instruction est terminee : plus aucun temporaire d'expression
+         * n'est utilise. Dans les fonctions imbriquees, le moteur differe le GC. */
+        if (clair_num_gc_enabled) {
+            indent(f, depth);
+            fputs("clair_rt_num_collect();\n", f);
+        }
+        emit_free_since(f, mark, depth);
+    }
     owned_live_count = mark;
     return 1;
 }
@@ -3895,13 +3962,16 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                     n->text,
                     id
                 );
-
+                if (clair_num_gc_enabled && clair_num_type_dynamic(n->type_name))
+                    clair_num_emit_root(f, n->text, depth);
                 return 1;
             }
 
             fprintf(f, "%s %s = ", type, n->text);
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(";\n", f);
+            if (clair_num_gc_enabled && clair_num_type_dynamic(n->type_name))
+                clair_num_emit_root(f, n->text, depth);
             if (is_owned_decl(n)) {
                 if (owned_live_count >= OWN_MAX) return 0;
                 owned_live[owned_live_count++] = (OwnedVar){ n->text, is_matrix_type(n->type_name) };
@@ -4154,7 +4224,11 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
         case AST_PRINT: {
             const AstNode *value = n->children[0];
             if (!value->type_name) return 0;
-            if (strcmp(value->type_name, "string") == 0) {
+            if (!strcmp(value->type_name,"bigint") || !strcmp(value->type_name,"bigfloat")) {
+                fprintf(f,"clair_rt_%s_print(",value->type_name);
+                if(!emit_expr(f,value))return 0;
+                fputs(");\n",f);
+            } else if (strcmp(value->type_name, "string") == 0) {
                 fputs("puts(", f);
                 if (!emit_expr(f, value)) return 0;
                 fputs(");\n", f);
@@ -6506,6 +6580,10 @@ static void emit_text_runtime(FILE *f, int any, int piece, int list, int file, i
 
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
+    int has_dynamic = 0, has_dynamic_fields = 0;
+    clair_num_scan_ast(program, &has_dynamic, &has_dynamic_fields);
+    clair_num_gc_enabled = has_dynamic && !has_dynamic_fields;
+    clair_num_root_serial = 0;
     stack_list_counter = 0;
     FILE *f = fopen(path, "w");
     if (!f) return 0;
@@ -6539,6 +6617,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs("#include <time.h>\n", f);        /* without seed(): seeded from the clock and /dev/urandom */
     if (node_uses_math(program) || program_uses_big(program)) fputs("#include <math.h>\n", f);
     if (node_uses_type(program, "uint1024")) fputs("#include <float.h>\n", f);
+    if (node_uses_type(program, "bigint") || node_uses_type(program, "bigfloat"))
+        fputs("#include \"clair_big_numbers_rt.h\"\n", f);
     fputc('\n', f);
     if (program_uses_big(program)) emit_big_runtime(f, program);
     MachineNeeds machine_needs;
@@ -7468,6 +7548,16 @@ int codegen_c_file(const AstNode *program, const char *path) {
         int ok = fn_out && layer_helpers && emit_function_signature(fn_out, fn, 0);
         if (ok) {
             fputs(" {\n", fn_out);
+            if (clair_num_gc_enabled) {
+                fputs("    ClairNumFrameGuard __attribute__((cleanup(clair_rt_num_frame_cleanup))) "
+                      "__clair_num_frame;\n"
+                      "    clair_rt_num_frame_enter(&__clair_num_frame);\n", fn_out);
+                for (size_t p=0; p<function_param_count(fn); ++p) {
+                    const AstNode *arg=fn->children[p];
+                    if (clair_num_type_dynamic(arg->type_name))
+                        clair_num_emit_root(fn_out, arg->text, 1);
+                }
+            }
             current_return_type = fn->type_name;
             owned_live_count = 0;
             loop_mark_count = 0;

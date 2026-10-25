@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.39 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.40 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -775,5 +775,13 @@ grep -Fq 'input_int() expects 0 arguments, got 1' build/invalid_input_int_arity.
 printf '%s\n' 'invalid_input_int_arity.cl : OK -> input_int() exige zero argument'
 
 printf '%s\n' '=================================================='
+./build/clair tests/big_numbers_v040.cl -o build/test_big_numbers_v040
+[ "$(./build/test_big_numbers_v040 | tail -n 1)" = 'CLAIR V0.40 : TESTS OK' ]
+if ./build/clair tests/big_numbers_invalid_v040.cl -o build/test_big_numbers_invalid_v040 >/dev/null 2>&1; then
+    echo 'ECHEC : bigint + int doit etre refuse' >&2
+    exit 1
+fi
+printf '%s\n' 'big_numbers_v040.cl : OK -> entiers et flottants dynamiques'
+
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

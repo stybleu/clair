@@ -34,7 +34,14 @@ static char *read_file(const char *path) {
  */
 static int allow_fma = 0;
 
-static int run_clang(const char *cpath, const char *output) {
+static int clair_uses_dynamic(const AstNode *n) {
+    if (!n) return 0;
+    if (n->type_name && (!strcmp(n->type_name,"bigint") || !strcmp(n->type_name,"bigfloat"))) return 1;
+    for(size_t i=0;i<n->child_count;i++) if(clair_uses_dynamic(n->children[i])) return 1;
+    return 0;
+}
+
+static int run_clang(const char *cpath, const char *output, int with_big) {
     pid_t pid = fork();
     if (pid < 0) {
         perror("clair: fork");
@@ -42,25 +49,31 @@ static int run_clang(const char *cpath, const char *output) {
     }
 
     if (pid == 0) {
-        char *const args[] = {
-            "clang",
-            "-std=c11",
-            "-O2",
-            "-fwrapv",
-            "-Wall",
-            "-Wextra",
-            "-Wno-unused-function",
-            "-Wno-implicit-const-int-float-conversion",   /* let x: float32 = 16777217 rounds, like NumPy */
-            "-fno-math-errno",   /* Clair never reads errno: lets Clang vectorize sqrt() and friends */
-            allow_fma ? "-ffp-contract=on" : "-ffp-contract=off",
-            "-falign-loops=64",  /* hot loops start on a 64-byte line: same speed whatever the code layout */
-            (char *)cpath,
-            "-o",
-            (char *)output,
-            "-lm",
-            "-pthread",          /* big matrix products and dense layers use every core */
-            NULL
-        };
+        char *args[24];
+        size_t count=0;
+        args[count++]="clang";
+        args[count++]="-std=c11";
+        args[count++]="-O2";
+        args[count++]="-fwrapv";
+        args[count++]="-Wall";
+        args[count++]="-Wextra";
+        args[count++]="-Wno-unused-function";
+        args[count++]="-Wno-implicit-const-int-float-conversion";
+        args[count++]="-fno-math-errno";
+        args[count++]=allow_fma ? "-ffp-contract=on" : "-ffp-contract=off";
+        args[count++]="-falign-loops=64";
+        if(with_big) args[count++]="-Isrc";
+        args[count++]=(char *)cpath;
+        if(with_big) {
+            args[count++]="src/clair_bigint.c";
+            args[count++]="src/clair_bigfloat.c";
+            args[count++]="src/clair_big_numbers_rt.c";
+        }
+        args[count++]="-o";
+        args[count++]=(char *)output;
+        args[count++]="-lm";
+        args[count++]="-pthread";
+        args[count]=NULL;
         execvp("clang", args);
         perror("clair: clang");
         _exit(127);
@@ -134,7 +147,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int rc = run_clang(cpath, output);
+    int rc = run_clang(cpath, output, clair_uses_dynamic(program));
 
     free(cpath);
     ast_free(program);

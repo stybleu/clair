@@ -231,6 +231,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
+    if (strcmp(type, "bigint") == 0 || strcmp(type, "bigfloat") == 0) return 1;
     if (is_big(type) || machine_bits(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
@@ -1113,6 +1114,22 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         right = expr_type(s, rhs);
     }
     if (!left || !right) return NULL;
+    int dynleft = strcmp(left, "bigint") == 0 || strcmp(left, "bigfloat") == 0;
+    int dynright = strcmp(right, "bigint") == 0 || strcmp(right, "bigfloat") == 0;
+    if (dynleft || dynright) {
+        const char *op = n->text;
+        int comparison = !strcmp(op,"==") || !strcmp(op,"!=") || !strcmp(op,"<") ||
+                         !strcmp(op,"<=") || !strcmp(op,">") || !strcmp(op,">=");
+        int arithmetic = !strcmp(op,"+") || !strcmp(op,"-") || !strcmp(op,"*") || !strcmp(op,"/") ||
+                         (!strcmp(op,"%") && !strcmp(left,"bigint"));
+        if (strcmp(left,right) || (!comparison && !arithmetic)) {
+            fprintf(stderr, "semantic error: unsupported or mixed big-number operands: %s %s %s\n",
+                    left,op,right);
+            s->had_error=1; return NULL;
+        }
+        set_type(n, comparison ? "bool" : left);
+        return n->type_name;
+    }
     if (strcmp(n->text, "in") == 0 || strcmp(n->text, "not in") == 0) {
         /* x in xs (a list), s in text (a string), key in d (a dictionary), like Python */
         const char *element = list_element_type(right);
@@ -1471,6 +1488,28 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+            if (n->text && (strcmp(n->text, "bigint") == 0 || strcmp(n->text, "bigfloat") == 0)) {
+                int flt = strcmp(n->text, "bigfloat") == 0;
+                size_t count = flt ? 2 : 1;
+                if (n->child_count != count) {
+                    fprintf(stderr, "semantic error: %s() expects %zu arguments\n", n->text, count);
+                    s->had_error = 1; return NULL;
+                }
+                const char *arg = expr_type(s, n->children[0]);
+                if (!arg || strcmp(arg, "string") != 0) {
+                    fprintf(stderr, "semantic error: %s() expects a decimal string\n", n->text);
+                    s->had_error = 1; return NULL;
+                }
+                if (flt) {
+                    const char *p = expr_type(s, n->children[1]);
+                    if (!p || strcmp(p, "int") != 0) {
+                        fprintf(stderr, "semantic error: bigfloat() precision must be int\n");
+                        s->had_error = 1; return NULL;
+                    }
+                }
+                set_type(n, flt ? "bigfloat" : "bigint");
+                return n->type_name;
+            }
             if (n->text && strncmp(n->text, "@slice", 6) == 0 && !n->type_name) return check_slice(s, n);
             if (n->text && strcmp(n->text, "@comprehension") == 0) return check_comprehension(s, n);
             if (n->text && n->text[0] == '@') return n->type_name;  /* builtin already checked */
@@ -1637,6 +1676,10 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             if (is_int_literal(n)) return type_int_literal(s, n, "int");   /* -9223372036854775808 fits */
             const char *operand = expr_type(s, n->children[0]);
             if (!operand) return NULL;
+            if (!strcmp(operand,"bigint") || !strcmp(operand,"bigfloat")) {
+                if (strcmp(n->text,"-")) {error_type(s,"unary operator not supported for big numbers");return NULL;}
+                set_type(n,operand);return n->type_name;
+            }
             if (strcmp(n->text, "-") == 0) {
                 if (is_ubig(operand)) {
                     fprintf(stderr, "semantic error: unary '-' is not allowed on %s (never negative): "
@@ -1869,7 +1912,8 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *type = expr_type(s, n->children[0]);
             if (!type) return 0;
             if (!machine_bits(type) && !is_float_type(type) &&
-                strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 && !is_big(type)) {
+                strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 && !is_big(type) &&
+                strcmp(type, "bigint") != 0 && strcmp(type, "bigfloat") != 0) {
                 error_type(s, "print() received an unsupported type");
                 return 0;
             }
