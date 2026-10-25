@@ -492,6 +492,54 @@ static int set_float32_literal(AstNode *n) {
 }
 static const char *big_common_type(Semantic *s, AstNode *n, const char *what, const char *left, const char *right);
 
+/*
+ * Random numbers, like Python's random module (same draws for the same seed):
+ *   seed(n), random(), randint(a, b), uniform(a, b), gauss(mu, sigma),
+ *   shuffle(xs), choice(xs).
+ * 1 when n is one of them (renamed @random...), 0 otherwise, -1 on error.
+ */
+static int check_random_call(Semantic *s, AstNode *n) {
+    static const struct { const char *name; size_t args; const char *kind; } calls[] = {
+        { "seed", 1, "int" }, { "random", 0, "" }, { "randint", 2, "int" }, { "uniform", 2, "number" },
+        { "gauss", 2, "number" }, { "shuffle", 1, "list" }, { "choice", 1, "list" },
+    };
+    size_t c = 0, count = sizeof(calls) / sizeof(calls[0]);
+    while (c < count && strcmp(n->text, calls[c].name) != 0) c++;
+    if (c == count) return 0;
+    if (n->child_count != calls[c].args) {
+        fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", calls[c].name, calls[c].args,
+                n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *result = "float", *element = NULL;
+    for (size_t i = 0; i < n->child_count; i++) {
+        const char *t = expr_type(s, n->children[i]);
+        if (!t) return -1;
+        int ok = strcmp(calls[c].kind, "int") == 0 ? is_index_type(t)
+               : strcmp(calls[c].kind, "number") == 0 ? is_numeric(t) && !is_big(t)
+               : is_list_type(t);
+        if (!ok) {
+            fprintf(stderr, "semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, calls[c].name,
+                    strcmp(calls[c].kind, "list") == 0 ? "a list" : strcmp(calls[c].kind, "int") == 0 ? "an int"
+                                                                                                    : "a number", t);
+            s->had_error = 1;
+            return -1;
+        }
+        if (strcmp(calls[c].kind, "list") == 0) element = list_element_type(t);
+    }
+    if (strcmp(calls[c].name, "seed") == 0 || strcmp(calls[c].name, "randint") == 0 ||
+        strcmp(calls[c].name, "shuffle") == 0) result = "int";
+    if (strcmp(calls[c].name, "choice") == 0) result = element;
+    char *renamed = malloc(strlen(calls[c].name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, calls[c].name);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, result) ? 1 : -1;
+}
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -1219,6 +1267,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             if (!fn) {
                 int builtin = check_matrix_builtin(s, n);
                 if (builtin == 0) builtin = check_builtin_call(s, n);
+                if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
                 fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);

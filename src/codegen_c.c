@@ -244,10 +244,18 @@ static int int_div_is_safe(const AstNode *n) {
 
 static int is_int_type(const char *t) { return t && strcmp(t, "int") == 0; }
 
+/* seed, random, randint, uniform, gauss, shuffle, choice (after the '@') */
+static int is_random_call(const char *name) {
+    static const char *const names[] = { "seed", "random", "randint", "uniform", "gauss", "shuffle", "choice", NULL };
+    for (size_t i = 0; names[i]; i++) if (strcmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
 /* Builtins that can never stop the program (only int(float) and matrix() can). */
 static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
     if (strcmp(call->text, "@matrix") == 0) return 0;
+    if (strcmp(call->text, "@randint") == 0 || strcmp(call->text, "@choice") == 0) return 0;   /* empty range, empty list */
     if (strcmp(call->text, "@convert") == 0) return 0;     /* narrowing big integers is checked */
     if (strncmp(call->text, "@slice", 6) == 0) return 0;   /* a step of 0 stops the program */
     if (big_bits(call->type_name)) return 0;               /* abs, min, max, pow of big integers */
@@ -401,6 +409,7 @@ static int tree_writes_lists(const AstNode *n) {
         n->kind == AST_METHOD_CALL) return 1;
     if (n->kind == AST_CALL && n->text && n->text[0] != '@' && strcmp(n->text, "len") != 0 &&
         strcmp(n->text, "input_int") != 0 && fn_writes_lists(n->text)) return 1;
+    if (n->kind == AST_CALL && n->text && strcmp(n->text, "@shuffle") == 0) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (tree_writes_lists(n->children[i])) return 1;
     }
@@ -1441,6 +1450,7 @@ static int matvec_rest_ok(const AstNode *n, MatvecPattern *p) {
         case AST_CALL:
             if (n->text && n->text[0] != '@' && strcmp(n->text, "len") != 0 &&
                 strcmp(n->text, "input_int") != 0 && fn_writes_lists(n->text)) return 0;
+            if (n->text && strcmp(n->text, "@shuffle") == 0) return 0;       /* would reorder w, x or b */
             break;
         case AST_INDEX_ASSIGN:
         case AST_MATRIX_SET: {
@@ -1924,6 +1934,7 @@ static int expr_prec(const AstNode *n) {
             if (n->text && strcmp(n->text, "@float") == 0) return PREC_UNARY; /* (double)x */
             if (n->text && strcmp(n->text, "@int") == 0 && builtin_cannot_fail(n)) return PREC_UNARY;
             if (n->text && n->text[0] == '@' && small_machine_bits(n->text + 1)) return PREC_UNARY;  /* (uint8_t)x */
+            if (n->text && strcmp(n->text, "@choice") == 0) return PREC_UNARY;                     /* *(int64_t *)... */
             return PREC_POSTFIX;
         case AST_INTEGER:
             return n->text && n->text[0] == '-' ? PREC_UNARY : PREC_POSTFIX;   /* -5 next to an i8 */
@@ -2554,6 +2565,7 @@ static int own_expr_ok(const AstNode *n, const char *name, int visible, const As
             const char *callee = parent->text;
             if (strcmp(callee, "len") == 0 || strcmp(callee, "@rows") == 0 || strcmp(callee, "@cols") == 0) return 1;
             if (strncmp(callee, "@slice", 6) == 0 && idx == 0) return 1;          /* v[a:b] copies */
+            if (strcmp(callee, "@shuffle") == 0 || strcmp(callee, "@choice") == 0) return 1;   /* nothing kept */
             if (callee[0] != '@' && find_program_function(callee) && !param_escapes(callee, idx)) return 1;
         }
         return 0;
@@ -3146,6 +3158,17 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (strcmp(name, "rows") == 0 || strcmp(name, "cols") == 0) {
                     if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
                     fprintf(f, "->%s", name);
+                    return 1;
+                }
+                if (is_random_call(name)) {
+                    /* clair_rt_random(), clair_rt_randint(a, b)...; choice gives a pointer to the element */
+                    if (strcmp(name, "choice") == 0) fprintf(f, "*(%s *)clair_rt_choice(", c_type_name(n->type_name));
+                    else fprintf(f, "clair_rt_%s(", name);
+                    for (size_t i = 0; i < n->child_count; i++) {
+                        if (i != 0) fputs(", ", f);
+                        if (!emit_expr(f, n->children[i])) return 0;
+                    }
+                    fputc(')', f);
                     return 1;
                 }
                 const char *t0 = n->child_count > 0 ? n->children[0]->type_name : NULL;
@@ -5128,6 +5151,7 @@ static int node_uses_math(const AstNode *n) {
         strcmp(n->text, "@int") != 0 && strcmp(n->text, "@float") != 0 &&
         strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
         strncmp(n->text, "@slice", 6) != 0 && !small_machine_bits(n->text + 1) &&
+        (!is_random_call(n->text + 1) || strcmp(n->text, "@gauss") == 0) &&
         !(machine_type_bits(n->type_name) &&
           (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
     if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !machine_type_bits(n->type_name)) return 1;
@@ -5769,6 +5793,169 @@ static void emit_machine_runtime(FILE *f, const MachineNeeds *m) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Random numbers: the Mersenne Twister of Python's random module, and */
+/* its ways of drawing, so a program gives the same draws as Python    */
+/* for the same seed().  Without seed(), every run is different.       */
+/* ------------------------------------------------------------------ */
+
+static void emit_random_runtime(FILE *f, const AstNode *program) {
+    static const char *const names[] = { "@seed", "@random", "@randint", "@uniform", "@gauss", "@shuffle", "@choice" };
+    int used[7], any = 0;
+    for (int i = 0; i < 7; i++) any |= used[i] = node_uses_call_named(program, names[i]);
+    if (!any) return;
+    fputs(
+        "/* random numbers: Python's Mersenne Twister (same draws as Python for the same seed) */\n"
+        "static uint32_t clair_rt_mt[624];\n"
+        "static int clair_rt_mt_index = -1;          /* -1: no seed yet */\n", f);
+    if (used[4]) fputs("static bool clair_rt_gauss_ready = false;   /* gauss() draws its values two by two */\n"
+                       "static double clair_rt_gauss_next = 0.0;\n", f);
+    fputs(
+        "\n"
+        "static void clair_rt_mt_seed_words(const uint32_t *key, int len) {\n"
+        "    uint32_t *mt = clair_rt_mt;\n"
+        "    mt[0] = 19650218u;\n"
+        "    for (int i = 1; i < 624; i++) mt[i] = 1812433253u * (mt[i - 1] ^ (mt[i - 1] >> 30)) + (uint32_t)i;\n"
+        "    int i = 1, j = 0;\n"
+        "    for (int k = len > 624 ? len : 624; k > 0; k--) {\n"
+        "        mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1664525u)) + key[j] + (uint32_t)j;\n"
+        "        if (++i >= 624) { mt[0] = mt[623]; i = 1; }\n"
+        "        if (++j >= len) j = 0;\n"
+        "    }\n"
+        "    for (int k = 623; k > 0; k--) {\n"
+        "        mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1566083941u)) - (uint32_t)i;\n"
+        "        if (++i >= 624) { mt[0] = mt[623]; i = 1; }\n"
+        "    }\n"
+        "    mt[0] = 0x80000000u;\n"
+        "    clair_rt_mt_index = 624;\n", f);
+    if (used[4]) fputs("    clair_rt_gauss_ready = false;\n", f);
+    fputs(
+        "}\n"
+        "\n"
+        "/* seed(n): like Python, the words of abs(n) */\n"
+        "static int64_t clair_rt_seed(int64_t n) {\n"
+        "    uint64_t m = n < 0 ? 0 - (uint64_t)n : (uint64_t)n;\n"
+        "    uint32_t key[2] = { (uint32_t)m, (uint32_t)(m >> 32) };\n"
+        "    clair_rt_mt_seed_words(key, key[1] ? 2 : 1);\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "static uint32_t clair_rt_mt_next(void) {\n"
+        "    uint32_t *mt = clair_rt_mt;\n"
+        "    if (clair_rt_mt_index < 0) {         /* no seed(): different at every run, like Python */\n"
+        "        uint32_t key[4] = { (uint32_t)time(NULL), (uint32_t)clock(), (uint32_t)(uintptr_t)&key, 0x9e3779b9u };\n"
+        "        FILE *dev = fopen(\"/dev/urandom\", \"rb\");\n"
+        "        if (dev) {\n"
+        "            if (fread(key, sizeof(key), 1, dev) != 1) key[3] ^= 0x85ebca6bu;\n"
+        "            fclose(dev);\n"
+        "        }\n"
+        "        clair_rt_mt_seed_words(key, 4);\n"
+        "    }\n"
+        "    if (clair_rt_mt_index >= 624) {\n"
+        "        for (int k = 0; k < 624; k++) {\n"
+        "            uint32_t y = (mt[k] & 0x80000000u) | (mt[(k + 1) % 624] & 0x7fffffffu);\n"
+        "            mt[k] = mt[(k + 397) % 624] ^ (y >> 1) ^ ((y & 1u) ? 0x9908b0dfu : 0u);\n"
+        "        }\n"
+        "        clair_rt_mt_index = 0;\n"
+        "    }\n"
+        "    uint32_t y = mt[clair_rt_mt_index++];\n"
+        "    y ^= y >> 11;\n"
+        "    y ^= (y << 7) & 0x9d2c5680u;\n"
+        "    y ^= (y << 15) & 0xefc60000u;\n"
+        "    y ^= y >> 18;\n"
+        "    return y;\n"
+        "}\n"
+        "\n"
+        "/* random(): a float in [0, 1) with 53 random bits */\n"
+        "static double clair_rt_random(void) {\n"
+        "    uint32_t a = clair_rt_mt_next() >> 5, b = clair_rt_mt_next() >> 6;\n"
+        "    return ((double)a * 67108864.0 + (double)b) * (1.0 / 9007199254740992.0);\n"
+        "}\n"
+        "\n"
+        "/* a number in [0, n), drawn like Python (k random bits, again while too big) */\n"
+        "static unsigned __int128 clair_rt_randbelow(unsigned __int128 n) {\n"
+        "    int k = 0;\n"
+        "    while (k < 128 && (n >> k) != 0) k++;\n"
+        "    for (;;) {\n"
+        "        unsigned __int128 r = 0;\n"
+        "        if (k <= 32) r = clair_rt_mt_next() >> (32 - k);\n"
+        "        else {\n"
+        "            for (int shift = 0, left = k; left > 0; shift += 32, left -= 32) {\n"
+        "                uint32_t w = clair_rt_mt_next();\n"
+        "                if (left < 32) w >>= 32 - left;\n"
+        "                r |= (unsigned __int128)w << shift;\n"
+        "            }\n"
+        "        }\n"
+        "        if (r < n) return r;\n"
+        "    }\n"
+        "}\n\n",
+        f);
+    if (used[2]) {
+        fputs(
+            "/* randint(a, b): an int from a to b, both included */\n"
+            "static int64_t clair_rt_randint(int64_t a, int64_t b) {\n"
+            "    if (b < a) {\n"
+            "        fputs(\"Clair runtime error: randint() empty range\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    unsigned __int128 width = (unsigned __int128)((__int128)b - (__int128)a) + 1;\n"
+            "    return (int64_t)((__int128)a + (__int128)clair_rt_randbelow(width));\n"
+            "}\n\n", f);
+    }
+    if (used[3]) {
+        fputs(
+            "/* uniform(a, b): a float between a and b */\n"
+            "static double clair_rt_uniform(double a, double b) {\n"
+            "    return a + (b - a) * clair_rt_random();\n"
+            "}\n\n", f);
+    }
+    if (used[4]) {
+        fputs(
+            "/* gauss(mu, sigma): normal law, two values at a time like Python */\n"
+            "static double clair_rt_gauss(double mu, double sigma) {\n"
+            "    double z;\n"
+            "    if (clair_rt_gauss_ready) {\n"
+            "        z = clair_rt_gauss_next;\n"
+            "        clair_rt_gauss_ready = false;\n"
+            "    } else {\n"
+            "        double x2pi = clair_rt_random() * 6.283185307179586;\n"
+            "        double g2rad = sqrt(-2.0 * log(1.0 - clair_rt_random()));\n"
+            "        z = cos(x2pi) * g2rad;\n"
+            "        clair_rt_gauss_next = sin(x2pi) * g2rad;\n"
+            "        clair_rt_gauss_ready = true;\n"
+            "    }\n"
+            "    return mu + z * sigma;\n"
+            "}\n\n", f);
+    }
+    if (used[5]) {
+        fputs(
+            "/* shuffle(xs): the elements in a random order, in place (Fisher-Yates, like Python) */\n"
+            "static int64_t clair_rt_shuffle(ClairList xs) {\n"
+            "    unsigned char tmp[16];\n"
+            "    size_t size = xs->elem_size;\n"
+            "    unsigned char *data = xs->data;\n"
+            "    for (size_t i = xs->len; i > 1; i--) {\n"
+            "        size_t j = (size_t)clair_rt_randbelow(i);\n"
+            "        memcpy(tmp, data + (i - 1) * size, size);\n"
+            "        memcpy(data + (i - 1) * size, data + j * size, size);\n"
+            "        memcpy(data + j * size, tmp, size);\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n\n", f);
+    }
+    if (used[6]) {
+        fputs(
+            "/* choice(xs): one element drawn at random */\n"
+            "static void *clair_rt_choice(ClairList xs) {\n"
+            "    if (xs->len == 0) {\n"
+            "        fputs(\"Clair runtime error: choice() from an empty list\\n\", stderr);\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    return (unsigned char *)xs->data + (size_t)clair_rt_randbelow(xs->len) * xs->elem_size;\n"
+            "}\n\n", f);
+    }
+}
+
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
     stack_list_counter = 0;
@@ -5795,6 +5982,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
     );
     if (uses_input_int) fputs("#include <errno.h>\n", f);
     if (uses_cores) fputs("#include <pthread.h>\n#include <sched.h>\n#include <stdatomic.h>\n#include <time.h>\n", f);
+    else if (node_uses_call_named(program, "@random") || node_uses_call_named(program, "@randint") ||
+             node_uses_call_named(program, "@uniform") || node_uses_call_named(program, "@gauss") ||
+             node_uses_call_named(program, "@shuffle") || node_uses_call_named(program, "@choice"))
+        fputs("#include <time.h>\n", f);        /* without seed(): seeded from the clock and /dev/urandom */
     if (node_uses_math(program) || program_uses_big(program)) fputs("#include <math.h>\n", f);
     if (node_uses_type(program, "uint1024")) fputs("#include <float.h>\n", f);
     fputc('\n', f);
@@ -6447,8 +6638,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "\n"
             "/*\n"
             " * Rows [first, last) of s[i] = s[i] + w[i][0] * x[0] + w[i][1] * x[1] + ...\n"
-            " * 4 rows at once: each keeps its own additions in the same order as the\n"
-            " * plain loop (identical result), and the 4 sums no longer wait for each other.\n"
+            " * 8 rows at once (then 4): each keeps its own additions in the same order as\n"
+            " * the plain loop (identical result), and the sums no longer wait for each other.\n"
             " */\n"
             "static void clair_rt_matvec_rows(const void *job, int64_t first, int64_t last) {\n"
             "    const ClairMatvecJob *p = job;\n"
@@ -6456,6 +6647,31 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    const double *w = p->w, *x = p->x;\n"
             "    double *s = p->s;\n"
             "    int64_t i = first;\n"
+            "    for (; i + 8 <= last; i += 8) {\n"
+            "        double s0 = s[i], s1 = s[i + 1], s2 = s[i + 2], s3 = s[i + 3];\n"
+            "        double s4 = s[i + 4], s5 = s[i + 5], s6 = s[i + 6], s7 = s[i + 7];\n"
+            "        const double *w0 = w + i * ldw, *w1 = w0 + ldw, *w2 = w1 + ldw, *w3 = w2 + ldw;\n"
+            "        const double *w4 = w3 + ldw, *w5 = w4 + ldw, *w6 = w5 + ldw, *w7 = w6 + ldw;\n"
+            "        for (int64_t j = 0; j < n; j++) {\n"
+            "            double xj = x[j];\n"
+            "            s0 = s0 + w0[j] * xj;\n"
+            "            s1 = s1 + w1[j] * xj;\n"
+            "            s2 = s2 + w2[j] * xj;\n"
+            "            s3 = s3 + w3[j] * xj;\n"
+            "            s4 = s4 + w4[j] * xj;\n"
+            "            s5 = s5 + w5[j] * xj;\n"
+            "            s6 = s6 + w6[j] * xj;\n"
+            "            s7 = s7 + w7[j] * xj;\n"
+            "        }\n"
+            "        s[i] = s0;\n"
+            "        s[i + 1] = s1;\n"
+            "        s[i + 2] = s2;\n"
+            "        s[i + 3] = s3;\n"
+            "        s[i + 4] = s4;\n"
+            "        s[i + 5] = s5;\n"
+            "        s[i + 6] = s6;\n"
+            "        s[i + 7] = s7;\n"
+            "    }\n"
             "    for (; i + 4 <= last; i += 4) {\n"
             "        double s0 = s[i], s1 = s[i + 1], s2 = s[i + 2], s3 = s[i + 3];\n"
             "        const double *w0 = w + i * ldw, *w1 = w0 + ldw, *w2 = w1 + ldw, *w3 = w2 + ldw;\n"
@@ -6656,6 +6872,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
             f
         );
     }
+
+    emit_random_runtime(f, program);
 
     range_counter = 0;
     list_mutation_counter = 0;

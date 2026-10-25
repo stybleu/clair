@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.36 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.37 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -643,6 +643,17 @@ grep -Fq 'clair_rt_layer_f32(w->rows, w->cols, clair_layer_couche_1, &clair_laye
 grep -Fq 'clair_rt_matvec_f32(' build/test_noyaux_float32.generated.c
 grep -Fq 'float acc[4][16];' build/test_noyaux_float32.generated.c
 printf '%s\n' 'noyaux_float32.cl : OK -> produits de matrices et couches denses float32 en blocs, sur 1, 2, 3 ou 7 coeurs, identiques au bit pres aux boucles simples'
+
+./build/clair tests/hasard.cl -o build/test_hasard
+[ "$(./build/test_hasard)" = "$(cat tests/hasard.expected)" ]
+grep -Fq 'clair_rt_gauss(0.0, 0.125)' build/test_hasard.generated.c
+./build/clair tests/hasard_sans_graine.cl -o build/test_hasard_sans_graine
+[ "$(./build/test_hasard_sans_graine)" != "$(./build/test_hasard_sans_graine)" ]
+printf '%s\n' 'hasard.cl : OK -> seed, random, randint, uniform, gauss, shuffle, choice : memes tirages que Python ; sans seed(), different a chaque lancement'
+expect_runtime_error randint_empty_runtime '3' 'Clair runtime error: randint() empty range'
+expect_runtime_error choice_empty_runtime '7' 'Clair runtime error: choice() from an empty list'
+expect_compile_error invalid_randint_float "argument 1 of randint() expects an int, got float"
+expect_compile_error invalid_shuffle_type "argument 1 of shuffle() expects a list, got int"
 
 ./build/clair tests/entiers_machine.cl -o build/test_entiers_machine
 [ "$(./build/test_entiers_machine)" = "$(cat tests/entiers_machine.expected)" ]
