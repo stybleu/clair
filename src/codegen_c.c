@@ -50,14 +50,20 @@ static const char *matrix_accessor_name(const char *type) {
     return strcmp(e, "double") == 0 ? "clair_rt_matrix_at_f64_checked" : "clair_rt_matrix_at_i64_checked";
 }
 
-/* Big integers int128 .. int1024: bits, or 0 for any other type. */
+/* Big integers int128 .. int1024 and uint128 .. uint1024: bits, or 0 for any other type. */
 static int big_bits(const char *type) {
     if (!type) return 0;
+    if (type[0] == 'u') type++;
     if (strcmp(type, "int128") == 0) return 128;
     if (strcmp(type, "int256") == 0) return 256;
     if (strcmp(type, "int512") == 0) return 512;
     if (strcmp(type, "int1024") == 0) return 1024;
     return 0;
+}
+
+/* 'i' for int128 .. int1024 (clair_i256_add), 'u' for uint128 .. uint1024 (clair_u256_add) */
+static char big_tag(const char *type) {
+    return type && type[0] == 'u' ? 'u' : 'i';
 }
 
 static const char *c_type_name(const char *clair_type) {
@@ -68,6 +74,10 @@ static const char *c_type_name(const char *clair_type) {
     if (strcmp(clair_type, "int256") == 0) return "ClairInt256";
     if (strcmp(clair_type, "int512") == 0) return "ClairInt512";
     if (strcmp(clair_type, "int1024") == 0) return "ClairInt1024";
+    if (strcmp(clair_type, "uint128") == 0) return "ClairUInt128";
+    if (strcmp(clair_type, "uint256") == 0) return "ClairUInt256";
+    if (strcmp(clair_type, "uint512") == 0) return "ClairUInt512";
+    if (strcmp(clair_type, "uint1024") == 0) return "ClairUInt1024";
     if (strcmp(clair_type, "int") == 0) return "int64_t";
     if (strcmp(clair_type, "float") == 0) return "double";
     if (strcmp(clair_type, "bool") == 0) return "bool";
@@ -185,6 +195,7 @@ static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
     if (strcmp(call->text, "@matrix") == 0) return 0;
     if (strcmp(call->text, "@convert") == 0) return 0;     /* narrowing big integers is checked */
+    if (big_bits(call->type_name)) return 0;               /* abs, min, max, pow of big integers */
     if (strcmp(call->text, "@int") == 0)
         return call->child_count == 1 && !(call->children[0]->type_name &&
                                            strcmp(call->children[0]->type_name, "float") == 0);
@@ -2580,18 +2591,19 @@ static int emit_expr(FILE *f, const AstNode *n);
  */
 static int emit_big_literal(FILE *f, const AstNode *n) {
     int bits = big_bits(n->type_name), words = bits / 64;
+    char tag = big_tag(n->type_name);
     uint64_t w[16];
-    if (!clair_decimal_to_words(n->text, w, words)) return 0;
+    if (!clair_decimal_to_words(n->text, w, words, tag == 'u')) return 0;
     uint64_t ext = (w[0] >> 63) ? UINT64_MAX : 0;
-    int small = 1;
+    int small = tag == 'i' || ext == 0;
     for (int i = 1; i < words; i++) if (w[i] != ext) small = 0;
     if (small) {
-        fprintf(f, "clair_i%d_from_i64(", bits);
+        fprintf(f, "clair_%c%d_from_i64(", tag, bits);
         emit_int_literal(f, (int64_t)w[0]);
         fputc(')', f);
         return 1;
     }
-    fprintf(f, "(ClairInt%d){{", bits);
+    fprintf(f, "(%s){{", c_type_name(n->type_name));
     for (int i = 0; i < words; i++) fprintf(f, "%s0x%llxu", i ? ", " : "", (unsigned long long)w[i]);
     fprintf(f, "}} /* %s */", n->text);
     return 1;
@@ -2602,11 +2614,12 @@ static int emit_convert(FILE *f, const AstNode *n) {
     if (n->child_count != 1) return 0;
     const AstNode *x = n->children[0];
     int to = big_bits(n->type_name), from = big_bits(x->type_name);
-    if (to && to == from) return emit_expr(f, x);           /* int256(x) with x already int256 */
-    if (to && !from) fprintf(f, "clair_i%d_from_i64(", to);
-    else if (to && from) fprintf(f, "clair_i%d_from_i%d(", to, from);
-    else if (from && is_int_type(n->type_name)) fprintf(f, "clair_i%d_to_i64(", from);
-    else if (from && n->type_name && strcmp(n->type_name, "float") == 0) fprintf(f, "clair_i%d_to_double(", from);
+    char tt = big_tag(n->type_name), ft = big_tag(x->type_name);
+    if (to && to == from && tt == ft) return emit_expr(f, x);     /* int256(x) with x already int256 */
+    if (to && !from) fprintf(f, "clair_%c%d_from_i64(", tt, to);
+    else if (to && from) fprintf(f, "clair_%c%d_from_%c%d(", tt, to, ft, from);
+    else if (from && is_int_type(n->type_name)) fprintf(f, "clair_%c%d_to_i64(", ft, from);
+    else if (from && n->type_name && strcmp(n->type_name, "float") == 0) fprintf(f, "clair_%c%d_to_double(", ft, from);
     else return 0;
     if (!emit_expr(f, x)) return 0;
     fputc(')', f);
@@ -2829,6 +2842,18 @@ static int emit_expr(FILE *f, const AstNode *n) {
                     fputs("(int64_t)", f);
                     return emit_operand(f, n->children[0], PREC_UNARY, 0);
                 }
+                if (big_bits(n->type_name) && (strcmp(name, "abs") == 0 || strcmp(name, "min") == 0 ||
+                                               strcmp(name, "max") == 0 || strcmp(name, "pow") == 0)) {
+                    /* exact, in the big type; abs of a uint is the value itself */
+                    if (strcmp(name, "abs") == 0 && big_tag(n->type_name) == 'u') return emit_expr(f, n->children[0]);
+                    fprintf(f, "clair_%c%d_%s(", big_tag(n->type_name), big_bits(n->type_name), name);
+                    for (size_t i = 0; i < n->child_count; i++) {
+                        if (i != 0) fputs(", ", f);
+                        if (!emit_expr(f, n->children[i])) return 0;
+                    }
+                    fputc(')', f);
+                    return 1;
+                }
                 const char *c_name = name;
                 if (strcmp(name, "abs") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_abs_i64" : "fabs";
                 if (strcmp(name, "min") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_min_i64" : "fmin";
@@ -2875,6 +2900,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
             const char *op = n->text;
 
             int bits = big_bits(n->children[0]->type_name);
+            char tag = big_tag(n->children[0]->type_name);
             if (bits) {
                 /* big integers: checked helpers, comparisons through clair_iN_cmp */
                 static const char *const ops[][2] = {
@@ -2884,7 +2910,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
                     if (strcmp(op, ops[i][0]) == 0) fn = ops[i][1];
                 }
-                fprintf(f, "clair_i%d_%s(", bits, fn ? fn : "cmp");
+                fprintf(f, "clair_%c%d_%s(", tag, bits, fn ? fn : "cmp");
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
@@ -3661,7 +3687,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (!emit_expr(f, value)) return 0;
                 fputs("));\n", f);
             } else if (big_bits(value->type_name)) {
-                fprintf(f, "clair_i%d_print(", big_bits(value->type_name));
+                fprintf(f, "clair_%c%d_print(", big_tag(value->type_name), big_bits(value->type_name));
                 if (!emit_expr(f, value)) return 0;
                 fputs(");\n", f);
             } else {
@@ -4732,22 +4758,24 @@ static int node_uses_type(const AstNode *n, const char *type) {
     return 0;
 }
 
+static const char *const big_types[] = {
+    "int128", "int256", "int512", "int1024", "uint128", "uint256", "uint512", "uint1024"
+};
+
 static int program_uses_big(const AstNode *program) {
-    static const char *const types[] = { "int128", "int256", "int512", "int1024" };
-    for (size_t i = 0; i < 4; i++) if (node_uses_type(program, types[i])) return 1;
+    for (size_t i = 0; i < 8; i++) if (node_uses_type(program, big_types[i])) return 1;
     return 0;
 }
 
 static void emit_big_runtime(FILE *f, const AstNode *program) {
-    static const char *const types[] = { "int128", "int256", "int512", "int1024" };
-    static const int bits[] = { 128, 256, 512, 1024 };
-    int used[4];
-    for (int i = 0; i < 4; i++) used[i] = node_uses_type(program, types[i]);
+    int used[8];
+    for (int i = 0; i < 8; i++) used[i] = node_uses_type(program, big_types[i]);
     fputs(
         "/*\n"
-        " * Big integers int128 .. int1024: n words of 64 bits, least significant\n"
-        " * first, two's complement.  Every operation checks overflow (like division\n"
-        " * by zero): a result that does not fit stops the program.\n"
+        " * Big integers int128 .. int1024 and uint128 .. uint1024: n words of 64\n"
+        " * bits, least significant first; the signed ones in two's complement.\n"
+        " * Every operation checks overflow (like division by zero): a result that\n"
+        " * does not fit stops the program.\n"
         " */\n"
         "static _Noreturn void clair_rt_big_fail(const char *message) {\n"
         "    fprintf(stderr, \"Clair runtime error: %s\\n\", message);\n"
@@ -4771,9 +4799,10 @@ static void emit_big_runtime(FILE *f, const AstNode *program) {
         "    if (clair_rt_big_is_neg(a, n)) clair_rt_big_negate(m, n);\n"
         "}\n"
         "\n"
-        "/* r = a + b; true on overflow */\n"
-        "static inline bool clair_rt_big_add(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
-        "    bool sa = clair_rt_big_is_neg(a, n), sb = clair_rt_big_is_neg(b, n);\n"
+        "/* ---- numbers 0 and above (uint, and the magnitudes of int) ---- */\n"
+        "\n"
+        "/* r = a + b; true when the result needs more than n words */\n"
+        "static inline bool clair_rt_ubig_add(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
         "    uint64_t carry = 0;\n"
         "    for (int i = 0; i < n; i++) {\n"
         "        uint64_t s = a[i] + b[i];\n"
@@ -4781,12 +4810,11 @@ static void emit_big_runtime(FILE *f, const AstNode *program) {
         "        r[i] = s + carry;\n"
         "        carry = c | (r[i] < s);\n"
         "    }\n"
-        "    return sa == sb && clair_rt_big_is_neg(r, n) != sa;\n"
+        "    return carry != 0;\n"
         "}\n"
         "\n"
-        "/* r = a - b; true on overflow */\n"
-        "static inline bool clair_rt_big_sub(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
-        "    bool sa = clair_rt_big_is_neg(a, n), sb = clair_rt_big_is_neg(b, n);\n"
+        "/* r = a - b; true when the result is negative */\n"
+        "static inline bool clair_rt_ubig_sub(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
         "    uint64_t borrow = 0;\n"
         "    for (int i = 0; i < n; i++) {\n"
         "        uint64_t d = a[i] - b[i];\n"
@@ -4794,125 +4822,80 @@ static void emit_big_runtime(FILE *f, const AstNode *program) {
         "        r[i] = d - borrow;\n"
         "        borrow = c | (d < borrow);\n"
         "    }\n"
-        "    return sa != sb && clair_rt_big_is_neg(r, n) != sa;\n"
+        "    return borrow != 0;\n"
         "}\n"
         "\n"
-        "/* r = a * b; true on overflow (schoolbook product of the magnitudes) */\n"
-        "static bool clair_rt_big_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
-        "    uint64_t x[16], y[16], p[32] = { 0 };\n"
-        "    bool negative = clair_rt_big_is_neg(a, n) != clair_rt_big_is_neg(b, n);\n"
-        "    clair_rt_big_abs(x, a, n);\n"
-        "    clair_rt_big_abs(y, b, n);\n"
+        "/* r = a * b (schoolbook); true when the result needs more than n words */\n"
+        "static bool clair_rt_ubig_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    uint64_t p[32] = { 0 };\n"
         "    for (int i = 0; i < n; i++) {\n"
-        "        if (!x[i]) continue;\n"
+        "        if (!a[i]) continue;\n"
         "        uint64_t carry = 0;\n"
         "        for (int j = 0; j < n; j++) {\n"
-        "            unsigned __int128 t = (unsigned __int128)x[i] * y[j] + p[i + j] + carry;\n"
+        "            unsigned __int128 t = (unsigned __int128)a[i] * b[j] + p[i + j] + carry;\n"
         "            p[i + j] = (uint64_t)t;\n"
         "            carry = (uint64_t)(t >> 64);\n"
         "        }\n"
         "        p[i + n] = carry;\n"
         "    }\n"
-        "    for (int i = n; i < 2 * n; i++) if (p[i]) return true;\n"
-        "    if (p[n - 1] >> 63) {                      /* only the most negative value is allowed */\n"
-        "        if (!negative || p[n - 1] != (UINT64_C(1) << 63)) return true;\n"
-        "        for (int i = 0; i < n - 1; i++) if (p[i]) return true;\n"
-        "    }\n"
         "    memcpy(r, p, (size_t)n * sizeof(uint64_t));\n"
-        "    if (negative) clair_rt_big_negate(r, n);\n"
+        "    for (int i = n; i < 2 * n; i++) if (p[i]) return true;\n"
         "    return false;\n"
-        "}\n"
-        "\n"
-        "/*\n"
-        " * q = a / b and m = a % b, truncated toward zero like Clair int.\n"
-        " * Returns 0, 1 for a division by zero, 2 for the most negative value / -1.\n"
-        " */\n"
-        "static int clair_rt_big_divmod(uint64_t *q, uint64_t *m, const uint64_t *a, const uint64_t *b, int n) {\n"
-        "    bool zero = true, minus_one = true, most_negative = a[n - 1] == (UINT64_C(1) << 63);\n"
-        "    for (int i = 0; i < n; i++) {\n"
-        "        if (b[i]) zero = false;\n"
-        "        if (b[i] != UINT64_MAX) minus_one = false;\n"
-        "        if (i < n - 1 && a[i]) most_negative = false;\n"
-        "    }\n"
-        "    if (zero) return 1;\n"
-        "    if (most_negative && minus_one) return 2;\n",
+        "}\n",
         f
     );
     fputs(
-        "\n"
-        "    uint64_t x[16], y[16], quo[16] = { 0 }, rem[16] = { 0 };\n"
-        "    clair_rt_big_abs(x, a, n);\n"
-        "    clair_rt_big_abs(y, b, n);\n"
+        "/* q = a / b and m = a % b; true for a division by zero */\n"
+        "static bool clair_rt_ubig_divmod(uint64_t *q, uint64_t *m, const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    bool zero = true;\n"
+        "    for (int i = 0; i < n; i++) if (b[i]) zero = false;\n"
+        "    if (zero) return true;\n"
+        "    uint64_t quo[16] = { 0 }, rem[16] = { 0 };\n"
         "    int top = 64 * n - 1;\n"
-        "    while (top >= 0 && !((x[top / 64] >> (top % 64)) & 1)) top--;\n"
+        "    while (top >= 0 && !((a[top / 64] >> (top % 64)) & 1)) top--;\n"
         "    for (int bit = top; bit >= 0; bit--) {            /* long division, one bit at a time */\n"
+        "        bool carry = rem[n - 1] >> 63;                 /* rem may use the top bit (uint) */\n"
         "        for (int i = n - 1; i > 0; i--) rem[i] = (rem[i] << 1) | (rem[i - 1] >> 63);\n"
-        "        rem[0] = (rem[0] << 1) | ((x[bit / 64] >> (bit % 64)) & 1);\n"
+        "        rem[0] = (rem[0] << 1) | ((a[bit / 64] >> (bit % 64)) & 1);\n"
         "        int i = n - 1;\n"
-        "        while (i > 0 && rem[i] == y[i]) i--;\n"
-        "        if (rem[i] >= y[i]) {\n"
+        "        while (i > 0 && rem[i] == b[i]) i--;\n"
+        "        if (carry || rem[i] >= b[i]) {\n"
         "            uint64_t borrow = 0;\n"
         "            for (int k = 0; k < n; k++) {\n"
-        "                uint64_t d = rem[k] - y[k];\n"
-        "                uint64_t c = rem[k] < y[k];\n"
+        "                uint64_t d = rem[k] - b[k];\n"
+        "                uint64_t c = rem[k] < b[k];\n"
         "                rem[k] = d - borrow;\n"
         "                borrow = c | (d < borrow);\n"
         "            }\n"
         "            quo[bit / 64] |= UINT64_C(1) << (bit % 64);\n"
         "        }\n"
         "    }\n"
-        "    if (clair_rt_big_is_neg(a, n) != clair_rt_big_is_neg(b, n)) clair_rt_big_negate(quo, n);\n"
-        "    if (clair_rt_big_is_neg(a, n)) clair_rt_big_negate(rem, n);\n"
         "    memcpy(q, quo, (size_t)n * sizeof(uint64_t));\n"
         "    memcpy(m, rem, (size_t)n * sizeof(uint64_t));\n"
-        "    return 0;\n"
+        "    return false;\n"
         "}\n"
         "\n"
-        "static inline int clair_rt_big_cmp(const uint64_t *a, const uint64_t *b, int n) {\n"
-        "    bool na = clair_rt_big_is_neg(a, n), nb = clair_rt_big_is_neg(b, n);\n"
-        "    if (na != nb) return na ? -1 : 1;\n"
+        "static inline int clair_rt_ubig_cmp(const uint64_t *a, const uint64_t *b, int n) {\n"
         "    for (int i = n - 1; i >= 0; i--) {\n"
         "        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;\n"
         "    }\n"
         "    return 0;\n"
         "}\n"
         "\n"
-        "static inline void clair_rt_big_from_i64(uint64_t *r, int64_t v, int n) {\n"
-        "    r[0] = (uint64_t)v;\n"
-        "    for (int i = 1; i < n; i++) r[i] = v < 0 ? UINT64_MAX : 0;\n"
-        "}\n"
-        "\n"
-        "/* dst (nd words) = src (ns words); true when the value does not fit */\n"
-        "static inline bool clair_rt_big_resize(uint64_t *dst, int nd, const uint64_t *src, int ns) {\n"
-        "    for (int i = 0; i < nd; i++) dst[i] = i < ns ? src[i] : (clair_rt_big_is_neg(src, ns) ? UINT64_MAX : 0);\n"
-        "    uint64_t ext = clair_rt_big_is_neg(dst, nd) ? UINT64_MAX : 0;\n"
-        "    for (int i = nd; i < ns; i++) if (src[i] != ext) return true;\n"
-        "    return nd < ns && clair_rt_big_is_neg(dst, nd) != clair_rt_big_is_neg(src, ns);\n"
-        "}\n"
-        "\n"
         "/* nearest double: the top 128 bits plus a sticky bit for the rest round correctly */\n"
-        "static double clair_rt_big_to_double(const uint64_t *a, int n) {\n"
-        "    uint64_t x[16];\n"
-        "    bool negative = clair_rt_big_is_neg(a, n);\n"
-        "    clair_rt_big_abs(x, a, n);\n"
+        "static double clair_rt_ubig_to_double(const uint64_t *x, int n) {\n"
         "    int t = n - 1;\n"
         "    while (t > 0 && !x[t]) t--;\n"
-        "    double d;\n"
-        "    if (t == 0) {\n"
-        "        d = (double)x[0];\n"
-        "    } else {\n"
-        "        unsigned __int128 top = ((unsigned __int128)x[t] << 64) | x[t - 1];\n"
-        "        for (int i = 0; i < t - 1; i++) if (x[i]) { top |= 1; break; }\n"
-        "        d = ldexp((double)top, 64 * (t - 1));\n"
-        "    }\n"
-        "    return negative ? -d : d;\n"
+        "    if (t == 0) return (double)x[0];\n"
+        "    unsigned __int128 top = ((unsigned __int128)x[t] << 64) | x[t - 1];\n"
+        "    for (int i = 0; i < t - 1; i++) if (x[i]) { top |= 1; break; }\n"
+        "    return ldexp((double)top, 64 * (t - 1));\n"
         "}\n"
         "\n"
-        "static void clair_rt_big_print(const uint64_t *a, int n) {\n"
-        "    uint64_t x[16], chunks[20];\n"
+        "/* prints the digits of x (destroyed), after a '-' when negative */\n"
+        "static void clair_rt_ubig_print(uint64_t *x, int n, bool negative) {\n"
+        "    uint64_t chunks[20];\n"
         "    int count = 0;\n"
-        "    bool negative = clair_rt_big_is_neg(a, n);\n"
-        "    clair_rt_big_abs(x, a, n);\n"
         "    for (;;) {                                         /* groups of 19 digits */\n"
         "        unsigned __int128 rem = 0;\n"
         "        bool more = false;\n"
@@ -4929,77 +4912,249 @@ static void emit_big_runtime(FILE *f, const AstNode *program) {
         "    printf(\"%\" PRIu64, chunks[count - 1]);\n"
         "    for (int i = count - 2; i >= 0; i--) printf(\"%019\" PRIu64, chunks[i]);\n"
         "    putchar('\\n');\n"
+        "}\n"
+        "\n"
+        "/* ---- signed numbers (int) ---- */\n"
+        "\n"
+        "/* r = a + b; true on overflow */\n"
+        "static inline bool clair_rt_big_add(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    bool sa = clair_rt_big_is_neg(a, n), sb = clair_rt_big_is_neg(b, n);\n"
+        "    clair_rt_ubig_add(r, a, b, n);\n"
+        "    return sa == sb && clair_rt_big_is_neg(r, n) != sa;\n"
+        "}\n"
+        "\n"
+        "/* r = a - b; true on overflow */\n"
+        "static inline bool clair_rt_big_sub(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    bool sa = clair_rt_big_is_neg(a, n), sb = clair_rt_big_is_neg(b, n);\n"
+        "    clair_rt_ubig_sub(r, a, b, n);\n"
+        "    return sa != sb && clair_rt_big_is_neg(r, n) != sa;\n"
         "}\n",
         f
     );
-    for (int t = 0; t < 4; t++) {
+    fputs(
+        "/* r = a * b; true on overflow (product of the magnitudes) */\n"
+        "static bool clair_rt_big_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    uint64_t x[16], y[16];\n"
+        "    bool negative = clair_rt_big_is_neg(a, n) != clair_rt_big_is_neg(b, n);\n"
+        "    clair_rt_big_abs(x, a, n);\n"
+        "    clair_rt_big_abs(y, b, n);\n"
+        "    if (clair_rt_ubig_mul(r, x, y, n)) return true;\n"
+        "    if (r[n - 1] >> 63) {                      /* only the most negative value is allowed */\n"
+        "        if (!negative || r[n - 1] != (UINT64_C(1) << 63)) return true;\n"
+        "        for (int i = 0; i < n - 1; i++) if (r[i]) return true;\n"
+        "    }\n"
+        "    if (negative) clair_rt_big_negate(r, n);\n"
+        "    return false;\n"
+        "}\n"
+        "\n"
+        "/*\n"
+        " * q = a / b and m = a % b, truncated toward zero like Clair int.\n"
+        " * Returns 0, 1 for a division by zero, 2 for the most negative value / -1.\n"
+        " */\n"
+        "static int clair_rt_big_divmod(uint64_t *q, uint64_t *m, const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    bool minus_one = true, most_negative = a[n - 1] == (UINT64_C(1) << 63);\n"
+        "    for (int i = 0; i < n; i++) {\n"
+        "        if (b[i] != UINT64_MAX) minus_one = false;\n"
+        "        if (i < n - 1 && a[i]) most_negative = false;\n"
+        "    }\n"
+        "    if (most_negative && minus_one) return 2;\n"
+        "    uint64_t x[16], y[16];\n"
+        "    clair_rt_big_abs(x, a, n);\n"
+        "    clair_rt_big_abs(y, b, n);\n"
+        "    if (clair_rt_ubig_divmod(q, m, x, y, n)) return 1;\n"
+        "    if (clair_rt_big_is_neg(a, n) != clair_rt_big_is_neg(b, n)) clair_rt_big_negate(q, n);\n"
+        "    if (clair_rt_big_is_neg(a, n)) clair_rt_big_negate(m, n);\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "static inline int clair_rt_big_cmp(const uint64_t *a, const uint64_t *b, int n) {\n"
+        "    bool na = clair_rt_big_is_neg(a, n), nb = clair_rt_big_is_neg(b, n);\n"
+        "    if (na != nb) return na ? -1 : 1;\n"
+        "    return clair_rt_ubig_cmp(a, b, n);\n"
+        "}\n"
+        "\n"
+        "static inline void clair_rt_big_from_i64(uint64_t *r, int64_t v, int n) {\n"
+        "    r[0] = (uint64_t)v;\n"
+        "    for (int i = 1; i < n; i++) r[i] = v < 0 ? UINT64_MAX : 0;\n"
+        "}\n"
+        "\n"
+        "/*\n"
+        " * dst (nd words) = src (ns words), each signed or not.  Returns 0, 1 when a\n"
+        " * negative value would go into a uint, 2 when the value does not fit.\n"
+        " */\n"
+        "static inline int clair_rt_big_convert(uint64_t *dst, int nd, bool dst_signed, const uint64_t *src, int ns, bool src_signed) {\n"
+        "    bool negative = src_signed && clair_rt_big_is_neg(src, ns);\n"
+        "    if (negative && !dst_signed) return 1;\n"
+        "    uint64_t ext = negative ? UINT64_MAX : 0;\n"
+        "    for (int i = 0; i < nd; i++) dst[i] = i < ns ? src[i] : ext;\n"
+        "    for (int i = nd; i < ns; i++) if (src[i] != ext) return 2;\n"
+        "    if (dst_signed && clair_rt_big_is_neg(dst, nd) != negative) return 2;\n"
+        "    return 0;\n"
+        "}\n"
+        "\n"
+        "static double clair_rt_big_to_double(const uint64_t *a, int n) {\n"
+        "    uint64_t x[16];\n"
+        "    clair_rt_big_abs(x, a, n);\n"
+        "    double d = clair_rt_ubig_to_double(x, n);\n"
+        "    return clair_rt_big_is_neg(a, n) ? -d : d;\n"
+        "}\n"
+        "\n"
+        "static void clair_rt_big_print(const uint64_t *a, int n) {\n"
+        "    uint64_t x[16];\n"
+        "    clair_rt_big_abs(x, a, n);\n"
+        "    clair_rt_ubig_print(x, n, clair_rt_big_is_neg(a, n));\n"
+        "}\n",
+        f
+    );
+    fputc('\n', f);
+    for (int t = 0; t < 8; t++) {
         if (!used[t]) continue;
-        int b = bits[t], n = b / 64;
-        fprintf(f,
-            "typedef struct { uint64_t w[%d]; } ClairInt%d;\n\n"
-            "static inline ClairInt%d clair_i%d_from_i64(int64_t v) {\n"
-            "    ClairInt%d r;\n"
-            "    clair_rt_big_from_i64(r.w, v, %d);\n"
-            "    return r;\n"
-            "}\n\n",
-            n, b, b, b, b, n);
+        int b = big_bits(big_types[t]), n = b / 64;
+        const char *type = c_type_name(big_types[t]), *name = big_types[t];
+        char tag = big_tag(name);
+        fprintf(f, "typedef struct { uint64_t w[%d]; } %s;\n\n", n, type);
+        if (tag == 'i') {
+            fprintf(f,
+                "static inline %s clair_i%d_from_i64(int64_t v) {\n"
+                "    %s r;\n"
+                "    clair_rt_big_from_i64(r.w, v, %d);\n"
+                "    return r;\n"
+                "}\n\n",
+                type, b, type, n);
+        } else {
+            fprintf(f,
+                "static inline %s clair_u%d_from_i64(int64_t v) {\n"
+                "    if (v < 0) clair_rt_big_fail(\"%s cannot hold a negative value\");\n"
+                "    %s r = { { (uint64_t)v } };\n"
+                "    return r;\n"
+                "}\n\n",
+                type, b, name, type);
+        }
         static const char *const ops[] = { "add", "sub", "mul" };
         for (int k = 0; k < 3; k++) {
+            const char *message = tag == 'u' && k == 1 ? " overflow: negative result" : " overflow";
             fprintf(f,
-                "static inline ClairInt%d clair_i%d_%s(ClairInt%d a, ClairInt%d b) {\n"
-                "    ClairInt%d r;\n"
-                "    if (clair_rt_big_%s(r.w, a.w, b.w, %d)) clair_rt_big_fail(\"int%d overflow\");\n"
+                "static inline %s clair_%c%d_%s(%s a, %s b) {\n"
+                "    %s r;\n"
+                "    if (clair_rt_%sbig_%s(r.w, a.w, b.w, %d)) clair_rt_big_fail(\"%s%s\");\n"
                 "    return r;\n"
                 "}\n\n",
-                b, b, ops[k], b, b, b, ops[k], n, b);
+                type, tag, b, ops[k], type, type, type, tag == 'u' ? "u" : "", ops[k], n, name, message);
+        }
+        if (tag == 'i') {
+            fprintf(f,
+                "static inline %s clair_i%d_div(%s a, %s b) {\n"
+                "    %s q, m;\n"
+                "    int status = clair_rt_big_divmod(q.w, m.w, a.w, b.w, %d);\n"
+                "    if (status == 1) clair_rt_big_fail(\"division by zero\");\n"
+                "    if (status == 2) clair_rt_big_fail(\"integer division overflow\");\n"
+                "    return q;\n"
+                "}\n\n"
+                "static inline %s clair_i%d_mod(%s a, %s b) {\n"
+                "    %s q, m;\n"
+                "    int status = clair_rt_big_divmod(q.w, m.w, a.w, b.w, %d);\n"
+                "    if (status == 1) clair_rt_big_fail(\"modulo by zero\");\n"
+                "    if (status == 2) return clair_i%d_from_i64(0);   /* most negative %% -1 */\n"
+                "    return m;\n"
+                "}\n\n"
+                "static inline %s clair_i%d_neg(%s a) {\n"
+                "    %s zero = { { 0 } }, r;\n"
+                "    if (clair_rt_big_sub(r.w, zero.w, a.w, %d)) clair_rt_big_fail(\"%s overflow\");\n"
+                "    return r;\n"
+                "}\n\n"
+                "static inline %s clair_i%d_abs(%s a) { return clair_rt_big_is_neg(a.w, %d) ? clair_i%d_neg(a) : a; }\n\n"
+                "static inline int clair_i%d_cmp(%s a, %s b) { return clair_rt_big_cmp(a.w, b.w, %d); }\n\n"
+                "static inline int64_t clair_i%d_to_i64(%s a) {\n"
+                "    uint64_t r[1];\n"
+                "    if (clair_rt_big_convert(r, 1, true, a.w, %d, true)) clair_rt_big_fail(\"int() argument out of range\");\n"
+                "    return (int64_t)r[0];\n"
+                "}\n\n"
+                "static inline double clair_i%d_to_double(%s a) { return clair_rt_big_to_double(a.w, %d); }\n\n"
+                "static inline void clair_i%d_print(%s a) { clair_rt_big_print(a.w, %d); }\n\n",
+                type, b, type, type, type, n,
+                type, b, type, type, type, n, b,
+                type, b, type, type, n, name,
+                type, b, type, n, b,
+                b, type, type, n,
+                b, type, n,
+                b, type, n,
+                b, type, n);
+        } else {
+            fprintf(f,
+                "static inline %s clair_u%d_div(%s a, %s b) {\n"
+                "    %s q, m;\n"
+                "    if (clair_rt_ubig_divmod(q.w, m.w, a.w, b.w, %d)) clair_rt_big_fail(\"division by zero\");\n"
+                "    return q;\n"
+                "}\n\n"
+                "static inline %s clair_u%d_mod(%s a, %s b) {\n"
+                "    %s q, m;\n"
+                "    if (clair_rt_ubig_divmod(q.w, m.w, a.w, b.w, %d)) clair_rt_big_fail(\"modulo by zero\");\n"
+                "    return m;\n"
+                "}\n\n"
+                "static inline int clair_u%d_cmp(%s a, %s b) { return clair_rt_ubig_cmp(a.w, b.w, %d); }\n\n"
+                "static inline int64_t clair_u%d_to_i64(%s a) {\n"
+                "    uint64_t r[1];\n"
+                "    if (clair_rt_big_convert(r, 1, true, a.w, %d, false)) clair_rt_big_fail(\"int() argument out of range\");\n"
+                "    return (int64_t)r[0];\n"
+                "}\n\n"
+                "static inline void clair_u%d_print(%s a) { clair_rt_ubig_print(a.w, %d, false); }\n\n",
+                type, b, type, type, type, n,
+                type, b, type, type, type, n,
+                b, type, type, n,
+                b, type, n,
+                b, type, n);
+            if (b == 1024) {
+                fputs("/* only a uint1024 can be beyond the largest double (about 1.8e308) */\n"
+                      "static inline double clair_u1024_to_double(ClairUInt1024 a) {\n"
+                      "    double d = clair_rt_ubig_to_double(a.w, 16);\n"
+                      "    if (d > DBL_MAX) clair_rt_big_fail(\"float() argument out of range\");\n"
+                      "    return d;\n"
+                      "}\n\n", f);
+            } else {
+                fprintf(f, "static inline double clair_u%d_to_double(%s a) { return clair_rt_ubig_to_double(a.w, %d); }\n\n",
+                        b, type, n);
+            }
         }
         fprintf(f,
-            "static inline ClairInt%d clair_i%d_div(ClairInt%d a, ClairInt%d b) {\n"
-            "    ClairInt%d q, m;\n"
-            "    int status = clair_rt_big_divmod(q.w, m.w, a.w, b.w, %d);\n"
-            "    if (status == 1) clair_rt_big_fail(\"division by zero\");\n"
-            "    if (status == 2) clair_rt_big_fail(\"integer division overflow\");\n"
-            "    return q;\n"
-            "}\n\n"
-            "static inline ClairInt%d clair_i%d_mod(ClairInt%d a, ClairInt%d b) {\n"
-            "    ClairInt%d q, m;\n"
-            "    int status = clair_rt_big_divmod(q.w, m.w, a.w, b.w, %d);\n"
-            "    if (status == 1) clair_rt_big_fail(\"modulo by zero\");\n"
-            "    if (status == 2) return clair_i%d_from_i64(0);   /* most negative %% -1 */\n"
-            "    return m;\n"
-            "}\n\n"
-            "static inline ClairInt%d clair_i%d_neg(ClairInt%d a) {\n"
-            "    ClairInt%d zero = { { 0 } }, r;\n"
-            "    if (clair_rt_big_sub(r.w, zero.w, a.w, %d)) clair_rt_big_fail(\"int%d overflow\");\n"
+            "static inline %s clair_%c%d_min(%s a, %s b) { return clair_%c%d_cmp(a, b) <= 0 ? a : b; }\n\n"
+            "static inline %s clair_%c%d_max(%s a, %s b) { return clair_%c%d_cmp(a, b) >= 0 ? a : b; }\n\n"
+            "/* a^e by squaring: a^13 = a * a^4 * a^8; overflow stops the program */\n"
+            "static inline %s clair_%c%d_pow(%s a, int64_t e) {\n"
+            "    if (e < 0) clair_rt_big_fail(\"pow() exponent must not be negative\");\n"
+            "    %s r = clair_%c%d_from_i64(1);\n"
+            "    while (e > 0) {\n"
+            "        if (e & 1) r = clair_%c%d_mul(r, a);\n"
+            "        e >>= 1;\n"
+            "        if (e > 0) a = clair_%c%d_mul(a, a);\n"
+            "    }\n"
             "    return r;\n"
-            "}\n\n"
-            "static inline int clair_i%d_cmp(ClairInt%d a, ClairInt%d b) { return clair_rt_big_cmp(a.w, b.w, %d); }\n\n"
-            "static inline int64_t clair_i%d_to_i64(ClairInt%d a) {\n"
-            "    uint64_t r[1];\n"
-            "    if (clair_rt_big_resize(r, 1, a.w, %d)) clair_rt_big_fail(\"int() argument out of range\");\n"
-            "    return (int64_t)r[0];\n"
-            "}\n\n"
-            "static inline double clair_i%d_to_double(ClairInt%d a) { return clair_rt_big_to_double(a.w, %d); }\n\n"
-            "static inline void clair_i%d_print(ClairInt%d a) { clair_rt_big_print(a.w, %d); }\n\n",
-            b, b, b, b, b, n,
-            b, b, b, b, b, n, b,
-            b, b, b, b, n, b,
-            b, b, b, n,
-            b, b, n,
-            b, b, n,
-            b, b, n);
+            "}\n\n",
+            type, tag, b, type, type, tag, b,
+            type, tag, b, type, type, tag, b,
+            type, tag, b, type,
+            type, tag, b,
+            tag, b,
+            tag, b);
     }
-    /* conversions between the widths in use: widening never fails */
-    for (int t = 0; t < 4; t++) {
-        for (int u = 0; u < 4; u++) {
+    /* conversions between the types in use: widening never fails */
+    for (int t = 0; t < 8; t++) {
+        for (int u = 0; u < 8; u++) {
             if (t == u || !used[t] || !used[u]) continue;
-            fprintf(f,
-                "static inline ClairInt%d clair_i%d_from_i%d(ClairInt%d a) {\n"
-                "    ClairInt%d r;\n"
-                "    if (clair_rt_big_resize(r.w, %d, a.w, %d)) clair_rt_big_fail(\"int%d() argument out of range\");\n"
-                "    return r;\n"
-                "}\n\n",
-                bits[t], bits[t], bits[u], bits[u], bits[t], bits[t] / 64, bits[u] / 64, bits[t]);
+            const char *to = big_types[t], *from = big_types[u];
+            int bt = big_bits(to), bu = big_bits(from);
+            char tt = big_tag(to), tu = big_tag(from);
+            fprintf(f, "static inline %s clair_%c%d_from_%c%d(%s a) {\n    %s r;\n", c_type_name(to), tt, bt, tu, bu,
+                    c_type_name(from), c_type_name(to));
+            if (tt == 'i' && tu == 'i') {
+                fprintf(f, "    if (clair_rt_big_convert(r.w, %d, true, a.w, %d, true)) clair_rt_big_fail(\"%s() argument out of range\");\n",
+                        bt / 64, bu / 64, to);
+            } else {
+                fprintf(f, "    int status = clair_rt_big_convert(r.w, %d, %s, a.w, %d, %s);\n", bt / 64,
+                        tt == 'i' ? "true" : "false", bu / 64, tu == 'i' ? "true" : "false");
+                if (tt == 'u' && tu == 'i') fprintf(f, "    if (status == 1) clair_rt_big_fail(\"%s cannot hold a negative value\");\n", to);
+                fprintf(f, "    if (status == 2) clair_rt_big_fail(\"%s() argument out of range\");\n", to);
+            }
+            fputs("    return r;\n}\n\n", f);
         }
     }
 }
@@ -5031,6 +5186,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
     if (uses_input_int) fputs("#include <errno.h>\n", f);
     if (uses_cores) fputs("#include <pthread.h>\n#include <sched.h>\n#include <stdatomic.h>\n#include <time.h>\n", f);
     if (node_uses_math(program) || program_uses_big(program)) fputs("#include <math.h>\n", f);
+    if (node_uses_type(program, "uint1024")) fputs("#include <float.h>\n", f);
     fputc('\n', f);
     if (program_uses_big(program)) emit_big_runtime(f, program);
 

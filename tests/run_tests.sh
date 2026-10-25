@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.31 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.32 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -632,6 +632,18 @@ expect_runtime_error big_narrow_runtime '123456789012345678' 'Clair runtime erro
 expect_compile_error invalid_int_literal_too_large "integer 9223372036854775808 is too large for int (64 bits): use int128, int256, int512 or int1024"
 expect_compile_error invalid_big_literal_too_large "integer 170141183460469231731687303715884105728 is too large for int128"
 expect_compile_error invalid_big_float_mix "operator '+' cannot mix int256 and float: convert with float(x)"
+
+./build/clair tests/big_unsigned.cl -o build/test_big_unsigned
+[ "$(./build/test_big_unsigned)" = "$(cat tests/big_unsigned.expected)" ]
+grep -Fq 'r = clair_u1024_mul(r, clair_u1024_from_i64(i));' build/test_big_unsigned.generated.c
+grep -Fq 'clair_u128_print(clair_u128_pow(b, 30));' build/test_big_unsigned.generated.c
+printf '%s\n' 'big_unsigned.cl : OK -> uint128 a uint1024 : 160!, 200 parmi 100, generateur 128 bits ; abs, min, max, pow exacts'
+expect_runtime_error big_unsigned_negative_runtime '2' 'Clair runtime error: uint128 overflow: negative result'
+expect_runtime_error big_unsigned_from_negative_runtime '7' 'Clair runtime error: uint256 cannot hold a negative value'
+expect_runtime_error big_pow_negative_runtime '9' 'Clair runtime error: pow() exponent must not be negative'
+expect_compile_error invalid_unsigned_negative "uint128 cannot hold the negative integer -5"
+expect_compile_error invalid_unsigned_mix "operator '+' cannot mix uint128 and int256: convert one of them with int256(x) or uint256(x)"
+expect_compile_error invalid_unsigned_minus "unary '-' is not allowed on uint128 (never negative): convert with int256(x)"
 
 ./build/clair tests/matvec_rows.cl -o build/test_matvec_rows
 [ "$(./build/test_matvec_rows)" = "$(cat tests/matvec_rows.expected)" ]

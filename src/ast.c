@@ -50,7 +50,7 @@ void ast_free(AstNode *node) {
     free(node);
 }
 
-int clair_decimal_to_words(const char *text, uint64_t *out, int words) {
+int clair_decimal_to_words(const char *text, uint64_t *out, int words, int is_unsigned) {
     /* 32-bit halves keep the arithmetic portable (no 128-bit type needed) */
     uint32_t half[2 * 16 + 1] = { 0 };
     int halves = 2 * words;
@@ -70,6 +70,11 @@ int clair_decimal_to_words(const char *text, uint64_t *out, int words) {
     }
     for (int i = 0; i < words; i++) out[i] = (uint64_t)half[2 * i] | ((uint64_t)half[2 * i + 1] << 32);
 
+    if (is_unsigned) {                            /* 0 .. 2^(64w) - 1 */
+        if (!negative) return 1;
+        for (int i = 0; i < words; i++) if (out[i]) return 0;
+        return 1;                                 /* -0 */
+    }
     int top_bit = (int)(out[words - 1] >> 63);
     if (!negative) return !top_bit;               /* at most 2^(64w-1) - 1 */
     if (top_bit) {                                /* only 2^(64w-1) itself */

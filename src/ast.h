@@ -58,8 +58,9 @@ void ast_free(AstNode *node);
 /*
  * Integer literal text (decimal digits, optionally after a '-') to `words`
  * 64-bit words, least significant first, two's complement.  Returns 1 when
- * the value fits in a signed integer of 64 * words bits (words <= 16).
+ * the value fits in a signed integer of 64 * words bits (words <= 16), or,
+ * with is_unsigned, in 0 .. 2^(64 * words) - 1.
  */
-int clair_decimal_to_words(const char *text, uint64_t *out, int words);
+int clair_decimal_to_words(const char *text, uint64_t *out, int words, int is_unsigned);
 
 #endif
