@@ -41,6 +41,25 @@ int ast_set_type(AstNode *node, const char *type_name, size_t type_len) {
     return 1;
 }
 
+AstNode *ast_clone(const AstNode *node) {
+    if (!node) return NULL;
+    AstNode *copy = ast_new(node->kind, node->text, node->text ? strlen(node->text) : 0);
+    if (!copy) return NULL;
+    if (node->type_name && !ast_set_type(copy, node->type_name, strlen(node->type_name))) {
+        ast_free(copy);
+        return NULL;
+    }
+    for (size_t i = 0; i < node->child_count; i++) {
+        AstNode *child = ast_clone(node->children[i]);
+        if ((node->children[i] && !child) || !ast_add_child(copy, child)) {
+            ast_free(child);
+            ast_free(copy);
+            return NULL;
+        }
+    }
+    return copy;
+}
+
 void ast_free(AstNode *node) {
     if (!node) return;
     for (size_t i = 0; i < node->child_count; i++) ast_free(node->children[i]);

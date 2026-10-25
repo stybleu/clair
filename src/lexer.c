@@ -121,10 +121,18 @@ Token lexer_next(Lexer *l) {
         case ':': return make_token(TOKEN_COLON, l->source + start_pos, 1, line, column);
         case ',': return make_token(TOKEN_COMMA, l->source + start_pos, 1, line, column);
         case '.': return make_token(TOKEN_DOT, l->source + start_pos, 1, line, column);
-        case '+': return make_token(TOKEN_PLUS, l->source + start_pos, 1, line, column);
-        case '*': return make_token(TOKEN_STAR, l->source + start_pos, 1, line, column);
-        case '/': return make_token(TOKEN_SLASH, l->source + start_pos, 1, line, column);
-        case '%': return make_token(TOKEN_PERCENT, l->source + start_pos, 1, line, column);
+        case '+':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_PLUS_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_PLUS, l->source + start_pos, 1, line, column);
+        case '*':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_STAR_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_STAR, l->source + start_pos, 1, line, column);
+        case '/':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_SLASH_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_SLASH, l->source + start_pos, 1, line, column);
+        case '%':
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_PERCENT_EQUAL, l->source + start_pos, 2, line, column); }
+            return make_token(TOKEN_PERCENT, l->source + start_pos, 1, line, column);
         case '=':
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_EQUAL_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_EQUAL, l->source + start_pos, 1, line, column);
@@ -139,6 +147,7 @@ Token lexer_next(Lexer *l) {
             return make_token(TOKEN_GREATER, l->source + start_pos, 1, line, column);
         case '-':
             if (peek(l) == '>') { advance(l); return make_token(TOKEN_ARROW, l->source + start_pos, 2, line, column); }
+            if (peek(l) == '=') { advance(l); return make_token(TOKEN_MINUS_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_MINUS, l->source + start_pos, 1, line, column);
         default: return make_token(TOKEN_ERROR, l->source + start_pos, 1, line, column);
     }
@@ -159,6 +168,8 @@ const char *token_kind_name(TokenKind kind) {
         case TOKEN_EQUAL_EQUAL: return "=="; case TOKEN_BANG_EQUAL: return "!="; case TOKEN_LESS: return "<";
         case TOKEN_LESS_EQUAL: return "<="; case TOKEN_GREATER: return ">"; case TOKEN_GREATER_EQUAL: return ">=";
         case TOKEN_PLUS: return "+"; case TOKEN_MINUS: return "-"; case TOKEN_STAR: return "*"; case TOKEN_SLASH: return "/"; case TOKEN_PERCENT: return "%";
+        case TOKEN_PLUS_EQUAL: return "+="; case TOKEN_MINUS_EQUAL: return "-="; case TOKEN_STAR_EQUAL: return "*=";
+        case TOKEN_SLASH_EQUAL: return "/="; case TOKEN_PERCENT_EQUAL: return "%=";
         case TOKEN_ERROR: return "error";
     }
     return "unknown";

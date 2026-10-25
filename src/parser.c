@@ -174,6 +174,57 @@ static AstNode *parse_atom(Parser *p) {
     return NULL;
 }
 
+/*
+ * xs[a:b], xs[:b], xs[a:], xs[::c] ...  (after '[' and the optional first
+ * bound): the call @slice<s><e><c> whose children are the list, then the
+ * bounds that are written, <s><e><c> being 1 for a written part, 0 otherwise.
+ */
+static AstNode *parse_slice_after(Parser *p, AstNode *base, AstNode *start) {
+    AstNode *parts[3] = { start, NULL, NULL };
+    if (p->current.kind != TOKEN_COLON) {
+        fprintf(stderr, "parse error at %zu:%zu: expected an index or a slice between [ and ]\n",
+                p->current.line, p->current.column);
+        p->had_error = 1;
+        ast_free(start);
+        ast_free(base);
+        return NULL;
+    }
+    next(p);
+    for (int k = 1; k < 3; k++) {
+        if (p->current.kind != TOKEN_COLON && p->current.kind != TOKEN_RBRACKET) {
+            parts[k] = parse_expression(p);
+            if (!parts[k]) {
+                for (int j = 0; j < 3; j++) ast_free(parts[j]);
+                ast_free(base);
+                return NULL;
+            }
+        }
+        if (k == 1 && p->current.kind == TOKEN_COLON) next(p);
+        else break;
+    }
+    if (!expect(p, TOKEN_RBRACKET, "']'")) {
+        for (int j = 0; j < 3; j++) ast_free(parts[j]);
+        ast_free(base);
+        return NULL;
+    }
+    char name[16];
+    snprintf(name, sizeof(name), "@slice%d%d%d", parts[0] != NULL, parts[1] != NULL, parts[2] != NULL);
+    AstNode *call = ast_new(AST_CALL, name, strlen(name));
+    int ok = call && ast_add_child(call, base);
+    if (!ok) ast_free(base);
+    for (int k = 0; k < 3; k++) {
+        if (!parts[k]) continue;
+        if (ok && ast_add_child(call, parts[k])) continue;
+        ok = 0;
+        ast_free(parts[k]);
+    }
+    if (!ok) {
+        ast_free(call);
+        return NULL;
+    }
+    return call;
+}
+
 static AstNode *parse_primary(Parser *p) {
     AstNode *base = parse_atom(p);
     if (!base) return NULL;
@@ -181,8 +232,18 @@ static AstNode *parse_primary(Parser *p) {
     for (;;) {
         if (p->current.kind == TOKEN_LBRACKET) {
             next(p);
+            if (p->current.kind == TOKEN_COLON || p->current.kind == TOKEN_RBRACKET) {
+                base = parse_slice_after(p, base, NULL);
+                if (!base) return NULL;
+                continue;
+            }
             AstNode *index = parse_expression(p);
             if (!index) { ast_free(base); return NULL; }
+            if (p->current.kind == TOKEN_COLON) {
+                base = parse_slice_after(p, base, index);
+                if (!base) return NULL;
+                continue;
+            }
             if (!expect(p, TOKEN_RBRACKET, "']'")) {
                 ast_free(index);
                 ast_free(base);
@@ -527,11 +588,124 @@ static AstNode *parse_while_statement(Parser *p) {
     return n;
 }
 
+static AstNode *parse_for_statement(Parser *p);
+
+static AstNode *identifier_node(const char *name) { return ast_new(AST_IDENTIFIER, name, strlen(name)); }
+
+/*
+ *   for i, v in enumerate(xs, start) { body }
+ * is read as (start evaluated once, 0 when absent):
+ *   let @enumN: int = start
+ *   for v in xs { let i: int = @enumN ; @enumN = @enumN + 1 ; body }
+ * returned as a block marked "@splice": its statements go straight into the
+ * enclosing block.  The hidden name becomes clair_h_enumN in C.
+ */
+/* name (as a variable) somewhere in n */
+static int mentions_name(const AstNode *n, const char *name, size_t len) {
+    if (!n) return 0;
+    if (n->text && strlen(n->text) == len && strncmp(n->text, name, len) == 0 &&
+        (n->kind == AST_IDENTIFIER || n->kind == AST_ASSIGN || n->kind == AST_INDEX_ASSIGN ||
+         n->kind == AST_MATRIX_SET || n->kind == AST_LIST_APPEND)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (mentions_name(n->children[i], name, len)) return 1;
+    }
+    return 0;
+}
+
+/* 1, -1: nothing to evaluate */
+static int is_plain_literal(const AstNode *n) {
+    if (n->kind == AST_INTEGER) return 1;
+    return n->kind == AST_UNARY && n->child_count == 1 && n->children[0]->kind == AST_INTEGER;
+}
+
+static AstNode *parse_enumerate_after(Parser *p, Token index) {
+    next(p);                                                    /* , */
+    Token value = p->current;
+    if (!expect(p, TOKEN_IDENTIFIER, "loop variable")) return NULL;
+    if (!expect(p, TOKEN_IN, "in")) return NULL;
+    if (p->current.kind != TOKEN_IDENTIFIER || p->current.length != 9 ||
+        strncmp(p->current.start, "enumerate", 9) != 0) {
+        fprintf(stderr, "parse error at %zu:%zu: for %.*s, %.*s in ... needs enumerate(list)\n",
+                p->current.line, p->current.column, (int)index.length, index.start, (int)value.length, value.start);
+        p->had_error = 1;
+        return NULL;
+    }
+    next(p);
+    if (!expect(p, TOKEN_LPAREN, "'('")) return NULL;
+    AstNode *list = parse_expression(p);
+    if (!list) return NULL;
+    AstNode *start = NULL;
+    if (p->current.kind == TOKEN_COMMA) {
+        next(p);
+        start = parse_expression(p);
+        if (!start) { ast_free(list); return NULL; }
+    }
+    if (!expect(p, TOKEN_RPAREN, "')'") || !expect(p, TOKEN_LBRACE, "'{'")) {
+        ast_free(list);
+        ast_free(start);
+        return NULL;
+    }
+    p->loop_depth++;
+    AstNode *body = parse_block(p);
+    p->loop_depth--;
+    if (!body || !expect(p, TOKEN_RBRACE, "'}'")) {
+        ast_free(list);
+        ast_free(start);
+        ast_free(body);
+        return NULL;
+    }
+    if (!mentions_name(body, index.start, index.length)) {
+        /* the index is not used: an ordinary for v in xs (a start written as a number changes nothing) */
+        if (!start || is_plain_literal(start)) {
+            ast_free(start);
+            AstNode *loop = ast_new(AST_FOR_EACH, value.start, value.length);
+            if (!loop || !ast_add_child(loop, list) || !ast_add_child(loop, body)) {
+                fprintf(stderr, "clair: out of memory\n");
+                exit(EXIT_FAILURE);
+            }
+            return loop;
+        }
+    }
+    if (!start) start = ast_new(AST_INTEGER, "0", 1);
+
+    char hidden[32];
+    snprintf(hidden, sizeof(hidden), "@enum%zu", ++p->hidden_count);
+    AstNode *counter = ast_new(AST_LET, hidden, strlen(hidden));
+    AstNode *loop = ast_new(AST_FOR_EACH, value.start, value.length);
+    AstNode *let_index = ast_new(AST_LET, index.start, index.length);
+    AstNode *read = identifier_node(hidden);
+    AstNode *step = ast_new(AST_ASSIGN, hidden, strlen(hidden));
+    AstNode *plus = ast_new(AST_BINARY, "+", 1);
+    AstNode *old = identifier_node(hidden);
+    AstNode *one = ast_new(AST_INTEGER, "1", 1);
+    AstNode *block = ast_new(AST_BLOCK, "@splice", 7);
+    AstNode *inner = ast_new(AST_BLOCK, NULL, 0);
+    AstNode *all[] = { counter, loop, let_index, read, step, plus, old, one, block, inner, start };
+    int ok = 1;
+    for (size_t k = 0; k < sizeof(all) / sizeof(all[0]); k++) ok = ok && all[k];
+    ok = ok && ast_set_type(counter, "int", 3) && ast_set_type(let_index, "int", 3) &&
+         ast_add_child(counter, start) && ast_add_child(let_index, read) &&
+         ast_add_child(plus, old) && ast_add_child(plus, one) && ast_add_child(step, plus) &&
+         ast_add_child(inner, let_index) && ast_add_child(inner, step);
+    for (size_t k = 0; ok && k < body->child_count; k++) ok = ast_add_child(inner, body->children[k]);
+    if (ok) body->child_count = 0;
+    ok = ok && ast_add_child(loop, list) && ast_add_child(loop, inner) &&
+         ast_add_child(block, counter) && ast_add_child(block, loop);
+    ast_free(body);
+    if (!ok) {
+        /* allocation failure: give up (the pieces may be partly linked) */
+        fprintf(stderr, "clair: out of memory\n");
+        exit(EXIT_FAILURE);
+    }
+    return block;
+}
+
 static AstNode *parse_for_statement(Parser *p) {
     if (!expect(p, TOKEN_FOR, "for")) return NULL;
 
     Token name = p->current;
     if (!expect(p, TOKEN_IDENTIFIER, "loop variable")) return NULL;
+    if (p->current.kind == TOKEN_COMMA) return parse_enumerate_after(p, name);
     if (!expect(p, TOKEN_IN, "in")) return NULL;
 
     if (p->current.kind != TOKEN_RANGE) {
@@ -803,11 +977,43 @@ static AstNode *make_write(AstKind kind, AstNode *target, AstNode **children, si
     return n;
 }
 
+/* "+" for +=, ... ; NULL for any other token */
+static const char *compound_operator(TokenKind kind) {
+    switch (kind) {
+        case TOKEN_PLUS_EQUAL: return "+";
+        case TOKEN_MINUS_EQUAL: return "-";
+        case TOKEN_STAR_EQUAL: return "*";
+        case TOKEN_SLASH_EQUAL: return "/";
+        case TOKEN_PERCENT_EQUAL: return "%";
+        default: return NULL;
+    }
+}
+
+/*
+ * A call inside the target of x[...] += v, which would run twice (read, then
+ * write).  len, rows, cols, abs, min, max, int and float only compute.
+ */
+static const AstNode *target_call(const AstNode *n) {
+    if (!n) return NULL;
+    if (n->kind == AST_METHOD_CALL) return n;
+    if (n->kind == AST_CALL && n->text) {
+        static const char *const pure[] = { "len", "rows", "cols", "abs", "min", "max", "int", "float", NULL };
+        int known = 0;
+        for (size_t i = 0; pure[i]; i++) known |= strcmp(n->text, pure[i]) == 0;
+        if (!known) return n;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        const AstNode *call = target_call(n->children[i]);
+        if (call) return call;
+    }
+    return NULL;
+}
+
 /*
  * Statements that start with an identifier.  The left-hand side is parsed
  * as an ordinary expression, then its shape decides the statement:
  *
- *   name = value                 assignment
+ *   name = value                 assignment (also +=, -=, *=, /=, %=)
  *   name[index] = value          indexed assignment
  *   a.b.field = value            field assignment (any object expression)
  *   name.append(value)           list append
@@ -837,12 +1043,51 @@ static AstNode *parse_identifier_statement(Parser *p) {
         return n;
     }
 
-    if (p->current.kind == TOKEN_EQUAL) {
+    const char *compound = compound_operator(p->current.kind);
+    if (p->current.kind == TOKEN_EQUAL || compound) {
+        Token op = p->current;
         next(p);
         AstNode *value = parse_expression(p);
         if (!value) {
             ast_free(lhs);
             return NULL;
+        }
+        if (compound) {
+            /* x += v is x = x + v: same code, same fast loops (s += w[i] * x[i]) */
+            if (lhs->kind != AST_IDENTIFIER && lhs->kind != AST_INDEX && lhs->kind != AST_MEMBER) {
+                fprintf(stderr, "parse error at %zu:%zu: invalid target for '%s'\n",
+                        start.line, start.column, token_kind_name(op.kind));
+                p->had_error = 1;
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+            }
+            const AstNode *call = target_call(lhs);
+            if (call) {
+                fprintf(stderr, "parse error at %zu:%zu: '%s' would call %s() twice: "
+                                "put its result in a variable first\n",
+                        op.line, op.column, token_kind_name(op.kind), call->text);
+                p->had_error = 1;
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+            }
+            AstNode *current = ast_clone(lhs);
+            AstNode *bin = current ? ast_new(AST_BINARY, compound, 1) : NULL;
+            if (!bin || !ast_add_child(bin, current)) {
+                ast_free(bin);
+                ast_free(current);
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+            }
+            if (!ast_add_child(bin, value)) {
+                ast_free(bin);
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+            }
+            value = bin;
         }
 
         AstNode *n = NULL;
@@ -890,6 +1135,14 @@ static AstNode *parse_identifier_statement(Parser *p) {
                 break;
 
             default:
+                if (lhs->kind == AST_CALL && lhs->text && strncmp(lhs->text, "@slice", 6) == 0) {
+                    fprintf(stderr, "parse error at %zu:%zu: a slice xs[a:b] cannot be assigned: "
+                                    "change the elements one by one\n", start.line, start.column);
+                    p->had_error = 1;
+                    ast_free(value);
+                    ast_free(lhs);
+                    return NULL;
+                }
                 fprintf(stderr, "parse error at %zu:%zu: invalid assignment target\n",
                         start.line, start.column);
                 p->had_error = 1;
@@ -1011,6 +1264,19 @@ static AstNode *parse_block(Parser *p) {
     while (p->current.kind != TOKEN_RBRACE && p->current.kind != TOKEN_EOF) {
         AstNode *stmt = parse_statement(p);
         if (!stmt) { ast_free(block); return NULL; }
+        if (stmt->kind == AST_BLOCK && stmt->text && strcmp(stmt->text, "@splice") == 0) {
+            /* several statements made from one (enumerate) */
+            for (size_t i = 0; i < stmt->child_count; i++) {
+                if (!ast_add_child(block, stmt->children[i])) {
+                    ast_free(stmt);
+                    ast_free(block);
+                    return NULL;
+                }
+                stmt->children[i] = NULL;
+            }
+            ast_free(stmt);
+            continue;
+        }
         if (!ast_add_child(block, stmt)) {
             ast_free(stmt);
             ast_free(block);
@@ -1209,6 +1475,7 @@ void parser_init(Parser *p, const char *source) {
     lexer_init(&p->lexer, source);
     p->had_error = 0;
     p->loop_depth = 0;
+    p->hidden_count = 0;
     next(p);
 }
 

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.32 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.33 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -561,7 +561,7 @@ expect_runtime_error matrix_negative_runtime '' 'Clair runtime error: matrix() s
 out_field_writes="$(./build/test_field_writes)"
 expected_field_writes="$(printf '3\n0.5\n8.5\n14.5\n2\n2\n7\n9\n42\n3\n0\n1')"
 [ "$out_field_writes" = "$expected_field_writes" ]
-grep -Fq 's = s + clair_data_self__w[i * clair_cols_self__w + j] * clair_data_x[j];' build/test_field_writes.generated.c
+grep -Fq 's += clair_data_self__w[i * clair_cols_self__w + j] * clair_data_x[j];' build/test_field_writes.generated.c
 printf '%s\n' 'field_writes.cl : OK -> obj.items[i] = x, obj.w[i][j] = x, obj.items.append(x), boucles rapides sur self.w'
 
 ./build/clair tests/xor_training.cl -o build/test_xor_training
@@ -612,6 +612,18 @@ printf '%s\n' 'for_each.cl : OK -> for v in liste, comme Python (liste qui grand
 expect_compile_error invalid_for_each_type "for ... in needs a list, got int"
 expect_compile_error invalid_for_each_matrix "for ... in needs a list, got matrix[float]: use for i in range(rows(m))"
 expect_compile_error invalid_for_each_element "operator '+' requires two numbers or two strings"
+
+./build/clair tests/syntaxe_python.cl -o build/test_syntaxe_python
+[ "$(./build/test_syntaxe_python)" = "$(cat tests/syntaxe_python.expected)" ]
+grep -Fq '    n += 5;' build/test_syntaxe_python.generated.c
+grep -Fq 'if (clair_rt_matmul_ok(a, b, c, a->rows, b->cols, a->cols)) {' build/test_syntaxe_python.generated.c
+grep -Fq 'clair_rt_layer_f64(w->rows, w->cols, clair_layer_couche_1, &clair_layer);' build/test_syntaxe_python.generated.c
+printf '%s\n' 'syntaxe_python.cl : OK -> += -= *= /= %=, enumerate, tranches xs[a:b:c] ; identique a Python, boucles += reconnues'
+expect_runtime_error slice_step_zero_runtime '2' 'Clair runtime error: slice step cannot be zero'
+expect_compile_error invalid_compound_call "'+=' would call suivant() twice: put its result in a variable first"
+expect_compile_error invalid_slice_assign "a slice xs[a:b] cannot be assigned: change the elements one by one"
+expect_compile_error invalid_enumerate "for i, v in ... needs enumerate(list)"
+expect_compile_error invalid_slice_type "slices [a:b] work on lists and strings, got matrix[float]"
 
 ./build/clair tests/matmul_blocks.cl -o build/test_matmul_blocks
 out_matmul_blocks="$(./build/test_matmul_blocks)"

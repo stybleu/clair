@@ -54,6 +54,8 @@ AstNode *ast_new(AstKind kind, const char *text, size_t text_len);
 int ast_add_child(AstNode *parent, AstNode *child);
 int ast_set_type(AstNode *node, const char *type_name, size_t type_len);
 void ast_free(AstNode *node);
+/* deep copy (x[i] += v is written x[i] = x[i] + v) */
+AstNode *ast_clone(const AstNode *node);
 
 /*
  * Integer literal text (decimal digits, optionally after a '-') to `words`

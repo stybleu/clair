@@ -8,7 +8,8 @@ Son compilateur est écrit en C et utilise Clang.
 - Types int, float, bool et string
 - Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres) et sans signe `uint128` .. `uint1024`, avec `abs`, `min`, `max`, `pow` exacts ; dépassements détectés
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
-- Fonctions, conditions et boucles, dont `for v in liste` comme en Python
+- Fonctions, conditions et boucles, dont `for v in liste` et `for i, v in enumerate(liste)` comme en Python
+- `x += v`, `-=`, `*=`, `/=`, `%=` ; tranches `xs[a:b:pas]` sur les listes et les chaînes, avec les règles de Python
 - Listes et dictionnaires typés
 - Matrices `matrix[float]` et `matrix[int]` : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
@@ -83,6 +84,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.33](docs/README_V0.33.md) : `+=` et ses cousins, `enumerate`, tranches `xs[a:b:pas]`
 - [Clair V0.32](docs/README_V0.32.md) : entiers sans signe `uint128` .. `uint1024`, `abs`, `min`, `max`, `pow` exacts sur les grands entiers
 - [Clair V0.31](docs/README_V0.31.md) : toute la couche dense sur tous les cœurs (sigmoïde comprise), partage plus léger
 - [Clair V0.30](docs/README_V0.30.md) : grands produits de matrices et couches denses sur tous les cœurs

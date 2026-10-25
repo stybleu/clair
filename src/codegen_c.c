@@ -195,6 +195,7 @@ static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
     if (strcmp(call->text, "@matrix") == 0) return 0;
     if (strcmp(call->text, "@convert") == 0) return 0;     /* narrowing big integers is checked */
+    if (strncmp(call->text, "@slice", 6) == 0) return 0;   /* a step of 0 stops the program */
     if (big_bits(call->type_name)) return 0;               /* abs, min, max, pow of big integers */
     if (strcmp(call->text, "@int") == 0)
         return call->child_count == 1 && !(call->children[0]->type_name &&
@@ -2318,6 +2319,7 @@ static int fresh_expr(const AstNode *e) {
     if (!e) return 0;
     if (e->kind == AST_LIST && is_list_type(e->type_name)) return 1;
     if (e->kind == AST_CALL && e->text && strcmp(e->text, "@matrix") == 0) return 1;
+    if (e->kind == AST_CALL && e->text && strncmp(e->text, "@slice", 6) == 0 && is_list_type(e->type_name)) return 1;
     if (e->kind == AST_CALL && e->text && e->text[0] != '@' && is_fresh_fn(e->text)) return 1;
     return 0;
 }
@@ -2337,6 +2339,7 @@ static int own_expr_ok(const AstNode *n, const char *name, int visible, const As
         if (parent->kind == AST_CALL && parent->text) {
             const char *callee = parent->text;
             if (strcmp(callee, "len") == 0 || strcmp(callee, "@rows") == 0 || strcmp(callee, "@cols") == 0) return 1;
+            if (strncmp(callee, "@slice", 6) == 0 && idx == 0) return 1;          /* v[a:b] copies */
             if (callee[0] != '@' && find_program_function(callee) && !param_escapes(callee, idx)) return 1;
         }
         return 0;
@@ -2812,6 +2815,23 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
         case AST_CALL:
             if (n->text && strcmp(n->text, "@convert") == 0) return emit_convert(f, n);
+            if (n->text && strncmp(n->text, "@slice", 6) == 0) {
+                /* xs[a:b:c]: clair_rt_list_slice(xs, a, b, c, missing bounds) like Python */
+                const char *written = n->text + 6;
+                size_t child = 1;
+                fputs(strcmp(n->type_name, "string") == 0 ? "clair_rt_string_slice(" : "clair_rt_list_slice(", f);
+                if (!emit_expr(f, n->children[0])) return 0;
+                for (int k = 0; k < 3; k++) {
+                    fputs(", ", f);
+                    if (written[k] == '1') { if (!emit_expr(f, n->children[child++])) return 0; }
+                    else fputs(k == 2 ? "1" : "0", f);
+                }
+                if (written[0] == '1' && written[1] == '1') fputs(", 0)", f);
+                else if (written[0] == '1') fputs(", CLAIR_NO_STOP)", f);
+                else if (written[1] == '1') fputs(", CLAIR_NO_START)", f);
+                else fputs(", CLAIR_NO_START | CLAIR_NO_STOP)", f);
+                return 1;
+            }
             if (n->text && n->text[0] == '@') {
                 const char *name = n->text + 1;
                 if (strcmp(name, "matrix") == 0) {
@@ -3467,6 +3487,22 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 indent(f, depth);
                 fputs("}\n", f);
                 return 1;
+            }
+            {
+                /* x = x + v is written x += v, like C written by hand (same machine code) */
+                const AstNode *v = n->children[0];
+                const char *op = v->kind == AST_BINARY && v->child_count == 2 && v->text ? v->text : "";
+                int plain = op[0] && !op[1] && strchr("+-*/%", op[0]) && is_ident(v->children[0], n->text) &&
+                            v->type_name && (strcmp(v->type_name, "int") == 0 || strcmp(v->type_name, "float") == 0) &&
+                            !(op[0] == '%' && strcmp(v->type_name, "float") == 0) &&
+                            !((op[0] == '/' || op[0] == '%') && strcmp(v->type_name, "int") == 0 && !int_div_is_safe(v));
+                int64_t folded;
+                if (plain && !const_int_value(v, &folded)) {
+                    fprintf(f, "%s %s= ", n->text, op);
+                    if (!emit_expr(f, v->children[1])) return 0;
+                    fputs(";\n", f);
+                    return 1;
+                }
             }
             fprintf(f, "%s = ", n->text);
             if (!emit_expr(f, n->children[0])) return 0;
@@ -4715,6 +4751,7 @@ static int node_uses_math(const AstNode *n) {
     if (n->kind == AST_CALL && n->text && n->text[0] == '@' &&
         strcmp(n->text, "@int") != 0 && strcmp(n->text, "@float") != 0 &&
         strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
+        strncmp(n->text, "@slice", 6) != 0 &&
         !(is_int_type(n->type_name) &&
           (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
     if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !is_int_type(n->type_name)) return 1;
@@ -4748,6 +4785,39 @@ static int node_uses_kind(const AstNode *n, AstKind kind) {
 /* ------------------------------------------------------------------ */
 /* Big integers int128 .. int1024 (runtime emitted only when used)    */
 /* ------------------------------------------------------------------ */
+
+/* slices of lists (strings = 0) or of strings (strings = 1) */
+static int node_uses_slice(const AstNode *n, int strings) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && strncmp(n->text, "@slice", 6) == 0 && n->type_name &&
+        (strcmp(n->type_name, "string") == 0) == strings) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_slice(n->children[i], strings)) return 1;
+    }
+    return 0;
+}
+
+/* Python's slice.indices(): the first index of xs[start:stop:step] and how many elements */
+static void emit_slice_count(FILE *f) {
+    fputs(
+        "#define CLAIR_NO_START 1   /* xs[:b] */\n"
+        "#define CLAIR_NO_STOP 2    /* xs[a:] */\n\n"
+        "static int64_t clair_rt_slice_count(int64_t len, int64_t *start, int64_t stop, int64_t step, int missing) {\n"
+        "    if (step == 0) { fputs(\"Clair runtime error: slice step cannot be zero\\n\", stderr); exit(EXIT_FAILURE); }\n"
+        "    int64_t lower = step < 0 ? -1 : 0, upper = step < 0 ? len - 1 : len;\n"
+        "    int64_t a = *start, b = stop;\n"
+        "    if (missing & CLAIR_NO_START) a = step < 0 ? upper : lower;\n"
+        "    else if (a < 0) { a += len; if (a < lower) a = lower; }   /* -1 is the last element */\n"
+        "    else if (a > upper) a = upper;\n"
+        "    if (missing & CLAIR_NO_STOP) b = step < 0 ? lower : upper;\n"
+        "    else if (b < 0) { b += len; if (b < lower) b = lower; }\n"
+        "    else if (b > upper) b = upper;\n"
+        "    *start = a;\n"
+        "    if (step < 0) return b < a ? (a - b - 1) / -step + 1 : 0;\n"
+        "    return a < b ? (b - a - 1) / step + 1 : 0;\n"
+        "}\n\n",
+        f);
+}
 
 static int node_uses_type(const AstNode *n, const char *type) {
     if (!n) return 0;
@@ -5267,7 +5337,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
             f
         );
 
-        int uses_list_literal = node_uses_kind(program, AST_LIST);
+        int uses_list_slice = node_uses_slice(program, 0);
+        int uses_list_literal = node_uses_kind(program, AST_LIST) || uses_list_slice;
         int uses_list_at = node_uses_kind(program, AST_INDEX) || node_uses_kind(program, AST_INDEX_ASSIGN);
         int uses_list_append = node_uses_kind(program, AST_LIST_APPEND);
 
@@ -5327,6 +5398,25 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "}\n\n",
                 f
             );
+            if (uses_list_slice) {
+                emit_slice_count(f);
+                fputs(
+                    "/* xs[start:stop:step]: a new list, like Python */\n"
+                    "static ClairList clair_rt_list_slice(ClairList xs, int64_t start, int64_t stop, int64_t step, int missing) {\n"
+                    "    int64_t count = clair_rt_slice_count((int64_t)xs->len, &start, stop, step, missing);\n"
+                    "    size_t size = xs->elem_size;\n"
+                    "    if (count == 0) return clair_rt_list_make(NULL, 0, size);\n"
+                    "    if (step == 1) return clair_rt_list_make((const char *)xs->data + (size_t)start * size, (size_t)count, size);\n"
+                    "    char *items = malloc((size_t)count * size);\n"
+                    "    if (!items) { fputs(\"Clair runtime error: out of memory while creating list\\n\", stderr); exit(EXIT_FAILURE); }\n"
+                    "    for (int64_t k = 0; k < count; k++) memcpy(items + (size_t)k * size, (const char *)xs->data + (size_t)(start + k * step) * size, size);\n"
+                    "    ClairList result = clair_rt_list_make(items, (size_t)count, size);\n"
+                    "    free(items);\n"
+                    "    return result;\n"
+                    "}\n\n",
+                    f
+                );
+            }
             if (own_decl_count > 0) {
                 fputs(
                     "/* A list nobody uses any more: freed now instead of at the end. */\n"
@@ -5429,8 +5519,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     int uses_objects = node_uses_kind(program, AST_CONSTRUCT);
     int uses_concat = node_uses_string_concat(program);
+    int uses_string_slice = node_uses_slice(program, 1);
 
-    if (uses_objects || uses_concat || uses_matrix) {
+    if (uses_objects || uses_concat || uses_matrix || uses_string_slice) {
         /*
          * Bump-pointer arena shared by objects and concatenated strings.
          * One allocation is a pointer increment instead of malloc() plus a
@@ -5967,6 +6058,21 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    void *object = clair_rt_arena_alloc(size);\n"
             "    memcpy(object, value, size);\n"
             "    return object;\n"
+            "}\n\n",
+            f
+        );
+    }
+
+    if (uses_string_slice) {
+        if (!node_uses_slice(program, 0)) emit_slice_count(f);
+        fputs(
+            "/* s[start:stop:step]: a new string, like Python (counted in bytes, like len) */\n"
+            "static const char *clair_rt_string_slice(const char *s, int64_t start, int64_t stop, int64_t step, int missing) {\n"
+            "    int64_t count = clair_rt_slice_count((int64_t)strlen(s), &start, stop, step, missing);\n"
+            "    char *result = clair_rt_arena_alloc((size_t)count + 1);\n"
+            "    for (int64_t k = 0; k < count; k++) result[k] = s[start + k * step];\n"
+            "    result[count] = '\\0';\n"
+            "    return result;\n"
             "}\n\n",
             f
         );

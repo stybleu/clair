@@ -773,6 +773,27 @@ static const char *check_matrix_make(Semantic *s, AstNode *n, const char *matrix
 
 static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char *expected);
 
+/* xs[a:b:c] (the parser's @slice call): a new list, or a new string; bounds are int */
+static const char *check_slice(Semantic *s, AstNode *n) {
+    const char *base = expr_type(s, n->children[0]);
+    if (!base) return NULL;
+    if (!is_list_type(base) && strcmp(base, "string") != 0) {
+        fprintf(stderr, "semantic error: slices [a:b] work on lists and strings, got %s\n", base);
+        s->had_error = 1;
+        return NULL;
+    }
+    for (size_t i = 1; i < n->child_count; i++) {
+        const char *t = expr_type(s, n->children[i]);
+        if (!t) return NULL;
+        if (strcmp(t, "int") != 0) {
+            fprintf(stderr, "semantic error: slice bounds must be int, got %s\n", t);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    return set_type(n, base) ? n->type_name : NULL;
+}
+
 /*
  * Integer conversions done without being written:
  *   int -> int256, int128 -> int1024, uint128 -> uint256, uint128 -> int256:
@@ -909,6 +930,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+            if (n->text && strncmp(n->text, "@slice", 6) == 0 && !n->type_name) return check_slice(s, n);
             if (n->text && n->text[0] == '@') return n->type_name;  /* builtin already checked */
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) {
@@ -1538,7 +1560,17 @@ static void mangle_node(AstNode *n) {
         case AST_FIELD:
         case AST_MEMBER:
         case AST_MEMBER_ASSIGN:
-            if (n->text && collides_with_c(n->text)) {
+            if (n->text && n->text[0] == '@' && n->kind != AST_MEMBER) {
+                /* a variable made by the parser (@enum1): clair_h_enum1, out of reach of user names */
+                size_t len = strlen(n->text);
+                char *renamed = malloc(len + 8);
+                if (renamed) {
+                    memcpy(renamed, "clair_h_", 8);
+                    memcpy(renamed + 8, n->text + 1, len);
+                    free(n->text);
+                    n->text = renamed;
+                }
+            } else if (n->text && collides_with_c(n->text)) {
                 size_t len = strlen(n->text);
                 char *renamed = malloc(len + 9);
                 if (renamed) {
