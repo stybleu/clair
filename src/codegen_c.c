@@ -1490,6 +1490,206 @@ static int program_has_matvec(const AstNode *n) {
 }
 
 /* ------------------------------------------------------------------ */
+/* What follows each sum of a dense layer (y[i] = sigmoid(s)...) runs */
+/* on every core too when it only computes with numbers and writes    */
+/* y[i] for its own row: no output, no list read, nothing that can    */
+/* stop the program (integer division, int(), an index out of range). */
+/* The user functions called there must be of the same kind.          */
+/* ------------------------------------------------------------------ */
+
+#define PURE_MAX 64
+
+static size_t function_param_count(const AstNode *fn);
+static const AstNode *function_body(const AstNode *fn);
+
+typedef struct {
+    const char *names[PURE_MAX];            /* variables declared so far */
+    size_t count;
+    int function;                           /* body of a function: return allowed */
+    MatvecPattern *layer;                   /* what follows a sum: its i, s and bases */
+    const AstNode *captures[PURE_MAX];      /* variables of the enclosing function read there */
+    size_t capture_count;
+    const char *target_names[PURE_MAX];     /* lists written at [i]: clair_data_<name> */
+    const char *target_exprs[PURE_MAX];     /* and their C expression */
+    const char *target_types[PURE_MAX];     /* list type */
+    size_t target_count;
+    const AstNode *writes[PURE_MAX];        /* each y[i] = ... with its list */
+    size_t write_target[PURE_MAX];
+    size_t write_count;
+} PureCtx;
+
+static const char *pure_fn[SAFE_FN_MAX];
+static size_t pure_fn_count = 0;
+
+static int is_scalar_type(const char *t) {
+    return t && (strcmp(t, "float") == 0 || strcmp(t, "int") == 0 || strcmp(t, "bool") == 0);
+}
+
+static int fn_is_pure(const char *name) {
+    for (size_t i = 0; i < pure_fn_count; i++) {
+        if (strcmp(pure_fn[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int pure_declared(const PureCtx *c, const char *name) {
+    for (size_t k = c->count; k > 0; k--) {
+        if (strcmp(c->names[k - 1], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static int pure_expr(const AstNode *n, PureCtx *c) {
+    if (!n || !is_scalar_type(n->type_name)) return 0;
+    switch (n->kind) {
+        case AST_INTEGER: case AST_FLOAT: case AST_BOOL:
+            return 1;
+        case AST_IDENTIFIER:
+            if (!n->text) return 0;
+            if (pure_declared(c, n->text)) return 1;
+            if (!c->layer) return 0;
+            if (strcmp(n->text, c->layer->s) == 0 || strcmp(n->text, c->layer->i) == 0) return 1;
+            for (size_t k = 0; k < c->capture_count; k++) {
+                if (strcmp(c->captures[k]->text, n->text) == 0) return 1;
+            }
+            if (c->capture_count >= PURE_MAX) return 0;
+            c->captures[c->capture_count++] = n;
+            return 1;
+        case AST_UNARY:
+            return n->child_count == 1 && pure_expr(n->children[0], c);
+        case AST_BINARY:
+            if (n->child_count != 2 || !n->text || !pure_expr(n->children[0], c) || !pure_expr(n->children[1], c)) return 0;
+            if ((strcmp(n->text, "/") == 0 || strcmp(n->text, "%") == 0) && strcmp(n->type_name, "int") == 0) {
+                return int_div_is_safe(n);
+            }
+            return 1;
+        case AST_CALL: {
+            if (!n->text) return 0;
+            if (n->text[0] == '@') {
+                static const char *const math[] = {
+                    "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
+                    "sinh", "cosh", "tanh", "floor", "ceil", "pow", "atan2", "hypot", "float", NULL
+                };
+                const char *name = n->text + 1;
+                int known = 0;
+                for (size_t k = 0; math[k]; k++) known |= strcmp(name, math[k]) == 0;
+                /* abs, min and max of integers go through helpers: only their float form */
+                if ((strcmp(name, "abs") == 0 || strcmp(name, "min") == 0 || strcmp(name, "max") == 0) &&
+                    strcmp(n->type_name, "float") == 0) known = 1;
+                if (!known) return 0;
+            } else if (!fn_is_pure(n->text)) {
+                return 0;
+            }
+            for (size_t k = 0; k < n->child_count; k++) {
+                if (!pure_expr(n->children[k], c)) return 0;
+            }
+            return 1;
+        }
+        default:
+            return 0;
+    }
+}
+
+static int pure_stmt(const AstNode *n, PureCtx *c);
+
+static int pure_block(const AstNode *block, PureCtx *c) {
+    if (!block || block->kind != AST_BLOCK) return 0;
+    size_t mark = c->count;
+    for (size_t k = 0; k < block->child_count; k++) {
+        if (!pure_stmt(block->children[k], c)) return 0;
+    }
+    c->count = mark;
+    return 1;
+}
+
+static int pure_stmt(const AstNode *n, PureCtx *c) {
+    switch (n->kind) {
+        case AST_LET:
+            if (!n->text || n->child_count != 1 || !is_scalar_type(n->type_name) ||
+                !pure_expr(n->children[0], c) || c->count >= PURE_MAX) return 0;
+            c->names[c->count++] = n->text;
+            return 1;
+        case AST_ASSIGN:            /* only variables declared there (no total = total + s) */
+            return n->text && n->child_count == 1 && pure_declared(c, n->text) && pure_expr(n->children[0], c);
+        case AST_IF:
+            if ((n->child_count != 2 && n->child_count != 3) || !pure_expr(n->children[0], c)) return 0;
+            for (size_t k = 1; k < n->child_count; k++) {
+                if (!pure_block(n->children[k], c)) return 0;
+            }
+            return 1;
+        case AST_RETURN:
+            return c->function && n->child_count == 1 && pure_expr(n->children[0], c);
+        case AST_INDEX_ASSIGN: {   /* y[i] = value, y a list of numbers */
+            if (!c->layer || !n->type_name || n->child_count < 2 || c->write_count >= PURE_MAX) return 0;
+            if (strcmp(n->type_name, "list[float]") != 0 && strcmp(n->type_name, "list[int]") != 0 &&
+                strcmp(n->type_name, "list[bool]") != 0) return 0;
+            if (!is_ident(n->children[0], c->layer->i) || !pure_expr(n->children[1], c)) return 0;
+            const char *name = NULL, *expr = NULL;
+            if (n->text) {
+                if (n->child_count != 2 || pure_declared(c, n->text)) return 0;
+                name = expr = n->text;
+            } else if (n->child_count != 3 ||
+                       !fast_base_of(&c->layer->bases, n->children[2], c->layer->i, c->layer->body, &name, &expr)) {
+                return 0;
+            }
+            size_t t = 0;
+            while (t < c->target_count && strcmp(c->target_exprs[t], expr) != 0) t++;
+            if (t == c->target_count) {
+                if (t >= PURE_MAX) return 0;
+                c->target_names[t] = name;
+                c->target_exprs[t] = expr;
+                c->target_types[t] = n->type_name;
+                c->target_count++;
+            }
+            c->writes[c->write_count] = n;
+            c->write_target[c->write_count++] = t;
+            return 1;
+        }
+        default:
+            return 0;
+    }
+}
+
+/* Functions such as sigmoid or relu: numbers in, a number out, nothing else. */
+static void compute_pure_functions(const AstNode *program) {
+    pure_fn_count = 0;
+    int changed = 1;
+    while (changed) {                   /* a function calling itself is never added */
+        changed = 0;
+        for (size_t i = 0; i < program->child_count && pure_fn_count < SAFE_FN_MAX; i++) {
+            const AstNode *fn = program->children[i];
+            if (fn->kind != AST_FUNCTION || !fn->text || strcmp(fn->text, "main") == 0 ||
+                fn_is_pure(fn->text) || !is_scalar_type(fn->type_name)) continue;
+            PureCtx c;
+            memset(&c, 0, sizeof(c));
+            c.function = 1;
+            size_t params = function_param_count(fn);
+            int ok = params <= PURE_MAX;
+            for (size_t k = 0; k < params && ok; k++) {
+                const AstNode *param = fn->children[k];
+                ok = param->text && is_scalar_type(param->type_name);
+                if (ok) c.names[c.count++] = param->text;
+            }
+            if (ok && pure_block(function_body(fn), &c)) {
+                pure_fn[pure_fn_count++] = fn->text;
+                changed = 1;
+            }
+        }
+    }
+}
+
+/* The statements after the sum can all run inside the job of each core. */
+static int layer_fusable(MatvecPattern *mv, PureCtx *c) {
+    memset(c, 0, sizeof(*c));
+    c->layer = mv;
+    if (mv->body->child_count <= 2) return 0;
+    for (size_t st = 2; st < mv->body->child_count; st++) {
+        if (!pure_stmt(mv->body->children[st], c)) return 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Expression precedence, so the C reads like hand-written code       */
 /* (parentheses only where C needs them).                             */
 /* ------------------------------------------------------------------ */
@@ -3021,6 +3221,91 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
     return ok;
 }
 
+/* Functions written for the dense layers of the function being written (see PureCtx). */
+static FILE *layer_helpers = NULL;
+static const char *layer_fn_name = NULL;
+static int layer_count = 0;
+
+/* one statement of what follows a sum, inside clair_layer_<id> */
+static int emit_pure_stmt(FILE *f, const AstNode *n, int depth, const PureCtx *c) {
+    indent(f, depth);
+    switch (n->kind) {
+        case AST_LET:
+            fprintf(f, "%s %s = ", c_type_name(n->type_name), n->text);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputs(";\n", f);
+            return 1;
+        case AST_ASSIGN:
+            fprintf(f, "%s = ", n->text);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputs(";\n", f);
+            return 1;
+        case AST_IF:
+            fputs("if (", f);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputs(") {\n", f);
+            for (size_t k = 1; k < n->child_count; k++) {
+                if (k == 2) fputs(" else {\n", f);
+                const AstNode *block = n->children[k];
+                for (size_t st = 0; st < block->child_count; st++) {
+                    if (!emit_pure_stmt(f, block->children[st], depth + 1, c)) return 0;
+                }
+                indent(f, depth);
+                fputc('}', f);
+            }
+            fputc('\n', f);
+            return 1;
+        case AST_INDEX_ASSIGN:
+            for (size_t w = 0; w < c->write_count; w++) {
+                if (c->writes[w] != n) continue;
+                fprintf(f, "clair_data_%s[%s] = ", c->target_names[c->write_target[w]], c->layer->i);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputs(";\n", f);
+                return 1;
+            }
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+/*
+ * The job of a dense layer for one core: the sums of rows [first, last), then
+ * what follows each sum, row by row.  The lists written at [i] and the
+ * variables read there travel in the job.
+ */
+static int emit_layer_helper(FILE *f, const char *id, const MatvecPattern *mv, const PureCtx *c) {
+    fprintf(f, "/* dense layer of %s: the sums of rows [first, last), then the rest of each row */\n", layer_fn_name);
+    fputs("typedef struct {\n    ClairMatvecJob sums;\n", f);
+    for (size_t t = 0; t < c->target_count; t++) {
+        fprintf(f, "    %s *clair_data_%s;\n", list_element_c_type(c->target_types[t]), c->target_names[t]);
+    }
+    for (size_t k = 0; k < c->capture_count; k++) {
+        fprintf(f, "    %s %s;\n", c_type_name(c->captures[k]->type_name), c->captures[k]->text);
+    }
+    fprintf(f, "} ClairLayer_%s;\n\n", id);
+    fprintf(f, "static void clair_layer_%s(const void *clair_job, int64_t clair_first, int64_t clair_last) {\n", id);
+    fprintf(f, "    const ClairLayer_%s *clair_layer = clair_job;\n", id);
+    fputs("    clair_rt_matvec_rows(&clair_layer->sums, clair_first, clair_last);\n", f);
+    for (size_t t = 0; t < c->target_count; t++) {
+        fprintf(f, "    %s *clair_data_%s = clair_layer->clair_data_%s;\n", list_element_c_type(c->target_types[t]),
+                c->target_names[t], c->target_names[t]);
+    }
+    for (size_t k = 0; k < c->capture_count; k++) {
+        fprintf(f, "    %s %s = clair_layer->%s;\n", c_type_name(c->captures[k]->type_name), c->captures[k]->text,
+                c->captures[k]->text);
+    }
+    fprintf(f, "    for (int64_t %s = clair_first; %s < clair_last; %s++) {\n", mv->i, mv->i, mv->i);
+    int uses_s = 0;
+    for (size_t st = 2; st < mv->body->child_count; st++) uses_s |= name_mentioned_in(mv->body->children[st], mv->s);
+    if (uses_s) fprintf(f, "        double %s = clair_layer->sums.s[%s];\n", mv->s, mv->i);
+    for (size_t st = 2; st < mv->body->child_count; st++) {
+        if (!emit_pure_stmt(f, mv->body->children[st], 2, c)) return 0;
+    }
+    fputs("    }\n}\n\n", f);
+    return 1;
+}
+
 static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
     indent(f, depth);
 
@@ -3572,6 +3857,8 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             if (is_matvec) {
                 /* Matrix x vector: the sums by the kernel when the shapes fit and nothing written aliases w, x, b. */
                 const AstNode *body = mv.body;
+                PureCtx lc;
+                int fused = layer_helpers && layer_fusable(&mv, &lc);   /* the rest of each row inside the job */
                 int first = 1;
                 #define MV_AND() do { if (!first) { fputs(" &&\n", f); indent(f, depth + 1); } first = 0; } while (0)
                 fputs("if (", f);
@@ -3612,6 +3899,11 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                             mv.targets[t], mv.x_expr);
                     if (mv.b_expr) fprintf(f, " && %s->data != %s->data", mv.targets[t], mv.b_expr);
                 }
+                for (size_t t = 0; fused && t < lc.target_count; t++) {
+                    MV_AND();
+                    if (!emit_expr(f, mv.m_stop)) return 0;
+                    fprintf(f, " <= (int64_t)%s->len", lc.target_exprs[t]);
+                }
                 if (first) fputs("true", f);
                 #undef MV_AND
                 fputs(") {\n", f);
@@ -3650,17 +3942,42 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (mv.b_expr) fprintf(f, "clair_data_%s[%s]", mv.b_name, mv.i);
                 else if (!emit_expr(f, mv.init)) return 0;
                 fputs(";\n", f);
-                indent(f, depth + 1);
-                fputs("clair_rt_matvec_f64(", f);
-                if (!emit_expr(f, mv.m_stop)) return 0;
-                fputs(", ", f);
-                if (!emit_expr(f, mv.n_stop)) return 0;
-                fprintf(f, ", clair_data_%s, ", mv.w_name);
-                if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
-                else if (!emit_expr(f, mv.ld)) return 0;
-                fprintf(f, ", clair_data_%s, clair_sums);\n", mv.x_name);
                 int ok = 1;
-                if (body->child_count > 2) {
+                if (fused) {
+                    /* each core: the sums of its rows, then what follows them (clair_layer_<id>) */
+                    char id[200];
+                    snprintf(id, sizeof(id), "%s_%d", layer_fn_name, ++layer_count);
+                    if (!emit_layer_helper(layer_helpers, id, &mv, &lc)) return 0;
+                    indent(f, depth + 1);
+                    fprintf(f, "ClairLayer_%s clair_layer = { { ", id);
+                    if (!emit_expr(f, mv.n_stop)) return 0;
+                    fputs(", ", f);
+                    if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
+                    else if (!emit_expr(f, mv.ld)) return 0;
+                    fprintf(f, ", clair_data_%s, clair_data_%s, clair_sums }", mv.w_name, mv.x_name);
+                    for (size_t t = 0; t < lc.target_count; t++) {
+                        fprintf(f, ", (%s *)%s->data", list_element_c_type(lc.target_types[t]), lc.target_exprs[t]);
+                    }
+                    for (size_t k = 0; k < lc.capture_count; k++) fprintf(f, ", %s", lc.captures[k]->text);
+                    fputs(" };\n", f);
+                    indent(f, depth + 1);
+                    fputs("clair_rt_layer_f64(", f);
+                    if (!emit_expr(f, mv.m_stop)) return 0;
+                    fputs(", ", f);
+                    if (!emit_expr(f, mv.n_stop)) return 0;
+                    fprintf(f, ", clair_layer_%s, &clair_layer);\n", id);
+                } else {
+                    indent(f, depth + 1);
+                    fputs("clair_rt_matvec_f64(", f);
+                    if (!emit_expr(f, mv.m_stop)) return 0;
+                    fputs(", ", f);
+                    if (!emit_expr(f, mv.n_stop)) return 0;
+                    fprintf(f, ", clair_data_%s, ", mv.w_name);
+                    if (mv.w_matrix) fprintf(f, "clair_cols_%s", mv.w_name);
+                    else if (!emit_expr(f, mv.ld)) return 0;
+                    fprintf(f, ", clair_data_%s, clair_sums);\n", mv.x_name);
+                }
+                if (!fused && body->child_count > 2) {
                     int uses_s = 0;
                     for (size_t st = 2; st < body->child_count; st++) uses_s |= name_mentioned_in(body->children[st], mv.s);
                     indent(f, depth + 1);
@@ -4695,6 +5012,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     int uses_input_int = node_uses_call_named(program, "input_int");
     compute_safe_functions(program);
+    compute_pure_functions(program);
     compute_ownership(program);
 
     fputs(unchecked_mode ? "/* Generated by the Clair compiler (--sans-verif: no bounds checks). */\n"
@@ -4711,7 +5029,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
         f
     );
     if (uses_input_int) fputs("#include <errno.h>\n", f);
-    if (uses_cores) fputs("#include <pthread.h>\n#include <sched.h>\n#include <stdatomic.h>\n", f);
+    if (uses_cores) fputs("#include <pthread.h>\n#include <sched.h>\n#include <stdatomic.h>\n#include <time.h>\n", f);
     if (node_uses_math(program) || program_uses_big(program)) fputs("#include <math.h>\n", f);
     fputc('\n', f);
     if (program_uses_big(program)) emit_big_runtime(f, program);
@@ -5158,33 +5476,37 @@ int codegen_c_file(const AstNode *program, const char *path) {
             " * free chunk until none is left, so fast and slow cores share the work.  Each\n"
             " * row is computed by one thread exactly as in a single loop, so the result\n"
             " * does not depend on the number of threads.  CLAIR_THREADS=1 uses one core.\n"
+            " *\n"
+            " * The caller waits only for the chunks, never for a thread that arrives late:\n"
+            " * a late thread finds the job over (its number has changed) and goes back to\n"
+            " * waiting.  Between two jobs the threads wait actively for a short time, then\n"
+            " * sleep; the caller makes a system call only when one of them sleeps.\n"
             " */\n"
             "typedef void (*ClairTask)(const void *job, int64_t first, int64_t last);\n"
             "\n"
+            "typedef struct {\n"
+            "    _Atomic(ClairTask) task;\n"
+            "    _Atomic(const void *) job;\n"
+            "    _Atomic int64_t count, chunk;\n"
+            "} ClairPoolJob;\n"
+            "\n"
             "static struct {\n"
             "    pthread_mutex_t lock;\n"
-            "    pthread_cond_t wake, idle;\n"
+            "    pthread_cond_t wake;\n"
             "    pthread_once_t once;\n"
             "    int workers;                         /* threads besides the caller */\n"
-            "    ClairTask task;\n"
-            "    const void *job;\n"
-            "    int64_t count, chunk;\n"
-            "    _Atomic unsigned generation;         /* +1 for every job */\n"
-            "    _Atomic int64_t next;                /* first row of the next free chunk */\n"
-            "    _Atomic int busy;                    /* workers still on the current job */\n"
+            "    ClairPoolJob jobs[2];                /* the current job and the previous one */\n"
+            "    _Atomic unsigned number;             /* number of the current job */\n"
+            "    _Atomic uint64_t next;               /* (job number << 32) | first row of the next free chunk */\n"
+            "    _Atomic int64_t done;                /* rows finished in the current job */\n"
+            "    _Atomic int sleeping;                /* threads waiting on the condition */\n"
             "} clair_rt_pool = {\n"
             "    .lock = PTHREAD_MUTEX_INITIALIZER,\n"
             "    .wake = PTHREAD_COND_INITIALIZER,\n"
-            "    .idle = PTHREAD_COND_INITIALIZER,\n"
             "    .once = PTHREAD_ONCE_INIT,\n"
             "};\n"
             "\n"
-            "/* waiting actively: a short pause first, then let another thread use the core */\n"
-            "static inline void clair_rt_relax(int spins) {\n"
-            "    if (spins > 64) {\n"
-            "        sched_yield();\n"
-            "        return;\n"
-            "    }\n"
+            "static inline void clair_rt_pause(void) {\n"
             "#if defined(__aarch64__)\n"
             "    __asm__ __volatile__(\"yield\");\n"
             "#elif defined(__x86_64__)\n"
@@ -5192,12 +5514,33 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "#endif\n"
             "}\n"
             "\n"
-            "static void clair_rt_pool_work(void) {\n"
+            "static inline int64_t clair_rt_now_us(void) {\n"
+            "    struct timespec t;\n"
+            "    clock_gettime(CLOCK_MONOTONIC, &t);\n"
+            "    return (int64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000;\n"
+            "}\n"
+            "\n",
+            f
+        );
+        fputs(
+            "/* takes chunks of job `number` until none is left or the job is over */\n"
+            "static void clair_rt_pool_work(unsigned number) {\n"
+            "    ClairPoolJob *job = &clair_rt_pool.jobs[number & 1];\n"
+            "    ClairTask task = atomic_load_explicit(&job->task, memory_order_acquire);\n"
+            "    const void *data = atomic_load_explicit(&job->job, memory_order_acquire);\n"
+            "    int64_t count = atomic_load_explicit(&job->count, memory_order_acquire);\n"
+            "    int64_t chunk = atomic_load_explicit(&job->chunk, memory_order_acquire);\n"
+            "    uint64_t next = atomic_load_explicit(&clair_rt_pool.next, memory_order_acquire);\n"
             "    for (;;) {\n"
-            "        int64_t first = atomic_fetch_add_explicit(&clair_rt_pool.next, clair_rt_pool.chunk, memory_order_relaxed);\n"
-            "        if (first >= clair_rt_pool.count) return;\n"
-            "        int64_t last = clair_rt_pool.count - first < clair_rt_pool.chunk ? clair_rt_pool.count : first + clair_rt_pool.chunk;\n"
-            "        clair_rt_pool.task(clair_rt_pool.job, first, last);\n"
+            "        if ((unsigned)(next >> 32) != number) return;\n"
+            "        int64_t first = (int64_t)(next & 0xffffffffu);\n"
+            "        if (first >= count) return;\n"
+            "        int64_t last = count - first < chunk ? count : first + chunk;\n"
+            "        if (!atomic_compare_exchange_weak_explicit(&clair_rt_pool.next, &next, ((uint64_t)number << 32) | (uint64_t)last,\n"
+            "                                                   memory_order_acquire, memory_order_acquire)) continue;\n"
+            "        task(data, first, last);\n"
+            "        atomic_fetch_add_explicit(&clair_rt_pool.done, last - first, memory_order_release);\n"
+            "        next = atomic_load_explicit(&clair_rt_pool.next, memory_order_acquire);\n"
             "    }\n"
             "}\n"
             "\n"
@@ -5205,31 +5548,41 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    (void)unused;\n"
             "    unsigned seen = 0;\n"
             "    for (;;) {\n"
-            "        unsigned g;\n"
-            "        int spins = 0;\n"
-            "        while ((g = atomic_load_explicit(&clair_rt_pool.generation, memory_order_acquire)) == seen) {\n"
-            "            if (++spins < 2000) {              /* jobs often follow each other: wait actively a little */\n"
-            "                clair_rt_relax(spins);\n"
-            "                continue;\n"
+            "        unsigned number = atomic_load_explicit(&clair_rt_pool.number, memory_order_acquire);\n"
+            "        if (number == seen) {\n"
+            "            /*\n"
+            "             * jobs often follow each other: wait actively about 0.2 ms, then\n"
+            "             * sleep; after a few turns, leave the core to any other thread\n"
+            "             */\n"
+            "            int64_t until = 0;\n"
+            "            for (int spins = 1; number == seen; spins++) {\n"
+            "                if (spins <= 64) clair_rt_pause();\n"
+            "                else {\n"
+            "                    sched_yield();\n"
+            "                    int64_t now = clair_rt_now_us();\n"
+            "                    if (until == 0) until = now + 200;\n"
+            "                    else if (now > until) break;\n"
+            "                }\n"
+            "                number = atomic_load_explicit(&clair_rt_pool.number, memory_order_acquire);\n"
             "            }\n"
-            "            pthread_mutex_lock(&clair_rt_pool.lock);\n"
-            "            while ((g = atomic_load_explicit(&clair_rt_pool.generation, memory_order_acquire)) == seen) {\n"
-            "                pthread_cond_wait(&clair_rt_pool.wake, &clair_rt_pool.lock);\n"
+            "            if (number == seen) {\n"
+            "                pthread_mutex_lock(&clair_rt_pool.lock);\n"
+            "                atomic_fetch_add(&clair_rt_pool.sleeping, 1);\n"
+            "                while ((number = atomic_load(&clair_rt_pool.number)) == seen) {\n"
+            "                    pthread_cond_wait(&clair_rt_pool.wake, &clair_rt_pool.lock);\n"
+            "                }\n"
+            "                atomic_fetch_sub(&clair_rt_pool.sleeping, 1);\n"
+            "                pthread_mutex_unlock(&clair_rt_pool.lock);\n"
             "            }\n"
-            "            pthread_mutex_unlock(&clair_rt_pool.lock);\n"
-            "            break;\n"
             "        }\n"
-            "        seen = g;\n"
-            "        clair_rt_pool_work();\n"
-            "        if (atomic_fetch_sub_explicit(&clair_rt_pool.busy, 1, memory_order_acq_rel) == 1) {\n"
-            "            pthread_mutex_lock(&clair_rt_pool.lock);\n"
-            "            pthread_cond_signal(&clair_rt_pool.idle);\n"
-            "            pthread_mutex_unlock(&clair_rt_pool.lock);\n"
-            "        }\n"
+            "        seen = number;\n"
+            "        clair_rt_pool_work(number);\n"
             "    }\n"
             "    return NULL;\n"
-            "}\n"
-            "\n"
+            "}\n",
+            f
+        );
+        fputs(
             "static void clair_rt_pool_start(void) {\n"
             "    int cores = 1;\n"
             "    cpu_set_t allowed;\n"
@@ -5243,40 +5596,37 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "        pthread_detach(thread);\n"
             "        clair_rt_pool.workers++;\n"
             "    }\n"
-            "}\n",
+            "}\n"
+            "\n",
             f
         );
         fputs(
-            "\n"
             "/* task(job, first, last) for every chunk of [0, count): on all cores when the pool has workers */\n"
-            "static void clair_rt_parallel_for(ClairTask task, const void *job, int64_t count, int64_t chunk) {\n"
+            "static void clair_rt_parallel_for(ClairTask task, const void *data, int64_t count, int64_t chunk) {\n"
             "    pthread_once(&clair_rt_pool.once, clair_rt_pool_start);\n"
-            "    if (clair_rt_pool.workers == 0 || count <= chunk) {\n"
-            "        task(job, 0, count);\n"
+            "    if (clair_rt_pool.workers == 0 || count <= chunk || count > 0x7fffffff) {\n"
+            "        task(data, 0, count);\n"
             "        return;\n"
             "    }\n"
-            "    clair_rt_pool.task = task;\n"
-            "    clair_rt_pool.job = job;\n"
-            "    clair_rt_pool.count = count;\n"
-            "    clair_rt_pool.chunk = chunk;\n"
-            "    atomic_store_explicit(&clair_rt_pool.next, 0, memory_order_relaxed);\n"
-            "    atomic_store_explicit(&clair_rt_pool.busy, clair_rt_pool.workers, memory_order_relaxed);\n"
-            "    pthread_mutex_lock(&clair_rt_pool.lock);\n"
-            "    atomic_fetch_add_explicit(&clair_rt_pool.generation, 1, memory_order_release);\n"
-            "    pthread_cond_broadcast(&clair_rt_pool.wake);\n"
-            "    pthread_mutex_unlock(&clair_rt_pool.lock);\n"
-            "    clair_rt_pool_work();\n"
-            "    int spins = 0;\n"
-            "    while (atomic_load_explicit(&clair_rt_pool.busy, memory_order_acquire) != 0) {\n"
-            "        if (++spins < 2000) {\n"
-            "            clair_rt_relax(spins);\n"
-            "            continue;\n"
-            "        }\n"
+            "    unsigned number = atomic_load_explicit(&clair_rt_pool.number, memory_order_relaxed) + 1;\n"
+            "    ClairPoolJob *job = &clair_rt_pool.jobs[number & 1];\n"
+            "    atomic_store_explicit(&job->task, task, memory_order_release);\n"
+            "    atomic_store_explicit(&job->job, data, memory_order_release);\n"
+            "    atomic_store_explicit(&job->count, count, memory_order_release);\n"
+            "    atomic_store_explicit(&job->chunk, chunk, memory_order_release);\n"
+            "    atomic_store_explicit(&clair_rt_pool.done, 0, memory_order_relaxed);\n"
+            "    atomic_store_explicit(&clair_rt_pool.next, (uint64_t)number << 32, memory_order_release);\n"
+            "    atomic_store(&clair_rt_pool.number, number);\n"
+            "    if (atomic_load(&clair_rt_pool.sleeping) > 0) {\n"
             "        pthread_mutex_lock(&clair_rt_pool.lock);\n"
-            "        while (atomic_load_explicit(&clair_rt_pool.busy, memory_order_acquire) != 0) {\n"
-            "            pthread_cond_wait(&clair_rt_pool.idle, &clair_rt_pool.lock);\n"
-            "        }\n"
+            "        pthread_cond_broadcast(&clair_rt_pool.wake);\n"
             "        pthread_mutex_unlock(&clair_rt_pool.lock);\n"
+            "    }\n"
+            "    clair_rt_pool_work(number);\n"
+            "    /* the last chunks are being finished by other cores */\n"
+            "    for (int spins = 1; atomic_load_explicit(&clair_rt_pool.done, memory_order_acquire) < count; spins++) {\n"
+            "        if (spins > 64) sched_yield();\n"
+            "        else clair_rt_pause();\n"
             "    }\n"
             "}\n",
             f
@@ -5331,6 +5681,12 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    ClairMatvecJob job = { n, ldw, w, x, s };\n"
             "    if ((double)m * (double)n < 32768.0) clair_rt_matvec_rows(&job, 0, m);\n"
             "    else clair_rt_parallel_for(clair_rt_matvec_rows, &job, m, 16);\n"
+            "}\n"
+            "\n"
+            "/* a whole dense layer (sums and the rest of each row), on all cores once it is big enough */\n"
+            "static inline void clair_rt_layer_f64(int64_t m, int64_t n, ClairTask layer, const void *job) {\n"
+            "    if ((double)m * (double)n < 32768.0) layer(job, 0, m);\n"
+            "    else clair_rt_parallel_for(layer, job, m, 16);\n"
             "}\n"
             "\n"
             "/* room for the sums: on the stack for a small layer (no malloc at each call) */\n"
@@ -5496,22 +5852,35 @@ int codegen_c_file(const AstNode *program, const char *path) {
     for (size_t i = 0; i < program->child_count; i++) {
         const AstNode *fn = program->children[i];
         if (fn->kind != AST_FUNCTION) continue;
-        if (!emit_function_signature(f, fn, 0)) {
+        /* the function is written in memory: the jobs of its dense layers go before it */
+        char *text = NULL, *helpers = NULL;
+        size_t text_len = 0, helpers_len = 0;
+        FILE *fn_out = open_memstream(&text, &text_len);
+        layer_helpers = open_memstream(&helpers, &helpers_len);
+        layer_fn_name = fn->text;
+        layer_count = 0;
+        int ok = fn_out && layer_helpers && emit_function_signature(fn_out, fn, 0);
+        if (ok) {
+            fputs(" {\n", fn_out);
+            current_return_type = fn->type_name;
+            owned_live_count = 0;
+            loop_mark_count = 0;
+            ok = emit_block(fn_out, function_body(fn), 1);
+            fputs("}\n\n", fn_out);
+        }
+        if (fn_out) fclose(fn_out);
+        if (layer_helpers) fclose(layer_helpers);
+        layer_helpers = NULL;
+        if (ok) {
+            fwrite(helpers, 1, helpers_len, f);
+            fwrite(text, 1, text_len, f);
+        }
+        free(text);
+        free(helpers);
+        if (!ok) {
             fclose(f);
             return 0;
         }
-        fputs(" {\n", f);
-
-        const AstNode *body = function_body(fn);
-        current_return_type = fn->type_name;
-        owned_live_count = 0;
-        loop_mark_count = 0;
-        if (!emit_block(f, body, 1)) {
-            fclose(f);
-            return 0;
-        }
-
-        fputs("}\n\n", f);
     }
 
     fclose(f);

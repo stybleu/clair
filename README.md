@@ -19,7 +19,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Doubles boucles (produit de matrices) vérifiées une seule fois avant la boucle extérieure
 - Produit de matrices reconnu et calculé en blocs : plus rapide que la triple boucle en C, résultat identique au bit près
 - Couche dense (matrice × vecteur) calculée 4 lignes à la fois : environ 2 fois plus rapide, résultat identique au bit près
-- Grands produits de matrices et grandes couches denses sur tous les cœurs, même résultat quel que soit le nombre de cœurs (`CLAIR_THREADS=1` pour un seul)
+- Grands produits de matrices et grandes couches denses (activation comprise) sur tous les cœurs, même résultat quel que soit le nombre de cœurs (`CLAIR_THREADS=1` pour un seul)
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
 - Listes et matrices rendues pendant le programme quand plus rien ne les utilise (fin de bloc, `break`, `return`, remplacement)
 - C généré lisible, proche du C écrit à la main
@@ -83,6 +83,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.31](docs/README_V0.31.md) : toute la couche dense sur tous les cœurs (sigmoïde comprise), partage plus léger
 - [Clair V0.30](docs/README_V0.30.md) : grands produits de matrices et couches denses sur tous les cœurs
 - [Clair V0.29](docs/README_V0.29.md) : boucles alignées, même vitesse quelle que soit la place du code
 - [Clair V0.28](docs/README_V0.28.md) : mémoire rendue pendant le programme, rapport plus long

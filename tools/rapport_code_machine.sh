@@ -42,10 +42,13 @@ fi
 
 median() { printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 } END { print (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
 
-# "oui" when the function's machine code contains SIMD instructions
+# "oui" when the machine code of these functions contains SIMD instructions
 vectorized() {
-    local asm="$1" fn="$2" count
-    count=$(awk -v f="$fn" '$0 ~ "^"f":" {p=1} p {print} p && /\.size|^\.Lfunc_end/ {exit}' "$asm" | grep -cE "$SIMD_RE")
+    local asm="$1" fn count=0
+    shift
+    for fn in "$@"; do
+        count=$((count + $(awk -v f="$fn" '$0 ~ "^"f":" {p=1} p {print} p && /\.size|^\.Lfunc_end/ {exit}' "$asm" | grep -cE "$SIMD_RE")))
+    done
     if [ "$count" -gt 0 ]; then printf 'oui'; else printf 'non'; fi
 }
 
@@ -73,7 +76,9 @@ for name in collatz dot axpy while forin matmul matrice couche reseau; do
     sed -E "s/^static ([a-z0-9_]+) ${ref_kernel}\(/static __attribute__((noinline)) \1 ${ref_kernel}(/" \
         "$BENCH/${name}_ref.c" > "$WORK/${name}_ref.noinline.c"
     clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 -S "$WORK/${name}_ref.noinline.c" -o "$WORK/${name}_ref.s" 2>> "$WORK/$name.log"
-    v_clair=$(vectorized "$WORK/$name.s" "clair_fn_${kernel}")
+    # the function and the jobs of its dense layers, run by each core (clair_layer_<function>_N)
+    layers=$(grep -oE "^clair_layer_${kernel}_[0-9]+:" "$WORK/$name.s" | tr -d ':')
+    v_clair=$(vectorized "$WORK/$name.s" "clair_fn_${kernel}" $layers)
     v_ref=$(vectorized "$WORK/${name}_ref.s" "${ref_kernel}")
 
     out_clair=$("$WORK/$name"); out_ref=$("$WORK/${name}_ref")

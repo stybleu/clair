@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.30 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.31 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -635,7 +635,8 @@ expect_compile_error invalid_big_float_mix "operator '+' cannot mix int256 and f
 
 ./build/clair tests/matvec_rows.cl -o build/test_matvec_rows
 [ "$(./build/test_matvec_rows)" = "$(cat tests/matvec_rows.expected)" ]
-[ "$(grep -c 'clair_rt_matvec_f64(.*clair_sums);' build/test_matvec_rows.generated.c)" = "3" ]
+[ "$(grep -c 'clair_rt_matvec_f64(.*clair_sums);' build/test_matvec_rows.generated.c)" = "1" ]
+[ "$(grep -c 'clair_rt_layer_f64(.*&clair_layer);' build/test_matvec_rows.generated.c)" = "2" ]
 printf '%s\n' 'matvec_rows.cl : OK -> couche dense 4 lignes a la fois, identique au bit pres, champs, liste a plat, repli si y = x'
 expect_runtime_error matvec_rows_bounds '' 'Clair runtime error: list index 2 out of bounds for length 2'
 
@@ -645,8 +646,10 @@ for threads in 1 2 3 7; do
     [ "$(CLAIR_THREADS=$threads ./build/test_plusieurs_coeurs)" = "$(cat tests/plusieurs_coeurs.expected)" ]
 done
 [ "$(grep -c 'clair_rt_matvec_f64(.*clair_sums);' build/test_plusieurs_coeurs.generated.c)" = "2" ]
+[ "$(grep -c 'clair_rt_layer_f64(.*&clair_layer);' build/test_plusieurs_coeurs.generated.c)" = "2" ]
 grep -Fq 'pthread_create(' build/test_plusieurs_coeurs.generated.c
-printf '%s\n' "plusieurs_coeurs.cl : OK -> produits et couches sur $(nproc 2>/dev/null || echo ?) coeurs, meme resultat avec 1, 2, 3 ou 7 coeurs"
+printf '%s\n' "plusieurs_coeurs.cl : OK -> produits et couches sur $(nproc 2>/dev/null || echo ?) coeurs, sigmoide comprise, meme resultat avec 1, 2, 3 ou 7 coeurs"
+expect_runtime_error plusieurs_coeurs_bounds '1' 'Clair runtime error: list index 3 out of bounds for length 3'
 
 ./build/clair tests/memory_freeing.cl -o build/test_memory_freeing
 [ "$(./build/test_memory_freeing)" = "$(cat tests/memory_freeing.expected)" ]

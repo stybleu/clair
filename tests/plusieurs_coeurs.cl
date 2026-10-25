@@ -151,6 +151,134 @@ def differences(a: list[float], b: list[float]) -> int {
     return d
 }
 
+// reconnue en entier : la suite de chaque ligne ne fait que calculer et ecrire a la ligne i,
+// elle tourne aussi sur tous les coeurs
+def active(v: float, pente: float) -> float {
+    if v > 0.0 {
+        return v
+    }
+    return pente * v
+}
+
+def sigmoide(v: float) -> float {
+    return 1.0 / (1.0 + exp(-v))
+}
+
+def couche_entiere(w: matrix[float], b: list[float], x: list[float], z: list[float], a: list[float], signe: list[int], pente: float) -> int {
+    for i in range(rows(w)) {
+        let s: float = b[i]
+        for j in range(cols(w)) {
+            s = s + w[i][j] * x[j]
+        }
+        z[i] = s
+        let u: float = s * pente
+        let pente: float = 0.5
+        let t: float = active(s, pente) + u
+        if t > 0.5 {
+            a[i] = sigmoide(t)
+            signe[i] = 1
+        } else {
+            a[i] = t * pente
+            signe[i] = 0
+        }
+    }
+    return 0
+}
+
+def couche_entiere_simple(w: matrix[float], b: list[float], x: list[float], z: list[float], a: list[float], signe: list[int], pente: float) -> int {
+    let tours: int = 0
+    for i in range(rows(w)) {
+        let s: float = b[i]
+        for j in range(cols(w)) {
+            s = s + w[i][j] * x[j]
+            tours = tours + 1
+        }
+        z[i] = s
+        let u: float = s * pente
+        let pente: float = 0.5
+        let t: float = active(s, pente) + u
+        if t > 0.5 {
+            a[i] = sigmoide(t)
+            signe[i] = 1
+        } else {
+            a[i] = t * pente
+            signe[i] = 0
+        }
+    }
+    return tours
+}
+
+Class Reseau {
+    w: matrix[float]
+    b: list[float]
+    h: list[float]
+
+    def avant(x: list[float]) -> int {
+        for i in range(rows(self.w)) {
+            let s: float = self.b[i]
+            for j in range(cols(self.w)) {
+                s = s + self.w[i][j] * x[j]
+            }
+            self.h[i] = sigmoide(s)
+        }
+        return 0
+    }
+}
+
+def ecarts_entiers(a: list[int], b: list[int]) -> int {
+    let d: int = 0
+    for i in range(len(a)) {
+        if a[i] != b[i] {
+            d = d + 1
+        }
+    }
+    return d
+}
+
+def zeros(n: int) -> list[int] {
+    let out: list[int] = []
+    for i in range(n) {
+        out.append(7)
+    }
+    return out
+}
+
+def essai_entiere(m: int, n: int) -> int {
+    let w: matrix[float] = matrix(m, n)
+    remplir(w, 6)
+    let b: list[float] = liste(m, 5)
+    let x: list[float] = liste(n, 6)
+    let z1: list[float] = liste(m, 0)
+    let z2: list[float] = liste(m, 0)
+    let a1: list[float] = liste(m, 0)
+    let a2: list[float] = liste(m, 0)
+    let s1: list[int] = zeros(m)
+    let s2: list[int] = zeros(m)
+    couche_entiere(w, b, x, z1, a1, s1, 0.125)
+    couche_entiere_simple(w, b, x, z2, a2, s2, 0.125)
+    let t: float = 0.0
+    let positifs: int = 0
+    for i in range(m) {
+        t = t + a1[i] + z1[i]
+        positifs = positifs + s1[i]
+    }
+    print(t)
+    print(positifs)
+    let reseau: Reseau = Reseau(w, b, liste(m, 0))
+    reseau.avant(x)
+    let h: list[float] = liste(m, 0)
+    let tours: int = 0
+    for i in range(m) {
+        let s: float = b[i]
+        for j in range(n) {
+            s = s + w[i][j] * x[j]
+            tours = tours + 1
+        }
+        h[i] = sigmoide(s)
+    }
+    return differences(z1, z2) + differences(a1, a2) + ecarts_entiers(s1, s2) + differences(reseau.h, h)
+}
+
 def essai_couche(m: int, n: int) -> int {
     let w: matrix[float] = matrix(m, n)
     remplir(w, 4)
@@ -183,6 +311,9 @@ def main() -> int {
     print(essai_couche(300, 257))
     print(essai_couche(1000, 40))
     print(essai_couche(9, 5))
+    print(essai_entiere(300, 257))
+    print(essai_entiere(700, 90))
+    print(essai_entiere(9, 5))
 
     // somme de la ligne i : environ 0.3 * i
     let w: matrix[float] = matrix(800, 300)
