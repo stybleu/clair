@@ -17,7 +17,31 @@ typedef struct {
     size_t depth;
     const char *return_type;
     int had_error;
+    int absolue;                 /* > 0 inside an absolue block or an absolue def */
+    AstNode *absolue_block;      /* the outermost absolue block being checked */
+    const char *alloc_type;      /* let p: ptr[float32] = alloc(n): the type alloc() gives */
 } Semantic;
+
+/* ptr[float32] ... : the element type, or NULL */
+static const char *ptr_element(const char *type) {
+    static const char *const elements[] = { "int", "float", "float32", "i8", "i16", "i32", "u8", "u16", "u32", "u64", NULL };
+    if (!type || strncmp(type, "ptr[", 4) != 0) return NULL;
+    for (size_t i = 0; elements[i]; i++) {
+        size_t len = strlen(elements[i]);
+        if (strncmp(type + 4, elements[i], len) == 0 && strcmp(type + 4 + len, "]") == 0) return elements[i];
+    }
+    return NULL;
+}
+
+static int is_ptr_type(const char *type) { return ptr_element(type) != NULL; }
+
+/* the low-level operations are only written inside absolue { } (or an absolue def) */
+static int require_absolue(Semantic *s, const char *what) {
+    if (s->absolue > 0) return 1;
+    fprintf(stderr, "semantic error: %s is only allowed inside an absolue { } block\n", what);
+    s->had_error = 1;
+    return 0;
+}
 
 static int set_type(AstNode *node, const char *type) {
     return ast_set_type(node, type, strlen(type));
@@ -232,7 +256,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
     if (strcmp(type, "bigint") == 0 || strcmp(type, "bigfloat") == 0) return 1;
-    if (is_big(type) || machine_bits(type)) return 1;
+    if (is_big(type) || machine_bits(type) || is_ptr_type(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
         (is_list_type(type) || is_dict_type(type) || is_matrix_type(type))) {
@@ -773,6 +797,108 @@ static const char *check_comprehension(Semantic *s, AstNode *n) {
     return expr_type(s, n);
 }
 
+/* p = address(xs) in the absolue block: xs.append() there would move what p points to */
+static int block_takes_address(const AstNode *n, const char *list) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && (strcmp(n->text, "address") == 0 || strcmp(n->text, "@address") == 0) &&
+        n->child_count == 1 && n->children[0]->kind == AST_IDENTIFIER && strcmp(n->children[0]->text, list) == 0) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (block_takes_address(n->children[i], list)) return 1;
+    }
+    return 0;
+}
+
+/*
+ * Inside absolue { }:
+ *   address(xs) -> ptr[T] (the data of a list or a matrix, no copy)
+ *   alloc(n), alloc(n, alignment) -> ptr[T] (T from `let p: ptr[T] = ...`), free(p)
+ *   copy(dst, src, n), fill(p, value, n), bytes(p) -> ptr[u8]
+ */
+static int check_absolue_call(Semantic *s, AstNode *n) {
+    static const char *const names[] = { "address", "alloc", "free", "copy", "fill", "bytes", NULL };
+    size_t c = 0;
+    while (names[c] && strcmp(n->text, names[c]) != 0) c++;
+    if (!names[c]) return 0;
+    const char *name = names[c], *result = "int";
+    char what[32];
+    snprintf(what, sizeof(what), "%s()", name);
+    if (!require_absolue(s, what)) return -1;
+    size_t min = 1, max = 1;
+    if (strcmp(name, "alloc") == 0) max = 2;
+    if (strcmp(name, "copy") == 0 || strcmp(name, "fill") == 0) min = max = 3;
+    if (n->child_count < min || n->child_count > max) {
+        fprintf(stderr, "semantic error: %s() expects %zu%s argument(s), got %zu\n", name, min, max > min ? " or 2" : "",
+                n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *t0 = strcmp(name, "fill") == 0 || strcmp(name, "copy") == 0 || strcmp(name, "free") == 0 ||
+                     strcmp(name, "bytes") == 0 || strcmp(name, "address") == 0 ? expr_type(s, n->children[0]) : NULL;
+    if (strcmp(name, "address") == 0) {
+        if (!t0) return -1;
+        const char *element = list_element_type(t0);
+        if (!element && is_matrix_type(t0)) element = matrix_element_type(t0);
+        if (!element || strcmp(element, "bool") == 0 || strcmp(element, "string") == 0) {
+            fprintf(stderr, "semantic error: address() expects a list or a matrix of numbers, got %s\n", t0);
+            s->had_error = 1;
+            return -1;
+        }
+        static char type[32];
+        snprintf(type, sizeof(type), "ptr[%s]", element);
+        result = type;
+    } else if (strcmp(name, "alloc") == 0) {
+        if (!s->alloc_type) {
+            error_type(s, "alloc() needs its type: write let p: ptr[float32] = alloc(n)");
+            return -1;
+        }
+        result = s->alloc_type;
+        for (size_t i = 0; i < n->child_count; i++) {
+            const char *t = expr_type(s, n->children[i]);
+            if (!t) return -1;
+            if (!is_index_type(t)) {
+                fprintf(stderr, "semantic error: argument %zu of alloc() expects an int, got %s\n", i + 1, t);
+                s->had_error = 1;
+                return -1;
+            }
+        }
+    } else {
+        if (!t0) return -1;
+        if (!is_ptr_type(t0)) {
+            fprintf(stderr, "semantic error: argument 1 of %s() expects a ptr, got %s\n", name, t0);
+            s->had_error = 1;
+            return -1;
+        }
+        if (strcmp(name, "bytes") == 0) result = "ptr[u8]";
+        if (strcmp(name, "copy") == 0) {
+            const char *t1 = expr_type(s, n->children[1]), *t2 = t1 ? expr_type(s, n->children[2]) : NULL;
+            if (!t1 || !t2) return -1;
+            if (strcmp(t0, t1) != 0 || !is_index_type(t2)) {
+                fprintf(stderr, "semantic error: copy() expects copy(%s, %s, int), got copy(%s, %s, %s)\n", t0, t0, t0, t1, t2);
+                s->had_error = 1;
+                return -1;
+            }
+        }
+        if (strcmp(name, "fill") == 0) {
+            const char *element = ptr_element(t0);
+            const char *t1 = expr_type_expected(s, n->children[1], element);
+            const char *t2 = t1 ? expr_type(s, n->children[2]) : NULL;
+            if (!t1 || !t2) return -1;
+            if (!assignable(element, t1) || !is_index_type(t2)) {
+                fprintf(stderr, "semantic error: fill() expects fill(%s, %s, int), got fill(%s, %s, %s)\n", t0, element, t0, t1, t2);
+                s->had_error = 1;
+                return -1;
+            }
+        }
+    }
+    char *renamed = malloc(strlen(name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, name);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, result) ? 1 : -1;
+}
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -1130,6 +1256,21 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         set_type(n, comparison ? "bool" : left);
         return n->type_name;
     }
+    if (is_ptr_type(left) || is_ptr_type(right)) {
+        /* p + k, p - k (k elements further), p == q, p != q */
+        if (!require_absolue(s, "arithmetic on a ptr")) return NULL;
+        const char *op = n->text;
+        if ((strcmp(op, "+") == 0 || strcmp(op, "-") == 0) && is_ptr_type(left) && is_index_type(right))
+            return set_type(n, left) ? n->type_name : NULL;
+        if (strcmp(op, "+") == 0 && is_index_type(left) && is_ptr_type(right))
+            return set_type(n, right) ? n->type_name : NULL;
+        if ((strcmp(op, "==") == 0 || strcmp(op, "!=") == 0) && strcmp(left, right) == 0)
+            return set_type(n, "bool") ? n->type_name : NULL;
+        fprintf(stderr, "semantic error: operator '%s' cannot use %s and %s (a ptr moves with p + k, p - k)\n",
+                op, left, right);
+        s->had_error = 1;
+        return NULL;
+    }
     if (strcmp(n->text, "in") == 0 || strcmp(n->text, "not in") == 0) {
         /* x in xs (a list), s in text (a string), key in d (a dictionary), like Python */
         const char *element = list_element_type(right);
@@ -1358,6 +1499,12 @@ static int implicit_big(const char *actual, const char *expected) {
 }
 
 static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expected) {
+    if (n->kind == AST_CALL && n->text && strcmp(n->text, "alloc") == 0 && is_ptr_type(expected)) {
+        s->alloc_type = expected;          /* alloc(n) gives the ptr type it is stored into */
+        const char *t = expr_type(s, n);
+        s->alloc_type = NULL;
+        return t;
+    }
     if (is_big(expected) && is_int_literal(n)) return type_int_literal(s, n, expected);
     if (is_small_machine(expected) && is_int_literal(n)) return machine_literal(s, n, expected);
     if (expected && strcmp(expected, "float32") == 0 && is_float_literal(n)) {
@@ -1413,6 +1560,17 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             if (n->child_count != 2) return NULL;
             const char *base = expr_type(s, n->children[0]);
             const char *index = expr_type(s, n->children[1]);
+
+            if (base && is_ptr_type(base)) {           /* p[i]: no check at all */
+                if (!require_absolue(s, "reading p[i] through a ptr")) return NULL;
+                if (!index || !is_index_type(index)) {
+                    fprintf(stderr, "semantic error: ptr index must be int, got %s\n", index ? index : "invalid");
+                    s->had_error = 1;
+                    return NULL;
+                }
+                set_type(n, ptr_element(base));
+                return n->type_name;
+            }
 
             if (base && is_list_type(base)) {
                 if (!index || !is_index_type(index)) {
@@ -1575,6 +1733,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_builtin_call(s, n);
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
+                if (builtin == 0) builtin = check_absolue_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
                 fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);
@@ -1582,6 +1741,12 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 return NULL;
             }
             size_t param_count = fn->child_count ? fn->child_count - 1 : 0;
+            const AstNode *fn_body = fn->child_count ? fn->children[fn->child_count - 1] : NULL;
+            if (fn_body && fn_body->text && strcmp(fn_body->text, "absolue") == 0 && s->absolue == 0) {
+                fprintf(stderr, "semantic error: %s() is an absolue def: call it inside an absolue { } block\n", n->text);
+                s->had_error = 1;
+                return NULL;
+            }
             if (n->child_count != param_count) {
                 fprintf(stderr, "semantic error: function '%s' expects %zu argument(s), got %zu\n",
                         n->text, param_count, n->child_count);
@@ -1745,6 +1910,7 @@ static const char *write_target_type(Semantic *s, AstNode *n, size_t plain_child
 static int check_stmt(Semantic *s, AstNode *n) {
     switch (n->kind) {
         case AST_LET: {
+            if (is_ptr_type(n->type_name) && !require_absolue(s, "a ptr variable")) return 0;
             const char *actual = expr_type_expected(s, n->children[0], n->type_name);
             if (!actual) return 0;
             if (!assignable(n->type_name, actual)) {
@@ -1763,6 +1929,13 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *expected = find_var(s, n->text);
             if (!expected) {
                 fprintf(stderr, "semantic error: assignment to undefined variable '%s'\n", n->text);
+                s->had_error = 1;
+                return 0;
+            }
+            if (is_ptr_type(expected) && !require_absolue(s, "changing a ptr variable")) return 0;
+            if (s->absolue > 0 && block_takes_address(s->absolue_block, n->text)) {
+                fprintf(stderr, "semantic error: %s = ... in this absolue block would free the data that "
+                                "address(%s) points to\n", n->text, n->text);
                 s->had_error = 1;
                 return 0;
             }
@@ -1807,6 +1980,25 @@ static int check_stmt(Semantic *s, AstNode *n) {
             if (!base) return 0;
 
             const char *index = expr_type(s, n->children[0]);
+
+            if (is_ptr_type(base)) {
+                if (!require_absolue(s, "writing p[i] through a ptr")) return 0;
+                if (!index || !is_index_type(index)) {
+                    fprintf(stderr, "semantic error: ptr index must be int, got %s\n", index ? index : "invalid");
+                    s->had_error = 1;
+                    return 0;
+                }
+                const char *element = ptr_element(base);
+                const char *value = expr_type_expected(s, n->children[1], element);
+                if (!value || !assignable(element, value)) {
+                    fprintf(stderr, "semantic error: %s item assignment expects %s, got %s\n", base, element,
+                            value ? value : "invalid");
+                    s->had_error = 1;
+                    return 0;
+                }
+                set_type(n, base);
+                return 1;
+            }
 
             if (is_list_type(base)) {
                 if (!index || !is_index_type(index)) {
@@ -1882,6 +2074,12 @@ static int check_stmt(Semantic *s, AstNode *n) {
         case AST_LIST_APPEND: {
             const char *base = write_target_type(s, n, 1, "append on");
             if (!base) return 0;
+            if (s->absolue > 0 && n->text && block_takes_address(s->absolue_block, n->text)) {
+                fprintf(stderr, "semantic error: %s.append() in this absolue block could move the data that "
+                                "address(%s) points to\n", n->text, n->text);
+                s->had_error = 1;
+                return 0;
+            }
             if (!is_list_type(base)) {
                 fprintf(stderr, "semantic error: append() expects a list, got %s\n", base);
                 s->had_error = 1;
@@ -1925,7 +2123,12 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 error_type(s, "if condition must be bool");
                 return 0;
             }
-            if (!check_block(s, n->children[1], 1)) return 0;
+            int absolue = n->children[1]->text && strcmp(n->children[1]->text, "absolue") == 0;
+            AstNode *outer = s->absolue_block;
+            if (absolue) { s->absolue++; if (!outer) s->absolue_block = n->children[1]; }
+            int ok = check_block(s, n->children[1], 1);
+            if (absolue) { s->absolue--; s->absolue_block = outer; }
+            if (!ok) return 0;
             if (n->child_count == 3 && !check_block(s, n->children[2], 1)) return 0;
             return 1;
         }
@@ -2013,6 +2216,12 @@ static int check_class_decl(Semantic *s, AstNode *cls) {
             s->had_error = 1;
             return 0;
         }
+        if (is_ptr_type(field->type_name)) {
+            fprintf(stderr, "semantic error: field '%s.%s' cannot be a ptr: a ptr only lives inside absolue code\n",
+                    cls->text, field->text);
+            s->had_error = 1;
+            return 0;
+        }
 
         for (size_t j = 0; j < i; j++) {
             if (strcmp(field->text, cls->children[j]->text) == 0) {
@@ -2052,6 +2261,17 @@ static int check_function(Semantic *s, AstNode *fn) {
     enter_scope(s);
 
     size_t param_count = fn->child_count ? fn->child_count - 1 : 0;
+    AstNode *body = fn->children[fn->child_count - 1];
+    int absolue = body->text && strcmp(body->text, "absolue") == 0;
+    int takes_ptr = is_ptr_type(fn->type_name);
+    for (size_t i = 0; i < param_count; i++) takes_ptr |= is_ptr_type(fn->children[i]->type_name);
+    if (takes_ptr && !absolue) {
+        fprintf(stderr, "semantic error: %s() takes or returns a ptr: write absolue def %s(...)\n", fn->text, fn->text);
+        s->had_error = 1;
+        leave_scope(s);
+        s->return_type = NULL;
+        return 0;
+    }
     for (size_t i = 0; i < param_count; i++) {
         AstNode *param = fn->children[i];
         if (!add_var(s, param->text, param->type_name)) {
@@ -2060,8 +2280,9 @@ static int check_function(Semantic *s, AstNode *fn) {
         }
     }
 
-    AstNode *body = fn->children[fn->child_count - 1];
+    if (absolue) { s->absolue++; s->absolue_block = body; }
     int ok = check_block(s, body, 0);
+    if (absolue) { s->absolue--; s->absolue_block = NULL; }
     leave_scope(s);
     s->return_type = NULL;
     return ok;

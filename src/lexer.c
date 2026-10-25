@@ -23,6 +23,7 @@ static int is_ident_part(char c) { return isalnum((unsigned char)c) || c == '_';
 static TokenKind keyword_kind(const char *s, size_t n) {
     if (n == 5 && strncmp(s, "Class", 5) == 0) return TOKEN_CLASS;
     if (n == 3 && strncmp(s, "def", 3) == 0) return TOKEN_DEF;
+    if (n == 7 && strncmp(s, "absolue", 7) == 0) return TOKEN_ABSOLUE;
     if (n == 6 && strncmp(s, "return", 6) == 0) return TOKEN_RETURN;
     if (n == 3 && strncmp(s, "let", 3) == 0) return TOKEN_LET;
     if (n == 3 && strncmp(s, "int", 3) == 0) return TOKEN_INT;
@@ -192,7 +193,7 @@ Token lexer_next(Lexer *l) {
 const char *token_kind_name(TokenKind kind) {
     switch (kind) {
         case TOKEN_EOF: return "EOF"; case TOKEN_IDENTIFIER: return "identifier"; case TOKEN_INTEGER: return "integer";
-        case TOKEN_FLOAT_LITERAL: return "float literal"; case TOKEN_STRING: return "string"; case TOKEN_CLASS: return "Class"; case TOKEN_DEF: return "def"; case TOKEN_RETURN: return "return";
+        case TOKEN_FLOAT_LITERAL: return "float literal"; case TOKEN_STRING: return "string"; case TOKEN_CLASS: return "Class"; case TOKEN_DEF: return "def"; case TOKEN_ABSOLUE: return "absolue"; case TOKEN_RETURN: return "return";
         case TOKEN_LET: return "let"; case TOKEN_INT: return "int"; case TOKEN_FLOAT: return "float"; case TOKEN_BOOL: return "bool"; case TOKEN_STRING_TYPE: return "string"; case TOKEN_LIST: return "list"; case TOKEN_DICT: return "dict";
         case TOKEN_TRUE: return "true"; case TOKEN_FALSE: return "false"; case TOKEN_AND: return "and";
         case TOKEN_OR: return "or"; case TOKEN_NOT: return "not"; case TOKEN_PRINT: return "print";

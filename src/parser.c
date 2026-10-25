@@ -970,6 +970,26 @@ static const char *machine_type_token(Token t) {
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
 
+    /* ptr[float32]: the address of numbers in memory (only inside absolue blocks) */
+    if (t.kind == TOKEN_IDENTIFIER && t.length == 3 && strncmp(t.start, "ptr", 3) == 0) {
+        next(p);
+        if (p->current.kind != TOKEN_LBRACKET) return ast_set_type(node, t.start, t.length);
+        next(p);
+        const char *element = p->current.kind == TOKEN_FLOAT ? "float" : p->current.kind == TOKEN_INT ? "int"
+                            : is_float32_token(p->current) ? "float32" : machine_type_token(p->current);
+        if (!element) {
+            fprintf(stderr, "parse error at %zu:%zu: ptr element type must be int, float, float32 or u8 ... u64, i8 ... i32\n",
+                    p->current.line, p->current.column);
+            p->had_error = 1;
+            return 0;
+        }
+        next(p);
+        if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
+        char type[32];
+        snprintf(type, sizeof(type), "ptr[%s]", element);
+        return ast_set_type(node, type, strlen(type));
+    }
+
     /* matrix[float] / matrix[int]: "matrix" stays an ordinary identifier elsewhere */
     if (t.kind == TOKEN_IDENTIFIER && t.length == 6 && strncmp(t.start, "matrix", 6) == 0) {
         next(p);
@@ -1330,6 +1350,26 @@ static AstNode *parse_identifier_statement(Parser *p) {
 }
 
 static AstNode *parse_statement(Parser *p) {
+    if (p->current.kind == TOKEN_ABSOLUE) {
+        /* absolue { ... }: kept as `if true { ... }` whose block is marked "absolue" */
+        Token at = p->current;
+        next(p);
+        if (!expect(p, TOKEN_LBRACE, "'{'")) return NULL;
+        AstNode *block = parse_block(p);
+        if (!block) return NULL;
+        if (!expect(p, TOKEN_RBRACE, "'}'")) { ast_free(block); return NULL; }
+        free(block->text);
+        block->text = malloc(sizeof("absolue"));
+        AstNode *test = ast_new(AST_IF, NULL, 0), *yes = ast_new(AST_BOOL, "true", 4);
+        if (!block->text || !test || !yes || !ast_add_child(test, yes)) {
+            ast_free(block); ast_free(test); ast_free(yes);
+            return NULL;
+        }
+        strcpy(block->text, "absolue");
+        if (!ast_add_child(test, block)) { ast_free(block); ast_free(test); return NULL; }
+        (void)at;
+        return test;
+    }
     if (p->current.kind == TOKEN_LET) {
         next(p);
         Token name = p->current;
@@ -1662,6 +1702,16 @@ AstNode *parser_parse_program(Parser *p) {
             decl = parse_class(p, program);
         } else if (p->current.kind == TOKEN_DEF) {
             decl = parse_function(p);
+        } else if (p->current.kind == TOKEN_ABSOLUE) {
+            /* absolue def f(...): its whole body is an absolue block */
+            next(p);
+            decl = parse_function(p);
+            if (decl && decl->child_count > 0) {
+                AstNode *body = decl->children[decl->child_count - 1];
+                free(body->text);
+                body->text = malloc(sizeof("absolue"));
+                if (body->text) strcpy(body->text, "absolue");
+            }
         } else {
             fprintf(stderr, "parse error at %zu:%zu: expected Class or def, got %s\n",
                     p->current.line, p->current.column, token_kind_name(p->current.kind));

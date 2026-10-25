@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.40 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.41 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -678,6 +678,24 @@ expect_compile_error invalid_in_right "'in' needs a list, a string or a dictiona
 expect_compile_error invalid_comprehension_list "[... for ...] makes a list of numbers, bool or strings, got list[int]"
 expect_compile_error invalid_comprehension_cond "the condition of [... if ...] must be a bool, got int"
 expect_compile_error invalid_load_csv_kind 'argument 2 of load_csv() must be written "float", "float32" or "int"'
+
+./build/clair tests/absolue.cl -o build/test_absolue
+[ "$(./build/test_absolue)" = "$(cat tests/absolue.expected)" ]
+grep -Fq 'double * p = ((double *)xs->data);' build/test_absolue.generated.c
+grep -Fq 'float * a = (float *)clair_rt_alloc(1000, sizeof(float), 64);' build/test_absolue.generated.c
+grep -Fq 'y[i] = y[i] + a * x[i];' build/test_absolue.generated.c
+printf '%s\n' 'absolue.cl : OK -> absolue { }, ptr[T], address, alloc aligne, fill, copy, bytes, absolue def ; identique a Python'
+expect_runtime_error alloc_negative_runtime '1' 'Clair runtime error: alloc() size cannot be negative'
+expect_runtime_error alloc_alignment_runtime '' 'Clair runtime error: alloc() alignment must be a power of two'
+expect_runtime_error copy_negative_runtime '2.5' 'Clair runtime error: copy() count cannot be negative'
+expect_compile_error invalid_ptr_outside "a ptr variable is only allowed inside an absolue { } block"
+expect_compile_error invalid_absolue_call "f() is an absolue def: call it inside an absolue { } block"
+expect_compile_error invalid_absolue_append "xs.append() in this absolue block could move the data that address(xs) points to"
+expect_compile_error invalid_absolue_replace "xs = ... in this absolue block would free the data that address(xs) points to"
+expect_compile_error invalid_alloc_type "alloc() needs its type: write let p: ptr[float32] = alloc(n)"
+expect_compile_error invalid_ptr_param "f() takes or returns a ptr: write absolue def f(...)"
+expect_compile_error invalid_ptr_field "field 'Tampon.p' cannot be a ptr: a ptr only lives inside absolue code"
+expect_compile_error invalid_ptr_float_offset "operator '+' cannot use ptr[float] and float (a ptr moves with p + k, p - k)"
 
 ./build/clair tests/entiers_machine.cl -o build/test_entiers_machine
 [ "$(./build/test_entiers_machine)" = "$(cat tests/entiers_machine.expected)" ]

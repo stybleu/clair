@@ -10,6 +10,7 @@ typedef enum {
     TOKEN_STRING,
     TOKEN_CLASS,
     TOKEN_DEF,
+    TOKEN_ABSOLUE,
     TOKEN_RETURN,
     TOKEN_LET,
     TOKEN_INT,

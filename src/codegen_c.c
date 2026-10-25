@@ -106,12 +106,21 @@ static char big_tag(const char *type) {
     return type && type[0] == 'u' ? 'u' : 'i';
 }
 
+/* ptr[float32] -> "float *": the row of element_kinds, or -1 */
+static int ptr_kind(const char *type) { return element_kind_of(type, "ptr["); }
+
 static const char *c_type_name(const char *clair_type) {
     static char class_type[512];
+    static char ptr_types[ELEMENT_KIND_COUNT][32];
 
     if (!clair_type) return NULL;
     if (strcmp(clair_type, "bigint") == 0) return "ClairDynInt *";
     if (strcmp(clair_type, "bigfloat") == 0) return "ClairDynFloat *";
+    if (ptr_kind(clair_type) >= 0) {
+        int k = ptr_kind(clair_type);
+        if (!ptr_types[k][0]) snprintf(ptr_types[k], sizeof(ptr_types[k]), "%s *", element_kinds[k][1]);
+        return ptr_types[k];
+    }
     if (strcmp(clair_type, "int128") == 0) return "ClairInt128";
     if (strcmp(clair_type, "int256") == 0) return "ClairInt256";
     if (strcmp(clair_type, "int512") == 0) return "ClairInt512";
@@ -256,6 +265,13 @@ static int membership_kind(const AstNode *n) {
     return is_dict_type(t) ? 3 : 0;
 }
 
+/* address, alloc, free, copy, fill, bytes: only inside absolue blocks (after the '@') */
+static int is_absolue_call(const char *name) {
+    static const char *const names[] = { "address", "alloc", "free", "copy", "fill", "bytes", NULL };
+    for (size_t i = 0; names[i]; i++) if (strcmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
 /* load_csv, save_csv, read_lines, split, strip (after the '@') */
 static int is_text_call(const char *name) {
     static const char *const names[] = { "load_csv", "save_csv", "read_lines", "split", "strip", NULL };
@@ -282,6 +298,7 @@ static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
     if (strcmp(call->text, "@matrix") == 0) return 0;
     if (strcmp(call->text, "@randint") == 0 || strcmp(call->text, "@choice") == 0) return 0;   /* empty range, empty list */
+    if (strcmp(call->text, "@alloc") == 0 || strcmp(call->text, "@copy") == 0) return 0;      /* out of memory, n < 0 */
     if (is_string_conversion(call)) return 0;                                    /* float("abc") */
     if (is_text_call(call->text + 1)) return strcmp(call->text, "@strip") == 0 ||   /* files, split(s, "") */
                                              (strcmp(call->text, "@split") == 0 && call->child_count == 1);
@@ -1484,7 +1501,7 @@ static int matvec_rest_ok(const AstNode *n, MatvecPattern *p) {
         case AST_INDEX_ASSIGN:
         case AST_MATRIX_SET: {
             const char *name = NULL, *expr = NULL;
-            if (p->target_count >= FAST_MAX) return 0;
+            if (p->target_count >= FAST_MAX || ptr_kind(n->type_name) >= 0) return 0;
             if (n->text) {
                 if (name_changes_in(p->body, n->text) || strcmp(n->text, p->i) == 0) return 0;
                 expr = n->text;
@@ -1957,6 +1974,7 @@ static int expr_prec(const AstNode *n) {
     int64_t k;
     switch (n->kind) {
         case AST_INDEX:
+            if (n->child_count == 2 && ptr_kind(n->children[0]->type_name) >= 0) return PREC_POSTFIX;   /* p[i] */
             return fast_access_base(n) ? PREC_POSTFIX : PREC_UNARY;  /* `*accessor(...)` */
         case AST_CALL:
             if (n->text && strcmp(n->text, "len") == 0) return PREC_UNARY;    /* (int64_t)x->len */
@@ -1965,6 +1983,7 @@ static int expr_prec(const AstNode *n) {
             if (n->text && strcmp(n->text, "@int") == 0 && builtin_cannot_fail(n)) return PREC_UNARY;
             if (n->text && n->text[0] == '@' && small_machine_bits(n->text + 1)) return PREC_UNARY;  /* (uint8_t)x */
             if (n->text && strcmp(n->text, "@choice") == 0) return PREC_UNARY;                     /* *(int64_t *)... */
+            if (n->text && strcmp(n->text, "@alloc") == 0) return PREC_UNARY;                      /* (float *)clair_rt_alloc(...) */
             return PREC_POSTFIX;
         case AST_INTEGER:
             return n->text && n->text[0] == '-' ? PREC_UNARY : PREC_POSTFIX;   /* -5 next to an i8 */
@@ -3076,6 +3095,14 @@ static int emit_expr(FILE *f, const AstNode *n) {
         case AST_INDEX: {
             if (n->child_count != 2 || !n->type_name || !n->children[0]->type_name) return 0;
 
+            if (ptr_kind(n->children[0]->type_name) >= 0) {       /* p[i]: plain C, no check (absolue) */
+                if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
+                fputc('[', f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputc(']', f);
+                return 1;
+            }
+
             if (is_matrix_row_type(n->children[0]->type_name)) {
                 const AstNode *row = n->children[0];
                 const char *fast_base = fast_access_base(n);
@@ -3198,6 +3225,34 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (strcmp(name, "rows") == 0 || strcmp(name, "cols") == 0) {
                     if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
                     fprintf(f, "->%s", name);
+                    return 1;
+                }
+                if (is_absolue_call(name)) {
+                    const char *pt = n->type_name;
+                    if (strcmp(name, "address") == 0 || strcmp(name, "bytes") == 0) {
+                        fprintf(f, "((%s)", c_type_name(pt));
+                        if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
+                        fputs(strcmp(name, "address") == 0 ? "->data)" : ")", f);
+                        return 1;
+                    }
+                    if (strcmp(name, "alloc") == 0) {
+                        fprintf(f, "(%s)clair_rt_alloc(", c_type_name(pt));
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fprintf(f, ", sizeof(%s), ", element_kinds[ptr_kind(pt)][1]);
+                        if (n->child_count == 2) { if (!emit_expr(f, n->children[1])) return 0; }
+                        else fputc('0', f);
+                        fputc(')', f);
+                        return 1;
+                    }
+                    const char *t0 = n->children[0]->type_name;
+                    if (strcmp(name, "fill") == 0) fprintf(f, "clair_rt_fill_%s(", element_kinds[ptr_kind(t0)][2]);
+                    else fprintf(f, "clair_rt_%s(", name);
+                    for (size_t i = 0; i < n->child_count; i++) {
+                        if (i != 0) fputs(", ", f);
+                        if (!emit_expr(f, n->children[i])) return 0;
+                    }
+                    if (strcmp(name, "copy") == 0) fprintf(f, ", sizeof(%s)", element_kinds[ptr_kind(t0)][1]);
+                    fputc(')', f);
                     return 1;
                 }
                 if (is_string_conversion(n)) {
@@ -4100,6 +4155,17 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
         case AST_INDEX_ASSIGN: {
             if (!n->type_name) return 0;
             size_t id;
+
+            if (ptr_kind(n->type_name) >= 0) {                     /* p[i] = v (absolue) */
+                if (n->text) fputs(n->text, f);
+                else if (!emit_operand(f, n->children[2], PREC_POSTFIX, 0)) return 0;
+                fputc('[', f);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs("] = ", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputs(";\n", f);
+                return 1;
+            }
 
             if (is_list_type(n->type_name)) {
                 const char *element_type = list_element_c_type(n->type_name);
@@ -5028,6 +5094,13 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
 
         case AST_IF:
             if (n->child_count != 2 && n->child_count != 3) return 0;
+            if (n->child_count == 2 && n->children[1]->text && strcmp(n->children[1]->text, "absolue") == 0) {
+                fputs("{   /* absolue: no checks in here */\n", f);
+                if (!emit_block(f, n->children[1], depth + 1)) return 0;
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
             fputs("if (", f);
             if (!emit_expr(f, n->children[0])) return 0;
             fputs(") {\n", f);
@@ -5322,6 +5395,7 @@ static int node_uses_math(const AstNode *n) {
         strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
         strncmp(n->text, "@slice", 6) != 0 && !small_machine_bits(n->text + 1) &&
         (!is_random_call(n->text + 1) || strcmp(n->text, "@gauss") == 0) && !is_text_call(n->text + 1) &&
+        !is_absolue_call(n->text + 1) &&
         !is_string_conversion(n) &&
         !(machine_type_bits(n->type_name) &&
           (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
@@ -6150,6 +6224,63 @@ static int node_iterates_dict(const AstNode *n) {
     return 0;
 }
 
+/* fill(p, v, n) for every element type used */
+static void absolue_fill_kinds(const AstNode *n, unsigned *kinds) {
+    if (!n) return;
+    if (n->kind == AST_CALL && n->text && strcmp(n->text, "@fill") == 0 && n->child_count == 3)
+        *kinds |= 1u << ptr_kind(n->children[0]->type_name);
+    for (size_t i = 0; i < n->child_count; i++) absolue_fill_kinds(n->children[i], kinds);
+}
+
+static void emit_absolue_runtime(FILE *f, const AstNode *program) {
+    int alloc = node_uses_call_named(program, "@alloc"), copy = node_uses_call_named(program, "@copy");
+    int release = node_uses_call_named(program, "@free");
+    unsigned kinds = 0;
+    absolue_fill_kinds(program, &kinds);
+    if (alloc || copy) {
+        fputs("/* absolue: mistakes that the hardware would not catch */\n"
+              "static _Noreturn void clair_rt_absolue_fail(const char *message) {\n"
+              "    fprintf(stderr, \"Clair runtime error: %s\\n\", message);\n"
+              "    exit(EXIT_FAILURE);\n"
+              "}\n\n", f);
+    }
+    if (alloc) {
+        fputs("/* alloc(n, alignment): n zeroed elements, aligned on 'alignment' bytes when asked */\n"
+              "static void *clair_rt_alloc(int64_t n, size_t size, int64_t alignment) {\n"
+              "    if (n < 0) clair_rt_absolue_fail(\"alloc() size cannot be negative\");\n"
+              "    if (alignment < 0 || (alignment & (alignment - 1)) != 0) clair_rt_absolue_fail(\"alloc() alignment must be a power of two\");\n"
+              "    if ((uint64_t)n > SIZE_MAX / size / 2) clair_rt_absolue_fail(\"alloc() is too large\");\n"
+              "    size_t bytes = n ? (size_t)n * size : 1;\n"
+              "    void *p = NULL;\n"
+              "    if (alignment > 16) {\n"
+              "        size_t rounded = (bytes + (size_t)alignment - 1) / (size_t)alignment * (size_t)alignment;\n"
+              "        if (posix_memalign(&p, (size_t)alignment, rounded) != 0) p = NULL;\n"
+              "        if (p) memset(p, 0, rounded);\n"
+              "    } else {\n"
+              "        p = calloc(bytes, 1);\n"
+              "    }\n"
+              "    if (!p) clair_rt_absolue_fail(\"out of memory in alloc()\");\n"
+              "    return p;\n"
+              "}\n\n", f);
+    }
+    if (release) fputs("static inline int64_t clair_rt_free(void *p) { free(p); return 0; }\n\n", f);
+    if (copy) {
+        fputs("/* copy(dst, src, n): n elements, even when the two overlap */\n"
+              "static inline int64_t clair_rt_copy(void *dst, const void *src, int64_t n, size_t size) {\n"
+              "    if (n < 0) clair_rt_absolue_fail(\"copy() count cannot be negative\");\n"
+              "    memmove(dst, src, (size_t)n * size);\n"
+              "    return 0;\n"
+              "}\n\n", f);
+    }
+    for (size_t e = 0; e < ELEMENT_KIND_COUNT; e++) {
+        if (!(kinds & (1u << e))) continue;
+        fprintf(f, "static inline int64_t clair_rt_fill_%s(%s *p, %s value, int64_t n) {\n"
+                   "    for (int64_t i = 0; i < n; i++) p[i] = value;\n"
+                   "    return 0;\n"
+                   "}\n\n", element_kinds[e][2], element_kinds[e][1], element_kinds[e][1]);
+    }
+}
+
 static void emit_membership_runtime(FILE *f, const AstNode *program) {
     unsigned kinds = 0;
     int dict = 0;
@@ -6597,6 +6728,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
                          : "/* Generated by the Clair compiler. */\n", f);
     int uses_cores = program_has_matmul(program) || program_has_matvec(program);
     if (uses_cores) fputs("#define _GNU_SOURCE   /* sched_getaffinity: how many cores the program may use */\n", f);
+    else if (node_uses_call_named(program, "@alloc")) fputs("#define _POSIX_C_SOURCE 200809L   /* posix_memalign */\n", f);
     fputs(
         "#include <inttypes.h>\n"
         "#include <stdbool.h>\n"
@@ -6649,9 +6781,22 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "/* a float32 with the fewest digits that read back the same number (like NumPy) */\n"
             "static void clair_rt_print_f32(float x) {\n"
             "    char text[32];\n"
-            "    for (int digits = 1; digits <= 9; digits++) {\n"
+            "    int digits = 1;\n"
+            "    for (; digits <= 9; digits++) {\n"
             "        snprintf(text, sizeof(text), \"%.*g\", digits, (double)x);\n"
             "        if (strtof(text, NULL) == x) break;\n"
+            "    }\n"
+            "    char *e = strchr(text, 'e');\n"
+            "    int exponent = e ? atoi(e + 1) : 0;\n"
+            "    if (e && exponent >= 0 && exponent < 15) {   /* 500, not 5e+02: like print() of a float */\n"
+            "        char fixed[32];\n"
+            "        int count = 0;\n"
+            "        for (const char *q = text; q < e; q++) if (*q != '.') fixed[count++] = *q;\n"
+            "        int length = exponent + 1 + (text[0] == '-');\n"
+            "        while (count < length) fixed[count++] = '0';\n"
+            "        fixed[count] = 0;\n"
+            "        puts(fixed);\n"
+            "        return;\n"
             "    }\n"
             "    puts(text);\n"
             "}\n\n",
@@ -7514,6 +7659,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     emit_random_runtime(f, program);
     emit_membership_runtime(f, program);
+    emit_absolue_runtime(f, program);
     {
         int csv = node_uses_call_named(program, "@load_csv"), lines = node_uses_call_named(program, "@read_lines");
         int split = node_uses_call_named(program, "@split"), strip = node_uses_call_named(program, "@strip");

@@ -26,6 +26,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Couche dense (matrice × vecteur) calculée 8 lignes à la fois : environ 2 fois plus rapide, résultat identique au bit près
 - Grands produits de matrices et grandes couches denses (activation comprise) sur tous les cœurs, en `float` et en `float32`, même résultat quel que soit le nombre de cœurs (`CLAIR_THREADS=1` pour un seul)
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
+- Blocs `absolue { }` : la mémoire comme en C (`ptr[float32]`, `p[i]`, `p + k`, `address(xs)`, `alloc(n, 64)` aligné, `copy`, `fill`, `free`, `bytes`), sans aucune vérification, et `absolue def`
 - Listes et matrices rendues pendant le programme quand plus rien ne les utilise (fin de bloc, `break`, `return`, remplacement)
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
@@ -90,6 +91,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.41](docs/README_V0.41.md) : blocs `absolue { }`, `ptr[T]`, `address`, `alloc` aligné, `copy`, `fill`, `free`, `bytes`, `absolue def`
 - [Clair V0.40](docs/README_V0.40.md) : grands entiers dynamiques, flottants decimaux precis (experimental)
 - [Clair V0.39](docs/README_V0.39.md) : `xs[-1]`, `x in xs`, listes en compréhension `[x * x for x in xs if ...]`, `for k in dico`
 - [Clair V0.38](docs/README_V0.38.md) : fichiers CSV (`load_csv`, `save_csv`), `read_lines`, `split`, `strip`, `int()` et `float()` de chaînes, `\t` et `\n` dans les chaînes
