@@ -50,6 +50,7 @@ static int run_clang(const char *cpath, const char *output) {
             "-Wall",
             "-Wextra",
             "-Wno-unused-function",
+            "-Wno-implicit-const-int-float-conversion",   /* let x: float32 = 16777217 rounds, like NumPy */
             "-fno-math-errno",   /* Clair never reads errno: lets Clang vectorize sqrt() and friends */
             allow_fma ? "-ffp-contract=on" : "-ffp-contract=off",
             "-falign-loops=64",  /* hot loops start on a 64-byte line: same speed whatever the code layout */

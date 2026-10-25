@@ -13,6 +13,7 @@ static int is_list_type(const char *type) {
     return type && (
         strcmp(type, "list[int]") == 0 ||
         strcmp(type, "list[float]") == 0 ||
+        strcmp(type, "list[float32]") == 0 ||
         strcmp(type, "list[bool]") == 0 ||
         strcmp(type, "list[string]") == 0
     );
@@ -29,7 +30,8 @@ static int is_dict_type(const char *type) {
 
 
 static int is_matrix_type(const char *type) {
-    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[int]") == 0);
+    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[float32]") == 0 ||
+                    strcmp(type, "matrix[int]") == 0);
 }
 
 static int is_matrix_row_type(const char *type) {
@@ -40,6 +42,7 @@ static int is_matrix_row_type(const char *type) {
 static const char *matrix_element_c_type(const char *type) {
     if (!type) return NULL;
     if (strstr(type, "[float]")) return "double";
+    if (strstr(type, "[float32]")) return "float";
     if (strstr(type, "[int]")) return "int64_t";
     return NULL;
 }
@@ -47,6 +50,7 @@ static const char *matrix_element_c_type(const char *type) {
 static const char *matrix_accessor_name(const char *type) {
     const char *e = matrix_element_c_type(type);
     if (!e) return NULL;
+    if (strcmp(e, "float") == 0) return "clair_rt_matrix_at_f32_checked";
     return strcmp(e, "double") == 0 ? "clair_rt_matrix_at_f64_checked" : "clair_rt_matrix_at_i64_checked";
 }
 
@@ -80,6 +84,7 @@ static const char *c_type_name(const char *clair_type) {
     if (strcmp(clair_type, "uint1024") == 0) return "ClairUInt1024";
     if (strcmp(clair_type, "int") == 0) return "int64_t";
     if (strcmp(clair_type, "float") == 0) return "double";
+    if (strcmp(clair_type, "float32") == 0) return "float";
     if (strcmp(clair_type, "bool") == 0) return "bool";
     if (strcmp(clair_type, "string") == 0) return "const char *";
     if (is_list_type(clair_type)) return "ClairList";
@@ -95,6 +100,7 @@ static const char *list_element_c_type(const char *list_type) {
     if (!list_type) return NULL;
     if (strcmp(list_type, "list[int]") == 0) return "int64_t";
     if (strcmp(list_type, "list[float]") == 0) return "double";
+    if (strcmp(list_type, "list[float32]") == 0) return "float";
     if (strcmp(list_type, "list[bool]") == 0) return "bool";
     if (strcmp(list_type, "list[string]") == 0) return "const char *";
     return NULL;
@@ -199,7 +205,8 @@ static int builtin_cannot_fail(const AstNode *call) {
     if (big_bits(call->type_name)) return 0;               /* abs, min, max, pow of big integers */
     if (strcmp(call->text, "@int") == 0)
         return call->child_count == 1 && !(call->children[0]->type_name &&
-                                           strcmp(call->children[0]->type_name, "float") == 0);
+                                           (strcmp(call->children[0]->type_name, "float") == 0 ||
+                                            strcmp(call->children[0]->type_name, "float32") == 0));
     return 1;
 }
 
@@ -2654,6 +2661,7 @@ static const char *list_accessor_name(const char *list_type) {
     if (!list_type) return NULL;
     if (strcmp(list_type, "list[int]") == 0) return "clair_rt_list_at_i64_checked";
     if (strcmp(list_type, "list[float]") == 0) return "clair_rt_list_at_f64_checked";
+    if (strcmp(list_type, "list[float32]") == 0) return "clair_rt_list_at_f32_checked";
     if (strcmp(list_type, "list[bool]") == 0) return "clair_rt_list_at_bool_checked";
     if (strcmp(list_type, "list[string]") == 0) return "clair_rt_list_at_str_checked";
     return NULL;
@@ -2667,6 +2675,16 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_FLOAT:
+            if (n->type_name && strcmp(n->type_name, "float32") == 0) {
+                /*
+                 * 0.1f, unless reading the number straight into a float gives
+                 * another float than going through a double (as Python and
+                 * NumPy do): then (float)0.1.
+                 */
+                if (strtof(n->text, NULL) == (float)strtod(n->text, NULL)) fprintf(f, "%sf", n->text);
+                else fprintf(f, "(float)%s", n->text);
+                return 1;
+            }
             fputs(n->text, f);
             return 1;
 
@@ -2848,12 +2866,12 @@ static int emit_expr(FILE *f, const AstNode *n) {
                     return 1;
                 }
                 const char *t0 = n->child_count > 0 ? n->children[0]->type_name : NULL;
-                if (strcmp(name, "float") == 0) {
-                    fputs("(double)", f);
+                if (strcmp(name, "float") == 0 || strcmp(name, "float32") == 0) {
+                    fputs(name[5] ? "(float)" : "(double)", f);
                     return emit_operand(f, n->children[0], PREC_UNARY, 0);
                 }
                 if (strcmp(name, "int") == 0) {
-                    if (t0 && strcmp(t0, "float") == 0) {
+                    if (t0 && (strcmp(t0, "float") == 0 || strcmp(t0, "float32") == 0)) {
                         fputs("clair_rt_float_to_int(", f);
                         if (!emit_expr(f, n->children[0])) return 0;
                         fputc(')', f);
@@ -2878,6 +2896,11 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (strcmp(name, "abs") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_abs_i64" : "fabs";
                 if (strcmp(name, "min") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_min_i64" : "fmin";
                 if (strcmp(name, "max") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_max_i64" : "fmax";
+                char f32_name[32];
+                if (n->type_name && strcmp(n->type_name, "float32") == 0) {
+                    snprintf(f32_name, sizeof(f32_name), "%sf", c_name);   /* sqrtf, expf, fabsf: computed in float32 */
+                    c_name = f32_name;
+                }
                 fprintf(f, "%s(", c_name);
                 for (size_t i = 0; i < n->child_count; i++) {
                     if (i != 0) fputs(", ", f);
@@ -2948,7 +2971,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
             if (strcmp(op, "%") == 0) {
                 if (!is_int_type(n->type_name)) {
-                    fputs("fmod(", f);
+                    fputs(strcmp(n->type_name, "float32") == 0 ? "fmodf(" : "fmod(", f);
                 } else if (int_div_is_safe(n)) {
                     if (!emit_operand(f, n->children[0], PREC_MULTIPLICATIVE, 0)) return 0;
                     fputs(" % ", f);
@@ -3493,8 +3516,9 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 const AstNode *v = n->children[0];
                 const char *op = v->kind == AST_BINARY && v->child_count == 2 && v->text ? v->text : "";
                 int plain = op[0] && !op[1] && strchr("+-*/%", op[0]) && is_ident(v->children[0], n->text) &&
-                            v->type_name && (strcmp(v->type_name, "int") == 0 || strcmp(v->type_name, "float") == 0) &&
-                            !(op[0] == '%' && strcmp(v->type_name, "float") == 0) &&
+                            v->type_name && (strcmp(v->type_name, "int") == 0 || strcmp(v->type_name, "float") == 0 ||
+                                             strcmp(v->type_name, "float32") == 0) &&
+                            !(op[0] == '%' && strcmp(v->type_name, "int") != 0) &&
                             !((op[0] == '/' || op[0] == '%') && strcmp(v->type_name, "int") == 0 && !int_div_is_safe(v));
                 int64_t folded;
                 if (plain && !const_int_value(v, &folded)) {
@@ -3714,6 +3738,10 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 fputs("printf(\"%.15g\\n\", (double)(", f);
                 if (!emit_expr(f, value)) return 0;
                 fputs("));\n", f);
+            } else if (strcmp(value->type_name, "float32") == 0) {
+                fputs("clair_rt_print_f32(", f);
+                if (!emit_expr(f, value)) return 0;
+                fputs(");\n", f);
             } else if (strcmp(value->type_name, "bool") == 0) {
                 fputs("printf(\"%d\\n\", (int)(", f);
                 if (!emit_expr(f, value)) return 0;
@@ -4737,6 +4765,16 @@ static int node_uses_int_mod(const AstNode *n) {
     return 0;
 }
 
+static int node_prints_type(const AstNode *n, const char *type) {
+    if (!n) return 0;
+    if (n->kind == AST_PRINT && n->child_count == 1 && n->children[0]->type_name &&
+        strcmp(n->children[0]->type_name, type) == 0) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_prints_type(n->children[i], type)) return 1;
+    }
+    return 0;
+}
+
 static int node_uses_int_builtin(const AstNode *n, const char *name) {
     if (!n) return 0;
     if (n->kind == AST_CALL && n->text && strcmp(n->text, name) == 0 && is_int_type(n->type_name)) return 1;
@@ -5278,6 +5316,20 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs("static inline int64_t clair_rt_min_i64(int64_t a, int64_t b) { return a < b ? a : b; }\n\n", f);
     if (node_uses_int_builtin(program, "@max"))
         fputs("static inline int64_t clair_rt_max_i64(int64_t a, int64_t b) { return a > b ? a : b; }\n\n", f);
+    if (node_prints_type(program, "float32")) {
+        fputs(
+            "/* a float32 with the fewest digits that read back the same number (like NumPy) */\n"
+            "static void clair_rt_print_f32(float x) {\n"
+            "    char text[32];\n"
+            "    for (int digits = 1; digits <= 9; digits++) {\n"
+            "        snprintf(text, sizeof(text), \"%.*g\", digits, (double)x);\n"
+            "        if (strtof(text, NULL) == x) break;\n"
+            "    }\n"
+            "    puts(text);\n"
+            "}\n\n",
+            f
+        );
+    }
     if (node_uses_call_named(program, "@int")) {
         fputs(
             "static int64_t clair_rt_float_to_int(double x) {\n"
@@ -5445,13 +5497,14 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "}\n\n",
                 f
             );
-            static const char *const kinds[4][3] = {
+            static const char *const kinds[5][3] = {
                 { "list[int]", "i64", "int64_t" },
                 { "list[float]", "f64", "double" },
+                { "list[float32]", "f32", "float" },
                 { "list[bool]", "bool", "bool" },
                 { "list[string]", "str", "const char *" },
             };
-            for (size_t k = 0; k < 4; k++) {
+            for (size_t k = 0; k < 5; k++) {
                 if (!node_indexes_list_type(program, kinds[k][0])) continue;
                 if (unchecked_mode) {
                     fprintf(f,
@@ -5625,11 +5678,12 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "}\n\n",
             f
         );
-        static const char *const mkinds[2][3] = {
+        static const char *const mkinds[3][3] = {
             { "[float]", "f64", "double" },
+            { "[float32]", "f32", "float" },
             { "[int]", "i64", "int64_t" },
         };
-        for (size_t k = 0; k < 2; k++) {
+        for (size_t k = 0; k < 3; k++) {
             if (!node_uses_matrix_kind(program, mkinds[k][0])) continue;
             fprintf(f,
                 "static inline %s *clair_rt_matrix_at_%s_checked(ClairMatrix m, int64_t i, int64_t j) {\n"

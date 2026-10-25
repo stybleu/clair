@@ -830,6 +830,11 @@ static AstNode *parse_for_statement(Parser *p) {
     return n;
 }
 
+/* float32 is an ordinary identifier outside types */
+static int is_float32_token(Token t) {
+    return t.kind == TOKEN_IDENTIFIER && t.length == 7 && strncmp(t.start, "float32", 7) == 0;
+}
+
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
 
@@ -841,8 +846,9 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
             const char *matrix_type = NULL;
             if (p->current.kind == TOKEN_FLOAT) matrix_type = "matrix[float]";
             else if (p->current.kind == TOKEN_INT) matrix_type = "matrix[int]";
+            else if (is_float32_token(p->current)) matrix_type = "matrix[float32]";
             else {
-                fprintf(stderr, "parse error at %zu:%zu: matrix element type must be float or int\n",
+                fprintf(stderr, "parse error at %zu:%zu: matrix element type must be float, float32 or int\n",
                         p->current.line, p->current.column);
                 p->had_error = 1;
                 return 0;
@@ -873,8 +879,13 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
             case TOKEN_BOOL:        list_type = "list[bool]";   list_type_len = 10; break;
             case TOKEN_STRING_TYPE: list_type = "list[string]"; list_type_len = 12; break;
             default:
+                if (is_float32_token(p->current)) {
+                    list_type = "list[float32]";
+                    list_type_len = 13;
+                    break;
+                }
                 fprintf(stderr,
-                        "parse error at %zu:%zu: list element type must be int, float, bool or string\n",
+                        "parse error at %zu:%zu: list element type must be int, float, float32, bool or string\n",
                         p->current.line, p->current.column);
                 p->had_error = 1;
                 return 0;

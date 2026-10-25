@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.33 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.34 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -261,7 +261,7 @@ if ./build/clair tests/invalid_list_type.cl -o build/test_invalid_list_type >bui
     printf '%s\n' 'invalid_list_type.cl : ECHEC -> liste imbriquee aurait du etre refusee en V0.13' >&2
     exit 1
 fi
-grep -Fq 'list element type must be int, float, bool or string' build/invalid_list_type.stderr
+grep -Fq 'list element type must be int, float, float32, bool or string' build/invalid_list_type.stderr
 printf '%s\n' 'invalid_list_type.cl : OK -> listes imbriquees reportees'
 
 if ./build/clair tests/invalid_list_equality.cl -o build/test_invalid_list_equality >build/invalid_list_equality.stdout 2>build/invalid_list_equality.stderr; then
@@ -624,6 +624,14 @@ expect_compile_error invalid_compound_call "'+=' would call suivant() twice: put
 expect_compile_error invalid_slice_assign "a slice xs[a:b] cannot be assigned: change the elements one by one"
 expect_compile_error invalid_enumerate "for i, v in ... needs enumerate(list)"
 expect_compile_error invalid_slice_type "slices [a:b] work on lists and strings, got matrix[float]"
+
+./build/clair tests/float32.cl -o build/test_float32
+[ "$(./build/test_float32)" = "$(cat tests/float32.expected)" ]
+grep -Fq 'float *clair_data_y = (float *)y->data;' build/test_float32.generated.c
+grep -Fq 'axpy(0.25f, x, y)' build/test_float32.generated.c
+grep -Fq 'sqrtf(s)' build/test_float32.generated.c
+printf '%s\n' 'float32.cl : OK -> float32 identique a NumPy : calculs, listes, matrices, couche dense, boucles rapides en float'
+expect_compile_error invalid_float32_to_int "cannot initialize int 'n' with float32"
 
 ./build/clair tests/matmul_blocks.cl -o build/test_matmul_blocks
 out_matmul_blocks="$(./build/test_matmul_blocks)"

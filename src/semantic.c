@@ -24,7 +24,21 @@ static int set_type(AstNode *node, const char *type) {
 }
 
 static int is_numeric(const char *type) {
-    return type && (strcmp(type, "int") == 0 || strcmp(type, "float") == 0);
+    return type && (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0);
+}
+
+static int is_float_type(const char *type) {
+    return type && (strcmp(type, "float") == 0 || strcmp(type, "float32") == 0);
+}
+
+/*
+ * Type of a calculation between two numbers: float (64 bits) wins, then
+ * float32, then int.  float32 with an int stays float32 (like NumPy).
+ */
+static const char *numeric_result(const char *left, const char *right) {
+    if (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) return "float";
+    if (strcmp(left, "float32") == 0 || strcmp(right, "float32") == 0) return "float32";
+    return "int";
 }
 
 /*
@@ -55,6 +69,7 @@ static int is_list_type(const char *type) {
     return type && (
         strcmp(type, "list[int]") == 0 ||
         strcmp(type, "list[float]") == 0 ||
+        strcmp(type, "list[float32]") == 0 ||
         strcmp(type, "list[bool]") == 0 ||
         strcmp(type, "list[string]") == 0
     );
@@ -64,6 +79,7 @@ static const char *list_element_type(const char *type) {
     if (!type) return NULL;
     if (strcmp(type, "list[int]") == 0) return "int";
     if (strcmp(type, "list[float]") == 0) return "float";
+    if (strcmp(type, "list[float32]") == 0) return "float32";
     if (strcmp(type, "list[bool]") == 0) return "bool";
     if (strcmp(type, "list[string]") == 0) return "string";
     return NULL;
@@ -73,13 +89,15 @@ static const char *list_type_for_element(const char *type) {
     if (!type) return NULL;
     if (strcmp(type, "int") == 0) return "list[int]";
     if (strcmp(type, "float") == 0) return "list[float]";
+    if (strcmp(type, "float32") == 0) return "list[float32]";
     if (strcmp(type, "bool") == 0) return "list[bool]";
     if (strcmp(type, "string") == 0) return "list[string]";
     return NULL;
 }
 
 static int is_matrix_type(const char *type) {
-    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[int]") == 0);
+    return type && (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix[float32]") == 0 ||
+                    strcmp(type, "matrix[int]") == 0);
 }
 
 /* m[i] alone is only an intermediate step of m[i][j] */
@@ -90,6 +108,7 @@ static int is_matrix_row_type(const char *type) {
 static const char *matrix_element_type(const char *type) {
     if (!type) return NULL;
     if (strcmp(type, "matrix[float]") == 0 || strcmp(type, "matrix_row[float]") == 0) return "float";
+    if (strcmp(type, "matrix[float32]") == 0 || strcmp(type, "matrix_row[float32]") == 0) return "float32";
     if (strcmp(type, "matrix[int]") == 0 || strcmp(type, "matrix_row[int]") == 0) return "int";
     return NULL;
 }
@@ -122,10 +141,11 @@ static const char *dict_type_for_value(const char *type) {
 }
 
 
+/* int -> float, int -> float32, float32 -> float, and float -> float32 (rounded, like NumPy) */
 static int assignable(const char *dst, const char *src) {
     if (!dst || !src) return 0;
     if (strcmp(dst, src) == 0) return 1;
-    return strcmp(dst, "float") == 0 && strcmp(src, "int") == 0;
+    return is_float_type(dst) && is_numeric(src);
 }
 
 static void error_type(Semantic *s, const char *message) {
@@ -161,7 +181,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
     if (is_big(type)) return 1;
-    if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 ||
+    if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
         (is_list_type(type) || is_dict_type(type) || is_matrix_type(type))) {
         return 1;
@@ -220,7 +240,7 @@ static const char *check_list_literal_as(Semantic *s, AstNode *n, const char *li
     if (!element_type) return NULL;
 
     for (size_t i = 0; i < n->child_count; i++) {
-        const char *item = expr_type(s, n->children[i]);
+        const char *item = expr_type_expected(s, n->children[i], element_type);
         if (!item || !assignable(element_type, item)) {
             fprintf(stderr, "semantic error: %s literal expects %s elements, got %s\n",
                     list_type, element_type, item ? item : "invalid");
@@ -400,6 +420,20 @@ static int check_matrix_builtin(Semantic *s, AstNode *n) {
 
 static int is_int_literal(const AstNode *n);
 static const char *type_int_literal(Semantic *s, AstNode *n, const char *type);
+
+/* 0.5 or -0.5 written directly in the program */
+static int is_float_literal(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_FLOAT) return 1;
+    return n->kind == AST_UNARY && n->text && strcmp(n->text, "-") == 0 && n->child_count == 1 &&
+           n->children[0]->kind == AST_FLOAT;
+}
+
+/* next to a float32, a number written in the program is a float32 (like a Python number with NumPy) */
+static int set_float32_literal(AstNode *n) {
+    if (n->kind == AST_UNARY && !set_type(n->children[0], "float32")) return 0;
+    return set_type(n, "float32");
+}
 static const char *big_common_type(Semantic *s, AstNode *n, const char *what, const char *left, const char *right);
 
 static int check_builtin_call(Semantic *s, AstNode *n) {
@@ -439,13 +473,14 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     }
 
     size_t want = 0;
-    int kind = 0; /* 1 float unary, 2 float binary, 3 abs, 4 min/max, 5 int(), 6 float() */
+    int kind = 0; /* 1 float unary, 2 float binary, 3 abs, 4 min/max, 5 int(), 6 float(), 7 float32() */
     for (size_t i = 0; float_unary[i]; i++) if (strcmp(name, float_unary[i]) == 0) { kind = 1; want = 1; }
     for (size_t i = 0; float_binary[i]; i++) if (strcmp(name, float_binary[i]) == 0) { kind = 2; want = 2; }
     if (strcmp(name, "abs") == 0) { kind = 3; want = 1; }
     if (strcmp(name, "min") == 0 || strcmp(name, "max") == 0) { kind = 4; want = 2; }
     if (strcmp(name, "int") == 0) { kind = 5; want = 1; }
     if (strcmp(name, "float") == 0) { kind = 6; want = 1; }
+    if (strcmp(name, "float32") == 0) { kind = 7; want = 1; }
     if (!kind) return 0;
 
     if (n->child_count != want) {
@@ -492,10 +527,22 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
         }
     }
 
+    if ((kind == 2 || kind == 4) && !any_big) {
+        /* pow(x, 2.0) or max(x, 0.0) with x a float32: the number written is a float32 */
+        for (size_t i = 0; i < 2; i++) {
+            if (strcmp(args[1 - i], "float32") == 0 && is_float_literal(n->children[i])) {
+                if (!set_float32_literal(n->children[i])) return -1;
+                args[i] = "float32";
+            }
+        }
+    }
     const char *result = "float";
+    if (kind == 1 && strcmp(args[0], "float32") == 0) result = "float32";
+    if (kind == 2 && strcmp(numeric_result(args[0], args[1]), "float32") == 0) result = "float32";
     if (kind == 3) result = args[0];
-    if (kind == 4) result = (strcmp(args[0], "int") == 0 && strcmp(args[1], "int") == 0) ? "int" : "float";
+    if (kind == 4) result = numeric_result(args[0], args[1]);
     if (kind == 5) result = "int";
+    if (kind == 7) result = "float32";
     if (any_big && kind == 4) {
         char what[16];
         snprintf(what, sizeof(what), "%s()", name);
@@ -597,7 +644,7 @@ static int wrap_convert(AstNode *n, const char *type) {
  *   int256 and uint128: refused, the program must choose with int256(x) or uint256(x).
  */
 static const char *big_common_type(Semantic *s, AstNode *n, const char *what, const char *left, const char *right) {
-    if (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) {
+    if (is_float_type(left) || is_float_type(right)) {
         fprintf(stderr, "semantic error: %s cannot mix %s and %s: convert with float(x)\n", what, left, right);
         s->had_error = 1;
         return NULL;
@@ -664,6 +711,13 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     }
     if (!left || !right) return NULL;
     if (is_big(left) || is_big(right)) return big_binary_type(s, n, left, right);
+    if (strcmp(left, "float32") == 0 && is_float_literal(rhs)) {
+        if (!set_float32_literal(rhs)) return NULL;
+        right = "float32";
+    } else if (strcmp(right, "float32") == 0 && is_float_literal(lhs)) {
+        if (!set_float32_literal(lhs)) return NULL;
+        left = "float32";
+    }
 
     if (strcmp(n->text, "and") == 0 || strcmp(n->text, "or") == 0) {
         if (strcmp(left, "bool") != 0 || strcmp(right, "bool") != 0) {
@@ -687,7 +741,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "arithmetic operators require int or float operands");
             return NULL;
         }
-        set_type(n, (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) ? "float" : "int");
+        set_type(n, numeric_result(left, right));
         return n->type_name;
     }
 
@@ -697,7 +751,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "arithmetic operators '-', '*' and '/' require int or float operands");
             return NULL;
         }
-        set_type(n, (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) ? "float" : "int");
+        set_type(n, numeric_result(left, right));
         return n->type_name;
     }
 
@@ -706,7 +760,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "operator '%' requires int or float operands");
             return NULL;
         }
-        set_type(n, (strcmp(left, "float") == 0 || strcmp(right, "float") == 0) ? "float" : "int");
+        set_type(n, numeric_result(left, right));
         return n->type_name;
     }
 
@@ -808,6 +862,11 @@ static int implicit_big(const char *actual, const char *expected) {
 
 static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expected) {
     if (is_big(expected) && is_int_literal(n)) return type_int_literal(s, n, expected);
+    if (expected && strcmp(expected, "float32") == 0 && is_float_literal(n)) {
+        /* let x: float32 = 0.1 : the number written is a float32 (0.1f in C) */
+        if (!expr_type(s, n) || !set_float32_literal(n)) return NULL;
+        return n->type_name;
+    }
     /* pow(2, 1000) where an int1024 is expected: 2 is an int1024 */
     if (is_big(expected) && n && n->kind == AST_CALL && n->text && strcmp(n->text, "pow") == 0 &&
         n->child_count == 2 && is_int_literal(n->children[0]) && !find_function(s, "pow") &&
@@ -839,6 +898,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             if (is_big(n->type_name)) return n->type_name;   /* typed by its context */
             return type_int_literal(s, n, "int");
         case AST_FLOAT:
+            if (n->type_name && strcmp(n->type_name, "float32") == 0) return n->type_name;   /* typed by its context */
             set_type(n, "float");
             return n->type_name;
         case AST_BOOL:
@@ -1316,7 +1376,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
         case AST_PRINT: {
             const char *type = expr_type(s, n->children[0]);
             if (!type) return 0;
-            if (strcmp(type, "int") != 0 && strcmp(type, "float") != 0 &&
+            if (strcmp(type, "int") != 0 && !is_float_type(type) &&
                 strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 && !is_big(type)) {
                 error_type(s, "print() received an unsupported type");
                 return 0;
