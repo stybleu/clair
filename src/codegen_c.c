@@ -244,6 +244,20 @@ static int int_div_is_safe(const AstNode *n) {
 
 static int is_int_type(const char *t) { return t && strcmp(t, "int") == 0; }
 
+/* load_csv, save_csv, read_lines, split, strip (after the '@') */
+static int is_text_call(const char *name) {
+    static const char *const names[] = { "load_csv", "save_csv", "read_lines", "split", "strip", NULL };
+    for (size_t i = 0; names[i]; i++) if (strcmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+/* int("42"), float(" 2.5 "), float32("0.1"): reading a number written in a string */
+static int is_string_conversion(const AstNode *n) {
+    return n && n->kind == AST_CALL && n->text && n->child_count == 1 && n->children[0]->type_name &&
+           strcmp(n->children[0]->type_name, "string") == 0 &&
+           (strcmp(n->text, "@int") == 0 || strcmp(n->text, "@float") == 0 || strcmp(n->text, "@float32") == 0);
+}
+
 /* seed, random, randint, uniform, gauss, shuffle, choice (after the '@') */
 static int is_random_call(const char *name) {
     static const char *const names[] = { "seed", "random", "randint", "uniform", "gauss", "shuffle", "choice", NULL };
@@ -256,6 +270,9 @@ static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
     if (strcmp(call->text, "@matrix") == 0) return 0;
     if (strcmp(call->text, "@randint") == 0 || strcmp(call->text, "@choice") == 0) return 0;   /* empty range, empty list */
+    if (is_string_conversion(call)) return 0;                                    /* float("abc") */
+    if (is_text_call(call->text + 1)) return strcmp(call->text, "@strip") == 0 ||   /* files, split(s, "") */
+                                             (strcmp(call->text, "@split") == 0 && call->child_count == 1);
     if (strcmp(call->text, "@convert") == 0) return 0;     /* narrowing big integers is checked */
     if (strncmp(call->text, "@slice", 6) == 0) return 0;   /* a step of 0 stops the program */
     if (big_bits(call->type_name)) return 0;               /* abs, min, max, pow of big integers */
@@ -1931,6 +1948,7 @@ static int expr_prec(const AstNode *n) {
             return fast_access_base(n) ? PREC_POSTFIX : PREC_UNARY;  /* `*accessor(...)` */
         case AST_CALL:
             if (n->text && strcmp(n->text, "len") == 0) return PREC_UNARY;    /* (int64_t)x->len */
+            if (is_string_conversion(n)) return PREC_POSTFIX;                  /* clair_rt_parse_float(s) */
             if (n->text && strcmp(n->text, "@float") == 0) return PREC_UNARY; /* (double)x */
             if (n->text && strcmp(n->text, "@int") == 0 && builtin_cannot_fail(n)) return PREC_UNARY;
             if (n->text && n->text[0] == '@' && small_machine_bits(n->text + 1)) return PREC_UNARY;  /* (uint8_t)x */
@@ -3158,6 +3176,28 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (strcmp(name, "rows") == 0 || strcmp(name, "cols") == 0) {
                     if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
                     fprintf(f, "->%s", name);
+                    return 1;
+                }
+                if (is_string_conversion(n)) {
+                    fprintf(f, "clair_rt_parse_%s(", strcmp(name, "int") == 0 ? "int" : strcmp(name, "float") == 0 ? "float" : "f32");
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fputc(')', f);
+                    return 1;
+                }
+                if (is_text_call(name)) {
+                    /* load_csv and save_csv: 0 float, 1 float32, 2 int */
+                    const char *mtype = strcmp(name, "load_csv") == 0 ? n->type_name
+                                      : strcmp(name, "save_csv") == 0 ? n->children[1]->type_name : NULL;
+                    int kind = mtype && strstr(mtype, "float32") ? 1 : mtype && strstr(mtype, "[int]") ? 2 : 0;
+                    if (strcmp(name, "split") == 0 && n->child_count == 1) fputs("clair_rt_split_spaces(", f);
+                    else fprintf(f, "clair_rt_%s(", name);
+                    size_t args = strcmp(name, "load_csv") == 0 ? 1 : n->child_count;   /* the kind is known here */
+                    for (size_t i = 0; i < args; i++) {
+                        if (i != 0) fputs(", ", f);
+                        if (!emit_expr(f, n->children[i])) return 0;
+                    }
+                    if (mtype) fprintf(f, ", %d", kind);
+                    fputc(')', f);
                     return 1;
                 }
                 if (is_random_call(name)) {
@@ -5151,7 +5191,8 @@ static int node_uses_math(const AstNode *n) {
         strcmp(n->text, "@int") != 0 && strcmp(n->text, "@float") != 0 &&
         strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
         strncmp(n->text, "@slice", 6) != 0 && !small_machine_bits(n->text + 1) &&
-        (!is_random_call(n->text + 1) || strcmp(n->text, "@gauss") == 0) &&
+        (!is_random_call(n->text + 1) || strcmp(n->text, "@gauss") == 0) && !is_text_call(n->text + 1) &&
+        !is_string_conversion(n) &&
         !(machine_type_bits(n->type_name) &&
           (strcmp(n->text, "@abs") == 0 || strcmp(n->text, "@min") == 0 || strcmp(n->text, "@max") == 0))) return 1;
     if (n->kind == AST_BINARY && n->text && strcmp(n->text, "%") == 0 && !machine_type_bits(n->type_name)) return 1;
@@ -5956,6 +5997,404 @@ static void emit_random_runtime(FILE *f, const AstNode *program) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Text and files: numbers in strings, split, strip, read_lines, and   */
+/* CSV files of numbers (load_csv, save_csv).                          */
+/* ------------------------------------------------------------------ */
+
+static int node_uses_string_conversion(const AstNode *n) {
+    if (!n) return 0;
+    if (is_string_conversion(n)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_uses_string_conversion(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+static void emit_text_runtime(FILE *f, int any, int piece, int list, int file, int lines, int csv, int save) {
+    if (any) {
+        fputs(
+            "/* ---- text and files: numbers read like Python's int() and float() ---- */\n"
+            "static _Noreturn void clair_rt_text_fail(const char *message, const char *text) {\n"
+            "    if (text) fprintf(stderr, \"Clair runtime error: %s'%s'\\n\", message, text);\n"
+            "    else fprintf(stderr, \"Clair runtime error: %s\\n\", message);\n"
+            "    exit(EXIT_FAILURE);\n"
+            "}\n"
+            "\n"
+            "static inline bool clair_rt_is_space(char c) {\n"
+            "    return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || c == '\\v' || c == '\\f' || (c >= 0x1c && c <= 0x1f);\n"
+            "}\n"
+            "\n"
+            "/* s without the spaces around it nor the _ between digits (1_000), in a new buffer; NULL when malformed */\n"
+            "static char *clair_rt_number_text(const char *s) {\n"
+            "    while (clair_rt_is_space(*s)) s++;\n"
+            "    size_t len = strlen(s);\n"
+            "    while (len > 0 && clair_rt_is_space(s[len - 1])) len--;\n"
+            "    char *out = malloc(len + 1);\n"
+            "    if (!out) clair_rt_text_fail(\"out of memory\", NULL);\n"
+            "    size_t n = 0;\n"
+            "    for (size_t i = 0; i < len; i++) {\n"
+            "        if (s[i] == '_') {\n"
+            "            if (i == 0 || i + 1 >= len || !(s[i - 1] >= '0' && s[i - 1] <= '9') || !(s[i + 1] >= '0' && s[i + 1] <= '9')) {\n"
+            "                free(out);\n"
+            "                return NULL;\n"
+            "            }\n"
+            "            continue;\n"
+            "        }\n"
+            "        if (s[i] == 'x' || s[i] == 'X' || s[i] == '(') {    /* no hexadecimal float nor nan(...), like Python */\n"
+            "            free(out);\n"
+            "            return NULL;\n"
+            "        }\n"
+            "        out[n++] = s[i];\n"
+            "    }\n"
+            "    out[n] = '\\0';\n"
+            "    if (n == 0) {\n"
+            "        free(out);\n"
+            "        return NULL;\n"
+            "    }\n"
+            "    return out;\n"
+            "}\n"
+            "\n"
+            "static bool clair_rt_read_double(const char *s, double *value) {\n"
+            "    char *t = clair_rt_number_text(s), *end = NULL;\n"
+            "    if (!t) return false;\n"
+            "    *value = strtod(t, &end);\n"
+            "    bool ok = end != t && *end == '\\0';\n"
+            "    free(t);\n"
+            "    return ok;\n"
+            "}\n"
+            "\n"
+            "static bool clair_rt_read_f32(const char *s, float *value) {\n"
+            "    char *t = clair_rt_number_text(s), *end = NULL;\n"
+            "    if (!t) return false;\n"
+            "    *value = strtof(t, &end);\n"
+            "    bool ok = end != t && *end == '\\0';\n"
+            "    free(t);\n"
+            "    return ok;\n"
+            "}\n"
+            "\n"
+            "/* 0: fine, 1: not an int, 2: does not fit in an int */\n"
+            "static int clair_rt_read_int(const char *s, int64_t *value) {\n"
+            "    char *t = clair_rt_number_text(s), *end = NULL;\n"
+            "    if (!t) return 1;\n"
+            "    const char *d = t + (t[0] == '+' || t[0] == '-');\n"
+            "    int result = *d ? 0 : 1;\n"
+            "    for (const char *p = d; *p; p++) if (*p < '0' || *p > '9') result = 1;\n"
+            "    if (result == 0) {\n"
+            "        errno = 0;\n"
+            "        *value = (int64_t)strtoll(t, &end, 10);\n"
+            "        if (errno == ERANGE) result = 2;\n"
+            "    }\n"
+            "    free(t);\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "static double clair_rt_parse_float(const char *s) {\n"
+            "    double value;\n",
+            f);
+        fputs(
+            "    if (!clair_rt_read_double(s, &value)) clair_rt_text_fail(\"could not convert string to float: \", s);\n"
+            "    return value;\n"
+            "}\n"
+            "\n"
+            "static float clair_rt_parse_f32(const char *s) {\n"
+            "    float value;\n"
+            "    if (!clair_rt_read_f32(s, &value)) clair_rt_text_fail(\"could not convert string to float32: \", s);\n"
+            "    return value;\n"
+            "}\n"
+            "\n"
+            "static int64_t clair_rt_parse_int(const char *s) {\n"
+            "    int64_t value = 0;\n"
+            "    int status = clair_rt_read_int(s, &value);\n"
+            "    if (status == 1) clair_rt_text_fail(\"invalid literal for int() with base 10: \", s);\n"
+            "    if (status == 2) clair_rt_text_fail(\"int() argument out of range: \", s);\n"
+            "    return value;\n"
+            "}\n"
+            "\n",
+            f);
+    }
+    if (piece) {
+        fputs(
+            "/* a new string: the bytes [start, end) of s */\n"
+            "static const char *clair_rt_text_piece(const char *start, const char *end) {\n"
+            "    size_t len = (size_t)(end - start);\n"
+            "    char *out = clair_rt_arena_alloc(len + 1);\n"
+            "    memcpy(out, start, len);\n"
+            "    out[len] = '\\0';\n"
+            "    return out;\n"
+            "}\n"
+            "\n"
+            "/* strip(s): without the spaces at both ends */\n"
+            "static const char *clair_rt_strip(const char *s) {\n"
+            "    while (*s && clair_rt_is_space(*s)) s++;\n"
+            "    const char *end = s + strlen(s);\n"
+            "    while (end > s && clair_rt_is_space(end[-1])) end--;\n"
+            "    return clair_rt_text_piece(s, end);\n"
+            "}\n"
+            "\n",
+            f);
+    }
+    if (list) {
+        fputs(
+            "/* a list[string] made of count pieces */\n"
+            "static ClairList clair_rt_text_list(const char **pieces, size_t count) {\n"
+            "    ClairList list = clair_rt_list_make(pieces, count, sizeof(const char *));\n"
+            "    free(pieces);\n"
+            "    return list;\n"
+            "}\n"
+            "\n"
+            "static const char **clair_rt_text_grow(const char **pieces, size_t count, size_t *capacity) {\n"
+            "    if (count < *capacity) return pieces;\n"
+            "    *capacity = *capacity ? *capacity * 2 : 16;\n"
+            "    pieces = realloc(pieces, *capacity * sizeof(const char *));\n"
+            "    if (!pieces) clair_rt_text_fail(\"out of memory\", NULL);\n"
+            "    return pieces;\n"
+            "}\n"
+            "\n"
+            "/* split(s, sep): like Python, \"a,,b\" gives a, \"\" and b */\n"
+            "static ClairList clair_rt_split(const char *s, const char *sep) {\n"
+            "    size_t sep_len = strlen(sep), count = 0, capacity = 0;\n"
+            "    if (sep_len == 0) clair_rt_text_fail(\"split() empty separator\", NULL);\n"
+            "    const char **pieces = NULL;\n"
+            "    for (;;) {\n"
+            "        const char *found = strstr(s, sep);\n"
+            "        pieces = clair_rt_text_grow(pieces, count, &capacity);\n"
+            "        pieces[count++] = clair_rt_text_piece(s, found ? found : s + strlen(s));\n"
+            "        if (!found) break;\n"
+            "        s = found + sep_len;\n"
+            "    }\n"
+            "    return clair_rt_text_list(pieces, count);\n"
+            "}\n"
+            "\n"
+            "/* split(s): the words between spaces, like Python (no empty word) */\n"
+            "static ClairList clair_rt_split_spaces(const char *s) {\n"
+            "    size_t count = 0, capacity = 0;\n"
+            "    const char **pieces = NULL;\n"
+            "    for (;;) {\n"
+            "        while (*s && clair_rt_is_space(*s)) s++;\n"
+            "        if (!*s) break;\n"
+            "        const char *start = s;\n"
+            "        while (*s && !clair_rt_is_space(*s)) s++;\n"
+            "        pieces = clair_rt_text_grow(pieces, count, &capacity);\n"
+            "        pieces[count++] = clair_rt_text_piece(start, s);\n"
+            "    }\n"
+            "    return clair_rt_text_list(pieces, count);\n"
+            "}\n"
+            "\n",
+            f);
+    }
+    if (file) {
+        fputs(
+            "/* the whole file, followed by a '\\0' */\n"
+            "static char *clair_rt_read_file(const char *path, size_t *size) {\n"
+            "    FILE *file = fopen(path, \"rb\");\n"
+            "    if (!file) {\n"
+            "        fprintf(stderr, \"Clair runtime error: cannot open file '%s': %s\\n\", path, strerror(errno));\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    size_t capacity = 1 << 16, used = 0;\n"
+            "    char *data = malloc(capacity);\n"
+            "    for (;;) {\n"
+            "        if (!data) clair_rt_text_fail(\"out of memory\", NULL);\n"
+            "        used += fread(data + used, 1, capacity - used - 1, file);\n"
+            "        if (used < capacity - 1) break;\n"
+            "        capacity *= 2;\n"
+            "        data = realloc(data, capacity);\n"
+            "    }\n"
+            "    bool failed = ferror(file);\n"
+            "    fclose(file);\n"
+            "    if (failed) clair_rt_text_fail(\"cannot read file \", path);\n"
+            "    data[used] = '\\0';\n"
+            "    *size = used;\n"
+            "    return data;\n"
+            "}\n"
+            "\n"
+            "/* the next line of text (cut in place, without its '\\n' or \"\\r\\n\"), NULL at the end */\n"
+            "static char *clair_rt_next_line(char **cursor, char *end) {\n"
+            "    char *line = *cursor;\n"
+            "    if (line >= end) return NULL;\n"
+            "    char *stop = memchr(line, '\\n', (size_t)(end - line));\n"
+            "    *cursor = stop ? stop + 1 : end;\n"
+            "    if (!stop) stop = end;\n"
+            "    if (stop > line && stop[-1] == '\\r') stop--;\n"
+            "    *stop = '\\0';\n"
+            "    return line;\n"
+            "}\n"
+            "\n",
+            f);
+    }
+    if (lines) {
+        fputs(
+            "/* read_lines(path): every line of the file, without its end of line */\n"
+            "static ClairList clair_rt_read_lines(const char *path) {\n"
+            "    size_t size, count = 0, capacity = 0;\n"
+            "    char *data = clair_rt_read_file(path, &size), *cursor = data, *line;\n"
+            "    const char **pieces = NULL;\n"
+            "    while ((line = clair_rt_next_line(&cursor, data + size)) != NULL) {\n"
+            "        pieces = clair_rt_text_grow(pieces, count, &capacity);\n"
+            "        pieces[count++] = clair_rt_text_piece(line, line + strlen(line));\n"
+            "    }\n"
+            "    free(data);\n"
+            "    return clair_rt_text_list(pieces, count);\n"
+            "}\n"
+            "\n",
+            f);
+    }
+    if (csv) {
+        fputs(
+            "/*\n"
+            " * load_csv(path): a matrix of numbers (kind 0 float, 1 float32, 2 int).  The\n"
+            " * values are separated by ',', ';', tabs or spaces (seen on the first line);\n"
+            " * a first line that is not made of numbers is a header and is skipped; empty\n"
+            " * lines are skipped.\n"
+            " */\n"
+            "static ClairMatrix clair_rt_load_csv(const char *path, int kind) {\n"
+            "    size_t size;\n"
+            "    char *data = clair_rt_read_file(path, &size), *cursor = data, *line;\n"
+            "    size_t elem = kind == 1 ? sizeof(float) : kind == 2 ? sizeof(int64_t) : sizeof(double);\n"
+            "    size_t count = 0, capacity = 0;\n"
+            "    unsigned char *values = NULL;\n"
+            "    int64_t rows = 0, cols = -1, number = 0;\n"
+            "    char sep = 0;\n"
+            "    char *fields[4096];\n"
+            "    while ((line = clair_rt_next_line(&cursor, data + size)) != NULL) {\n"
+            "        number++;\n"
+            "        const char *p = line;\n"
+            "        while (*p && clair_rt_is_space(*p)) p++;\n"
+            "        if (!*p) continue;\n"
+            "        if (!sep) sep = strchr(line, ',') ? ',' : strchr(line, ';') ? ';' : strchr(line, '\\t') ? '\\t' : ' ';\n"
+            "        /* the values of the line */\n"
+            "        int64_t n = 0;\n"
+            "        if (sep == ' ') {\n"
+            "            char *q = line;\n"
+            "            for (;;) {\n"
+            "                while (*q && clair_rt_is_space(*q)) q++;\n"
+            "                if (!*q) break;\n"
+            "                if (n == 4096) clair_rt_text_fail(\"load_csv(): more than 4096 values on a line\", NULL);\n"
+            "                fields[n++] = q;\n"
+            "                while (*q && !clair_rt_is_space(*q)) q++;\n"
+            "                if (*q) *q++ = '\\0';\n"
+            "            }\n"
+            "        } else {\n"
+            "            char *q = line;\n"
+            "            for (;;) {\n"
+            "                if (n == 4096) clair_rt_text_fail(\"load_csv(): more than 4096 values on a line\", NULL);\n"
+            "                fields[n++] = q;\n"
+            "                q = strchr(q, sep);\n"
+            "                if (!q) break;\n"
+            "                *q++ = '\\0';\n"
+            "            }\n"
+            "        }\n"
+            "        if (cols < 0) {\n"
+            "            /* a header: a first line with something that is not a number */\n"
+            "            bool header = false;\n"
+            "            for (int64_t k = 0; k < n; k++) {\n"
+            "                double ignored;\n"
+            "                if (!clair_rt_read_double(fields[k], &ignored)) header = true;\n"
+            "            }\n"
+            "            cols = n;\n"
+            "            if (header) continue;\n"
+            "        }\n"
+            "        if (n != cols) {\n"
+            "            fprintf(stderr, \"Clair runtime error: load_csv(): line %\" PRId64 \" of '%s' has %\" PRId64\n"
+            "                            \" values instead of %\" PRId64 \"\\n\", number, path, n, cols);\n"
+            "            exit(EXIT_FAILURE);\n"
+            "        }\n"
+            "        if (count + (size_t)n > capacity) {\n"
+            "            while (count + (size_t)n > capacity) capacity = capacity ? capacity * 2 : 1024;\n"
+            "            values = realloc(values, capacity * elem);\n"
+            "            if (!values) clair_rt_text_fail(\"out of memory\", NULL);\n"
+            "        }\n"
+            "        for (int64_t k = 0; k < n; k++) {\n"
+            "            bool ok;\n",
+            f);
+        fputs(
+            "            if (kind == 1) ok = clair_rt_read_f32(fields[k], (float *)values + count);\n"
+            "            else if (kind == 2) ok = clair_rt_read_int(fields[k], (int64_t *)values + count) == 0;\n"
+            "            else ok = clair_rt_read_double(fields[k], (double *)values + count);\n"
+            "            if (!ok) {\n"
+            "                fprintf(stderr, \"Clair runtime error: load_csv(): line %\" PRId64 \", value %\" PRId64 \" of '%s' is not %s: '%s'\\n\",\n"
+            "                        number, k + 1, path, kind == 2 ? \"an int\" : \"a number\", fields[k]);\n"
+            "                exit(EXIT_FAILURE);\n"
+            "            }\n"
+            "            count++;\n"
+            "        }\n"
+            "        rows++;\n"
+            "    }\n"
+            "    free(data);\n"
+            "    if (cols < 0) cols = 0;\n"
+            "    ClairMatrix m = clair_rt_matrix_make(rows, cols, elem);\n"
+            "    if (count) memcpy(m->data, values, count * elem);\n"
+            "    free(values);\n"
+            "    return m;\n"
+            "}\n"
+            "\n",
+            f);
+    }
+    if (save) {
+        fputs(
+            "/* a number written like Python's str(): fewest digits that read back the same */\n"
+            "static void clair_rt_write_number(FILE *file, double x, bool f32) {\n"
+            "    if (x != x) { fputs(\"nan\", file); return; }\n"
+            "    if (x - x != 0) { fputs(x > 0 ? \"inf\" : \"-inf\", file); return; }\n"
+            "    char text[40];\n"
+            "    for (int p = 1; p <= 17; p++) {\n"
+            "        snprintf(text, sizeof(text), \"%.*e\", p - 1, x);\n"
+            "        if (f32 ? strtof(text, NULL) == (float)x : strtod(text, NULL) == x) break;\n"
+            "    }\n"
+            "    char digits[24];\n"
+            "    int count = 0;\n"
+            "    const char *q = text;\n"
+            "    if (*q == '-') { fputc('-', file); q++; }\n"
+            "    for (; *q && *q != 'e'; q++) if (*q != '.') digits[count++] = *q;\n"
+            "    int e = atoi(q + 1);\n"
+            "    while (count > 1 && digits[count - 1] == '0') count--;\n"
+            "    if (e >= -4 && e < 16) {\n"
+            "        if (e < 0) {\n"
+            "            fputs(\"0.\", file);\n"
+            "            for (int i = 0; i < -e - 1; i++) fputc('0', file);\n"
+            "            fwrite(digits, 1, (size_t)count, file);\n"
+            "        } else {\n"
+            "            for (int i = 0; i <= e; i++) fputc(i < count ? digits[i] : '0', file);\n"
+            "            fputc('.', file);\n"
+            "            if (count > e + 1) fwrite(digits + e + 1, 1, (size_t)(count - e - 1), file);\n"
+            "            else fputc('0', file);\n"
+            "        }\n"
+            "    } else {\n"
+            "        fputc(digits[0], file);\n"
+            "        if (count > 1) {\n"
+            "            fputc('.', file);\n"
+            "            fwrite(digits + 1, 1, (size_t)(count - 1), file);\n"
+            "        }\n"
+            "        fprintf(file, \"e%c%02d\", e < 0 ? '-' : '+', e < 0 ? -e : e);\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "/* save_csv(path, m): one line per row, values separated by ',' */\n"
+            "static int64_t clair_rt_save_csv(const char *path, ClairMatrix m, int kind) {\n"
+            "    FILE *file = fopen(path, \"w\");\n"
+            "    if (!file) {\n"
+            "        fprintf(stderr, \"Clair runtime error: cannot write file '%s': %s\\n\", path, strerror(errno));\n"
+            "        exit(EXIT_FAILURE);\n"
+            "    }\n"
+            "    for (int64_t i = 0; i < m->rows; i++) {\n"
+            "        for (int64_t j = 0; j < m->cols; j++) {\n"
+            "            if (j) fputc(',', file);\n"
+            "            int64_t k = i * m->cols + j;\n"
+            "            if (kind == 2) fprintf(file, \"%\" PRId64, ((int64_t *)m->data)[k]);\n"
+            "            else if (kind == 1) clair_rt_write_number(file, ((float *)m->data)[k], true);\n"
+            "            else clair_rt_write_number(file, ((double *)m->data)[k], false);\n"
+            "        }\n"
+            "        fputc('\\n', file);\n"
+            "    }\n"
+            "    if (fclose(file) != 0) clair_rt_text_fail(\"cannot write file \", path);\n"
+            "    return 0;\n"
+            "}\n"
+            "\n",
+            f);
+    }
+}
+
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
     stack_list_counter = 0;
@@ -5980,7 +6419,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
         "#include <string.h>\n",
         f
     );
-    if (uses_input_int) fputs("#include <errno.h>\n", f);
+    int uses_text = node_uses_call_named(program, "@load_csv") || node_uses_call_named(program, "@read_lines") ||
+                    node_uses_call_named(program, "@split") || node_uses_call_named(program, "@strip") ||
+                    node_uses_call_named(program, "@save_csv") || node_uses_string_conversion(program);
+    if (uses_input_int || uses_text) fputs("#include <errno.h>\n", f);
     if (uses_cores) fputs("#include <pthread.h>\n#include <sched.h>\n#include <stdatomic.h>\n#include <time.h>\n", f);
     else if (node_uses_call_named(program, "@random") || node_uses_call_named(program, "@randint") ||
              node_uses_call_named(program, "@uniform") || node_uses_call_named(program, "@gauss") ||
@@ -6087,7 +6529,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
         );
 
         int uses_list_slice = node_uses_slice(program, 0);
-        int uses_list_literal = node_uses_kind(program, AST_LIST) || uses_list_slice;
+        int uses_list_literal = node_uses_kind(program, AST_LIST) || uses_list_slice ||
+                                node_uses_call_named(program, "@read_lines") || node_uses_call_named(program, "@split");
         int uses_list_at = node_uses_kind(program, AST_INDEX) || node_uses_kind(program, AST_INDEX_ASSIGN);
         int uses_list_append = node_uses_kind(program, AST_LIST_APPEND);
 
@@ -6267,7 +6710,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
     int uses_concat = node_uses_string_concat(program);
     int uses_string_slice = node_uses_slice(program, 1);
 
-    if (uses_objects || uses_concat || uses_matrix || uses_string_slice) {
+    int uses_text_pieces = node_uses_call_named(program, "@read_lines") || node_uses_call_named(program, "@split") ||
+                           node_uses_call_named(program, "@strip");
+    if (uses_objects || uses_concat || uses_matrix || uses_string_slice || uses_text_pieces) {
         /*
          * Bump-pointer arena shared by objects and concatenated strings.
          * One allocation is a pointer increment instead of malloc() plus a
@@ -6874,6 +7319,13 @@ int codegen_c_file(const AstNode *program, const char *path) {
     }
 
     emit_random_runtime(f, program);
+    {
+        int csv = node_uses_call_named(program, "@load_csv"), lines = node_uses_call_named(program, "@read_lines");
+        int split = node_uses_call_named(program, "@split"), strip = node_uses_call_named(program, "@strip");
+        int save = node_uses_call_named(program, "@save_csv");
+        int any = csv || lines || split || strip || save || node_uses_string_conversion(program);
+        emit_text_runtime(f, any, split || strip || lines, split || lines, csv || lines, lines, csv, save);
+    }
 
     range_counter = 0;
     list_mutation_counter = 0;

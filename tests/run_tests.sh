@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.37 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.38 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -654,6 +654,18 @@ expect_runtime_error randint_empty_runtime '3' 'Clair runtime error: randint() e
 expect_runtime_error choice_empty_runtime '7' 'Clair runtime error: choice() from an empty list'
 expect_compile_error invalid_randint_float "argument 1 of randint() expects an int, got float"
 expect_compile_error invalid_shuffle_type "argument 1 of shuffle() expects a list, got int"
+
+./build/clair tests/fichiers.cl -o build/test_fichiers
+[ "$(./build/test_fichiers)" = "$(cat tests/fichiers.expected)" ]
+grep -Fq 'clair_rt_load_csv("tests/donnees/fleurs.csv", 1)' build/test_fichiers.generated.c
+printf '%s\n' 'fichiers.cl : OK -> load_csv, save_csv, read_lines, split, strip, int() et float() de chaines ; identique a Python'
+expect_runtime_error csv_missing_runtime '1' "Clair runtime error: cannot open file 'tests/donnees/absent.csv'"
+expect_runtime_error csv_bad_value_runtime '2' "Clair runtime error: load_csv(): line 2, value 2 of 'tests/donnees/mauvais.csv' is not a number: 'x'"
+expect_runtime_error csv_ragged_runtime '3' "Clair runtime error: load_csv(): line 2 of 'tests/donnees/bancal.csv' has 1 values instead of 2"
+expect_runtime_error float_string_runtime '4.5' "Clair runtime error: could not convert string to float: 'abc'"
+expect_runtime_error int_string_runtime '12' "Clair runtime error: invalid literal for int() with base 10: '1.5'"
+expect_runtime_error split_empty_runtime '2' 'Clair runtime error: split() empty separator'
+expect_compile_error invalid_load_csv_kind 'argument 2 of load_csv() must be written "float", "float32" or "int"'
 
 ./build/clair tests/entiers_machine.cl -o build/test_entiers_machine
 [ "$(./build/test_entiers_machine)" = "$(cat tests/entiers_machine.expected)" ]

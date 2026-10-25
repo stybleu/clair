@@ -40,6 +40,12 @@ if clang -O2 "$ROOT/tools/pin_core.c" -o "$WORK/pin_core" 2> "$WORK/pin_core.log
         'BEGIN { printf "coeur %d", c; if (k > 0) printf " (%.2f GHz)", k / 1e6; printf " pour Clair et C" }')
 fi
 
+# The chosen core may be switched off while the report runs (battery saver, heat):
+# then a pinned run would fail at once and give a time that means nothing.
+core_ok() {
+    [ ${#PIN[@]} -eq 0 ] || "${PIN[@]}" true 2> /dev/null
+}
+
 median() { printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 } END { print (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
 
 # "oui" when the machine code of these functions contains SIMD instructions
@@ -85,6 +91,10 @@ for name in collatz dot axpy axpy32 octets while forin matmul matmul32 matrice c
     same=""
     [ "$out_clair" = "$out_ref" ] || same=" RESULTAT DIFFERENT"
 
+    if ! core_ok; then
+        printf '%-9s coeur %s indisponible (economie d energie ou chaleur ?)\n' "$name" "${PIN[1]}"
+        continue
+    fi
     times_clair=(); times_ref=()
     for _ in $(seq "$ROUNDS"); do
         times_clair+=("$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/$name")")
@@ -101,12 +111,18 @@ done
 # between all the cores. Same programs, one core (pinned) against all of them.
 cores=$(nproc 2>/dev/null || echo 1)
 printf '\nPLUSIEURS COEURS (%s coeurs)\n' "$cores"
+[ "$cores" -lt "$(getconf _NPROCESSORS_CONF 2>/dev/null || echo "$cores")" ] &&
+    printf 'attention : %s coeurs sur %s en marche (economie d energie ou chaleur ?)\n' "$cores" "$(getconf _NPROCESSORS_CONF)"
 printf '%-9s %-7s %-7s %s\n' "programme" "1 coeur" "tous" "gain"
 for name in matmul matmul32 matrice couche couche32; do
     [ -x "$WORK/$name" ] || continue
     out_one=$(CLAIR_THREADS=1 "$WORK/$name"); out_all=$("$WORK/$name")
     same=""
     [ "$out_one" = "$out_all" ] || same=" RESULTAT DIFFERENT"
+    if ! core_ok; then
+        printf '%-9s coeur %s indisponible\n' "$name" "${PIN[1]}"
+        continue
+    fi
     times_one=(); times_all=()
     for _ in $(seq "$ROUNDS"); do
         times_one+=("$(seconds env CLAIR_THREADS=1 ${PIN[@]+"${PIN[@]}"} "$WORK/$name")")

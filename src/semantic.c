@@ -540,6 +540,83 @@ static int check_random_call(Semantic *s, AstNode *n) {
     return set_type(n, result) ? 1 : -1;
 }
 
+/*
+ * Files and text:
+ *   load_csv(path) -> matrix[float], load_csv(path, "float32" / "int") -> matrix[...]
+ *   save_csv(path, m), read_lines(path) -> list[string],
+ *   split(s) / split(s, sep) -> list[string], strip(s) -> string.
+ * 1 when n is one of them (renamed @load_csv...), 0 otherwise, -1 on error.
+ */
+static int check_text_call(Semantic *s, AstNode *n) {
+    static const char *const names[] = { "load_csv", "save_csv", "read_lines", "split", "strip", NULL };
+    size_t c = 0;
+    while (names[c] && strcmp(n->text, names[c]) != 0) c++;
+    if (!names[c]) return 0;
+    const char *name = names[c], *result = NULL;
+    size_t min = 1, max = 1;
+    if (strcmp(name, "load_csv") == 0 || strcmp(name, "split") == 0) max = 2;
+    if (strcmp(name, "save_csv") == 0) min = max = 2;
+    if (n->child_count < min || n->child_count > max) {
+        if (min == max) fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
+        else fprintf(stderr, "semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *t0 = expr_type(s, n->children[0]);
+    if (!t0) return -1;
+    if (strcmp(t0, "string") != 0) {
+        fprintf(stderr, "semantic error: argument 1 of %s() expects a string, got %s\n", name, t0);
+        s->had_error = 1;
+        return -1;
+    }
+    if (strcmp(name, "load_csv") == 0) {
+        result = "matrix[float]";
+        if (n->child_count == 2) {
+            const AstNode *kind = n->children[1];
+            const char *text = kind->kind == AST_STRING ? kind->text : NULL;
+            if (text && strcmp(text, "float") == 0) result = "matrix[float]";
+            else if (text && strcmp(text, "float32") == 0) result = "matrix[float32]";
+            else if (text && strcmp(text, "int") == 0) result = "matrix[int]";
+            else {
+                fprintf(stderr, "semantic error: argument 2 of load_csv() must be written \"float\", \"float32\" or \"int\"\n");
+                s->had_error = 1;
+                return -1;
+            }
+            if (!expr_type(s, n->children[1])) return -1;
+        }
+    } else if (strcmp(name, "save_csv") == 0) {
+        const char *t1 = expr_type(s, n->children[1]);
+        if (!t1) return -1;
+        if (strcmp(t1, "matrix[float]") != 0 && strcmp(t1, "matrix[float32]") != 0 && strcmp(t1, "matrix[int]") != 0) {
+            fprintf(stderr, "semantic error: argument 2 of save_csv() expects matrix[float], matrix[float32] or "
+                            "matrix[int], got %s\n", t1);
+            s->had_error = 1;
+            return -1;
+        }
+        result = "int";
+    } else if (strcmp(name, "split") == 0) {
+        if (n->child_count == 2) {
+            const char *t1 = expr_type(s, n->children[1]);
+            if (!t1) return -1;
+            if (strcmp(t1, "string") != 0) {
+                fprintf(stderr, "semantic error: argument 2 of split() expects a string, got %s\n", t1);
+                s->had_error = 1;
+                return -1;
+            }
+        }
+        result = "list[string]";
+    } else {
+        result = strcmp(name, "read_lines") == 0 ? "list[string]" : "string";
+    }
+    char *renamed = malloc(strlen(name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, name);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, result) ? 1 : -1;
+}
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -624,7 +701,8 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
             n->text = renamed;
             return set_type(n, kind == 5 ? "int" : "float") ? 1 : -1;
         }
-        int ok = is_numeric(args[i]) || ((kind == 5 || kind == 8) && strcmp(args[i], "bool") == 0);
+        int ok = is_numeric(args[i]) || ((kind == 5 || kind == 8) && strcmp(args[i], "bool") == 0) ||
+                 ((kind == 5 || kind == 6 || kind == 7) && strcmp(args[i], "string") == 0);   /* int("42"), float("2.5") */
         if (!ok) {
             fprintf(stderr, "semantic error: argument %zu of %s() expects int or float, got %s\n",
                     i + 1, name, args[i]);
@@ -1268,6 +1346,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 int builtin = check_matrix_builtin(s, n);
                 if (builtin == 0) builtin = check_builtin_call(s, n);
                 if (builtin == 0) builtin = check_random_call(s, n);
+                if (builtin == 0) builtin = check_text_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
                 fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);

@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include "parser.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,8 +92,31 @@ static AstNode *parse_atom(Parser *p) {
     }
 
     if (t.kind == TOKEN_STRING) {
+        /* \n \t \r \\ \" \' and \xHH, like Python; another \ stays as it is */
+        char *text = malloc(t.length + 1);
+        if (!text) return NULL;
+        size_t n = 0;
+        for (size_t i = 0; i < t.length; i++) {
+            char c = t.start[i], e = i + 1 < t.length ? t.start[i + 1] : '\0';
+            int hex = e == 'x' && i + 3 < t.length && isxdigit((unsigned char)t.start[i + 2]) &&
+                      isxdigit((unsigned char)t.start[i + 3]);
+            if (c != '\\') text[n++] = c;
+            else if (e == 'n') { text[n++] = '\n'; i++; }
+            else if (e == 't') { text[n++] = '\t'; i++; }
+            else if (e == 'r') { text[n++] = '\r'; i++; }
+            else if (e == '\\' || e == '"' || e == '\'') { text[n++] = e; i++; }
+            else if (hex && !(t.start[i + 2] == '0' && t.start[i + 3] == '0')) {
+                char digits[3] = { t.start[i + 2], t.start[i + 3], '\0' };
+                text[n++] = (char)strtol(digits, NULL, 16);
+                i += 3;
+            } else {
+                text[n++] = c;
+            }
+        }
         next(p);
-        return ast_new(AST_STRING, t.start, t.length);
+        AstNode *node = ast_new(AST_STRING, text, n);
+        free(text);
+        return node;
     }
 
     if (t.kind == TOKEN_LBRACKET) {

@@ -8,6 +8,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON
 - Entiers machine `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32` (`i64` = `int`) qui font le tour comme en C et NumPy ; opérations sur les bits `& | ^ ~ << >>` ; nombres `0xFF`, `0b1010`, `0o755`, `1_000_000`
 - Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres) et sans signe `uint128` .. `uint1024`, avec `abs`, `min`, `max`, `pow` exacts ; dépassements détectés
+- Fichiers CSV de nombres (`load_csv`, `save_csv`), lignes de texte (`read_lines`, `split`, `strip`), `int("42")` et `float("2.5")` comme en Python
 - Nombres aléatoires `seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice` : mêmes tirages que Python pour la même graine
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
 - Fonctions, conditions et boucles, dont `for v in liste` et `for i, v in enumerate(liste)` comme en Python
@@ -86,6 +87,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.38](docs/README_V0.38.md) : fichiers CSV (`load_csv`, `save_csv`), `read_lines`, `split`, `strip`, `int()` et `float()` de chaînes, `\t` et `\n` dans les chaînes
 - [Clair V0.37](docs/README_V0.37.md) : nombres aléatoires (`seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice`), mêmes tirages que Python ; couches denses 8 lignes à la fois
 - [Clair V0.36](docs/README_V0.36.md) : produits de matrices et couches denses `float32` en blocs, sur tous les cœurs
 - [Clair V0.35](docs/README_V0.35.md) : entiers machine `u8` .. `u64` et `i8` .. `i32`, opérations sur les bits, nombres en hexadécimal, binaire et octal
