@@ -57,7 +57,7 @@ printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$version"
 printf '%s\n' "$CORE_INFO"
 printf '%-9s %-11s %-7s %-7s %s\n' "programme" "$SIMD_NAME Cl/C" "Clair" "C" "ecart"
 
-for name in collatz dot axpy axpy32 octets while forin matmul matrice couche reseau; do
+for name in collatz dot axpy axpy32 octets while forin matmul matmul32 matrice couche couche32 reseau; do
     # hot function: "// noyau: name" in the program, otherwise its first def
     kernel=$(grep -m 1 -oE '^// noyau: [A-Za-z_]+' "$BENCH/$name.cl" | cut -d' ' -f3)
     [ -n "$kernel" ] || kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
@@ -102,7 +102,7 @@ done
 cores=$(nproc 2>/dev/null || echo 1)
 printf '\nPLUSIEURS COEURS (%s coeurs)\n' "$cores"
 printf '%-9s %-7s %-7s %s\n' "programme" "1 coeur" "tous" "gain"
-for name in matmul matrice couche; do
+for name in matmul matmul32 matrice couche couche32; do
     [ -x "$WORK/$name" ] || continue
     out_one=$(CLAIR_THREADS=1 "$WORK/$name"); out_all=$("$WORK/$name")
     same=""

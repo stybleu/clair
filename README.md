@@ -21,7 +21,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Doubles boucles (produit de matrices) vérifiées une seule fois avant la boucle extérieure
 - Produit de matrices reconnu et calculé en blocs : plus rapide que la triple boucle en C, résultat identique au bit près
 - Couche dense (matrice × vecteur) calculée 4 lignes à la fois : environ 2 fois plus rapide, résultat identique au bit près
-- Grands produits de matrices et grandes couches denses (activation comprise) sur tous les cœurs, même résultat quel que soit le nombre de cœurs (`CLAIR_THREADS=1` pour un seul)
+- Grands produits de matrices et grandes couches denses (activation comprise) sur tous les cœurs, en `float` et en `float32`, même résultat quel que soit le nombre de cœurs (`CLAIR_THREADS=1` pour un seul)
 - Option `--sans-verif` pour les longs calculs déjà testés : aucune vérification de bornes
 - Listes et matrices rendues pendant le programme quand plus rien ne les utilise (fin de bloc, `break`, `return`, remplacement)
 - C généré lisible, proche du C écrit à la main
@@ -68,7 +68,7 @@ fusionner `a * b + c` (un peu plus rapide sur ARM, dernier chiffre parfois diff�
 bash tools/rapport_code_machine.sh
 ```
 
-Compare onze programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé. Un second tableau donne le gain des programmes de matrices sur tous les cœurs.
+Compare treize programmes types avec leur version écrite à la main en C : vectorisation de la boucle chaude des deux côtés, temps et écart en %. Clair et C tournent sur le même cœur, le plus rapide, et le temps médian de 5 lancements est gardé. Un second tableau donne le gain des programmes de matrices sur tous les cœurs.
 
 ## Tests
 
@@ -85,6 +85,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.36](docs/README_V0.36.md) : produits de matrices et couches denses `float32` en blocs, sur tous les cœurs
 - [Clair V0.35](docs/README_V0.35.md) : entiers machine `u8` .. `u64` et `i8` .. `i32`, opérations sur les bits, nombres en hexadécimal, binaire et octal
 - [Clair V0.34](docs/README_V0.34.md) : `float32`, listes et matrices `float32`, résultats identiques à NumPy
 - [Clair V0.33](docs/README_V0.33.md) : `+=` et ses cousins, `enumerate`, tranches `xs[a:b:pas]`

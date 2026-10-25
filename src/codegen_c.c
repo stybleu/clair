@@ -1198,8 +1198,23 @@ static int program_has_fast_loop(const AstNode *n) {
 /* same order for every c[i][j]: the result is identical to the bit.  */
 /* ------------------------------------------------------------------ */
 
+/* "matrix[" + elem + "]": the kernels exist for float (double) and float32 (float) */
+static int has_elem(const char *type, const char *prefix, const char *elem) {
+    size_t lp = strlen(prefix), le = strlen(elem);
+    return type && strncmp(type, prefix, lp) == 0 && strncmp(type + lp, elem, le) == 0 && strcmp(type + lp + le, "]") == 0;
+}
+
+/* float or float32: the element type of a kernel, or NULL */
+static const char *kernel_elem(const char *type) {
+    if (!type) return NULL;
+    if (strcmp(type, "float") == 0) return "float";
+    if (strcmp(type, "float32") == 0) return "float32";
+    return NULL;
+}
+
 typedef struct {
     int list_form;                      /* 0: matrices m[i][j], 1: flat lists x[i * ld + j] */
+    const char *elem;                   /* float or float32 */
     const char *i, *k, *j;
     const AstNode *m_stop, *k_stop, *n_stop;
     const char *a, *b, *c;
@@ -1246,21 +1261,21 @@ static int same_ld(const AstNode *x, const AstNode *y) {
     return const_int_value(x, &a) && const_int_value(y, &b) && a == b;
 }
 
-/* name of m when e is m[row][col] with m a matrix[float] variable */
-static const char *matrix_read(const AstNode *e, const char *row, const char *col) {
+/* name of m when e is m[row][col] with m a matrix[float] (or matrix[float32]) variable */
+static const char *matrix_read(const AstNode *e, const char *row, const char *col, const char *elem) {
     if (!e || e->kind != AST_INDEX || e->child_count != 2 || !is_ident(e->children[1], col)) return NULL;
     const AstNode *r = e->children[0];
     if (r->kind != AST_INDEX || r->child_count != 2 || !is_ident(r->children[1], row)) return NULL;
     const AstNode *m = r->children[0];
-    if (!is_ident(m, NULL) || !m->type_name || strcmp(m->type_name, "matrix[float]") != 0) return NULL;
+    if (!is_ident(m, NULL) || !has_elem(m->type_name, "matrix[", elem)) return NULL;
     return m->text;
 }
 
 /* name of x when e is x[row * ld + col] with x a list[float] variable */
-static const char *list_read(const AstNode *e, const char *row, const char *col, const AstNode **ld) {
+static const char *list_read(const AstNode *e, const char *row, const char *col, const AstNode **ld, const char *elem) {
     if (!e || e->kind != AST_INDEX || e->child_count != 2) return NULL;
     const AstNode *x = e->children[0];
-    if (!is_ident(x, NULL) || !x->type_name || strcmp(x->type_name, "list[float]") != 0) return NULL;
+    if (!is_ident(x, NULL) || !has_elem(x->type_name, "list[", elem)) return NULL;
     *ld = flat_index_ld(e->children[1], row, col);
     return *ld ? x->text : NULL;
 }
@@ -1268,7 +1283,7 @@ static const char *list_read(const AstNode *e, const char *row, const char *col,
 static const char *element_read(const MatmulPattern *p, const AstNode *e, const char *row, const char *col,
                                 const AstNode **ld) {
     *ld = NULL;
-    return p->list_form ? list_read(e, row, col, ld) : matrix_read(e, row, col);
+    return p->list_form ? list_read(e, row, col, ld, p->elem) : matrix_read(e, row, col, p->elem);
 }
 
 /* A range bound that cannot change in the loops and cannot fail. */
@@ -1314,13 +1329,15 @@ static int matmul_pattern(const AstNode *outer, MatmulPattern *p) {
 
     /* c[i][j] = value  or  c[i * ldc + j] = value */
     const AstNode *upd = jb->children[0], *value = NULL;
+    p->elem = has_elem(upd->type_name, "matrix[", "float32") || has_elem(upd->type_name, "list[", "float32")
+            ? "float32" : "float";
     if (upd->kind == AST_MATRIX_SET && upd->text && upd->child_count == 3 && upd->type_name &&
-        strcmp(upd->type_name, "matrix[float]") == 0 &&
+        has_elem(upd->type_name, "matrix[", p->elem) &&
         is_ident(upd->children[0], p->i) && is_ident(upd->children[1], p->j)) {
         p->list_form = 0;
         value = upd->children[2];
     } else if (upd->kind == AST_INDEX_ASSIGN && upd->text && upd->child_count == 2 && upd->type_name &&
-               strcmp(upd->type_name, "list[float]") == 0) {
+               has_elem(upd->type_name, "list[", p->elem)) {
         p->list_form = 1;
         p->ldc = flat_index_ld(upd->children[0], p->i, p->j);
         if (!p->ldc) return 0;
@@ -1335,7 +1352,7 @@ static int matmul_pattern(const AstNode *outer, MatmulPattern *p) {
     if (kb->child_count == 2) {
         const AstNode *let = kb->children[0];
         if (let->kind != AST_LET || !let->text || let->child_count != 1 || !let->type_name ||
-            strcmp(let->type_name, "float") != 0) return 0;
+            strcmp(let->type_name, p->elem) != 0) return 0;
         aik = let->text;
         p->a = element_read(p, let->children[0], p->i, p->k, &p->lda);
         if (!p->a) return 0;
@@ -1368,7 +1385,7 @@ static int matmul_pattern(const AstNode *outer, MatmulPattern *p) {
         }
     }
     if (!found) return 0;
-    if (!value->type_name || strcmp(value->type_name, "float") != 0) return 0;
+    if (!value->type_name || strcmp(value->type_name, p->elem) != 0) return 0;
 
     return matmul_bound_ok(p->m_stop, p, aik) && matmul_bound_ok(p->k_stop, p, aik) &&
            matmul_bound_ok(p->n_stop, p, aik) &&
@@ -1404,6 +1421,7 @@ typedef struct {
     int w_matrix;                       /* w[i][j], or a flat list w[i * ld + j] */
     const AstNode *ld;
     const char *x_name, *x_expr;
+    const char *elem;                   /* float or float32 */
     const AstNode *w_node, *x_node, *b_node;
     const AstNode *init;                /* number, variable, or b[i] */
     const char *b_name, *b_expr;
@@ -1458,8 +1476,8 @@ static int matvec_pattern(const AstNode *loop, MatvecPattern *p) {
     if (!p->m_stop || !body || body->kind != AST_BLOCK || body->child_count < 2) return 0;
 
     const AstNode *let = body->children[0], *jl = body->children[1];
-    if (let->kind != AST_LET || !let->text || let->child_count != 1 || !let->type_name ||
-        strcmp(let->type_name, "float") != 0) return 0;
+    if (let->kind != AST_LET || !let->text || let->child_count != 1 || !kernel_elem(let->type_name)) return 0;
+    p->elem = kernel_elem(let->type_name);
     p->s = let->text;
     p->init = let->children[0];
     if (jl->kind != AST_FOR || !jl->text) return 0;
@@ -1473,7 +1491,7 @@ static int matvec_pattern(const AstNode *loop, MatvecPattern *p) {
     const AstNode *upd = jb->children[0];
     if (upd->kind != AST_ASSIGN || !upd->text || strcmp(upd->text, p->s) != 0 || upd->child_count != 1) return 0;
     const AstNode *sum = upd->children[0];
-    if (!is_binary(sum, "+") || !sum->type_name || strcmp(sum->type_name, "float") != 0) return 0;
+    if (!is_binary(sum, "+") || !sum->type_name || strcmp(sum->type_name, p->elem) != 0) return 0;
     const AstNode *prod = is_ident(sum->children[0], p->s) ? sum->children[1]
                         : is_ident(sum->children[1], p->s) ? sum->children[0] : NULL;
     if (!is_binary(prod, "*")) return 0;
@@ -1481,15 +1499,14 @@ static int matvec_pattern(const AstNode *loop, MatvecPattern *p) {
     for (int t = 0; t < 2 && !wnode; t++) {
         const AstNode *wr = prod->children[t], *xr = prod->children[1 - t];
         if (!xr || xr->kind != AST_INDEX || xr->child_count != 2 || !is_ident(xr->children[1], p->j) ||
-            !xr->children[0]->type_name || strcmp(xr->children[0]->type_name, "list[float]") != 0) continue;
+            !has_elem(xr->children[0]->type_name, "list[", p->elem)) continue;
         if (!wr || wr->kind != AST_INDEX || wr->child_count != 2) continue;
         const AstNode *row = wr->children[0];
         if (row->kind == AST_INDEX && row->child_count == 2 && is_ident(row->children[1], p->i) &&
-            is_ident(wr->children[1], p->j) && row->children[0]->type_name &&
-            strcmp(row->children[0]->type_name, "matrix[float]") == 0) {
+            is_ident(wr->children[1], p->j) && has_elem(row->children[0]->type_name, "matrix[", p->elem)) {
             p->w_matrix = 1;
             wnode = row->children[0];
-        } else if (wr->children[0]->type_name && strcmp(wr->children[0]->type_name, "list[float]") == 0 &&
+        } else if (has_elem(wr->children[0]->type_name, "list[", p->elem) &&
                    (p->ld = flat_index_ld(wr->children[1], p->i, p->j)) != NULL) {
             p->w_matrix = 0;
             wnode = wr->children[0];
@@ -1511,7 +1528,7 @@ static int matvec_pattern(const AstNode *loop, MatvecPattern *p) {
     } else if (is_ident(init, NULL)) {
         if (name_changes_in(body, init->text) || strcmp(init->text, p->i) == 0) return 0;
     } else if (init->kind == AST_INDEX && init->child_count == 2 && is_ident(init->children[1], p->i) &&
-               init->children[0]->type_name && strcmp(init->children[0]->type_name, "list[float]") == 0) {
+               has_elem(init->children[0]->type_name, "list[", p->elem)) {
         p->b_node = init->children[0];
         if (!fast_base_of(&p->bases, init->children[0], p->i, body, &p->b_name, &p->b_expr)) return 0;
     } else {
@@ -1595,7 +1612,7 @@ static int machine_form(const AstNode *n);
 enum { MFORM_NONE, MFORM_PLAIN, MFORM_CAST, MFORM_CALL };
 
 static int is_scalar_type(const char *t) {
-    return t && (strcmp(t, "float") == 0 || strcmp(t, "int") == 0 || strcmp(t, "bool") == 0);
+    return t && (strcmp(t, "float") == 0 || strcmp(t, "float32") == 0 || strcmp(t, "int") == 0 || strcmp(t, "bool") == 0);
 }
 
 static int fn_is_pure(const char *name) {
@@ -1641,14 +1658,14 @@ static int pure_expr(const AstNode *n, PureCtx *c) {
             if (n->text[0] == '@') {
                 static const char *const math[] = {
                     "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
-                    "sinh", "cosh", "tanh", "floor", "ceil", "pow", "atan2", "hypot", "float", NULL
+                    "sinh", "cosh", "tanh", "floor", "ceil", "pow", "atan2", "hypot", "float", "float32", NULL
                 };
                 const char *name = n->text + 1;
                 int known = 0;
                 for (size_t k = 0; math[k]; k++) known |= strcmp(name, math[k]) == 0;
                 /* abs, min and max of integers go through helpers: only their float form */
                 if ((strcmp(name, "abs") == 0 || strcmp(name, "min") == 0 || strcmp(name, "max") == 0) &&
-                    strcmp(n->type_name, "float") == 0) known = 1;
+                    kernel_elem(n->type_name)) known = 1;
                 if (!known) return 0;
             } else if (!fn_is_pure(n->text)) {
                 return 0;
@@ -1694,8 +1711,8 @@ static int pure_stmt(const AstNode *n, PureCtx *c) {
             return c->function && n->child_count == 1 && pure_expr(n->children[0], c);
         case AST_INDEX_ASSIGN: {   /* y[i] = value, y a list of numbers */
             if (!c->layer || !n->type_name || n->child_count < 2 || c->write_count >= PURE_MAX) return 0;
-            if (strcmp(n->type_name, "list[float]") != 0 && strcmp(n->type_name, "list[int]") != 0 &&
-                strcmp(n->type_name, "list[bool]") != 0) return 0;
+            if (strcmp(n->type_name, "list[float]") != 0 && strcmp(n->type_name, "list[float32]") != 0 &&
+                strcmp(n->type_name, "list[int]") != 0 && strcmp(n->type_name, "list[bool]") != 0) return 0;
             if (!is_ident(n->children[0], c->layer->i) || !pure_expr(n->children[1], c)) return 0;
             const char *name = NULL, *expr = NULL;
             if (n->text) {
@@ -3535,7 +3552,7 @@ static int node_may_fail(const AstNode *n) {
 }
 
 /* Lists and matrices owned by the variables of the blocks being written (see compute_ownership). */
-typedef struct { const char *name; int matrix; } OwnedVar;   /* matrix: 0 list, 1 matrix, 2 sums of a layer */
+typedef struct { const char *name; int matrix; } OwnedVar;   /* matrix: 0 list, 1 matrix, 2 sums of a layer (3: float32) */
 static OwnedVar owned_live[OWN_MAX];
 static size_t owned_live_count = 0;
 static size_t loop_marks[1024];          /* owned_live_count when each enclosing loop started */
@@ -3546,7 +3563,8 @@ static void emit_free_since(FILE *f, size_t mark, int depth) {
     for (size_t i = owned_live_count; i > mark; i--) {
         indent(f, depth);
         int kind = owned_live[i - 1].matrix;
-        if (kind == 2) fprintf(f, "clair_rt_sums_free(%s, %s_small);\n", owned_live[i - 1].name, owned_live[i - 1].name);
+        if (kind >= 2) fprintf(f, "clair_rt_sums_free%s(%s, %s_small);\n", kind == 3 ? "_f32" : "",
+                               owned_live[i - 1].name, owned_live[i - 1].name);
         else fprintf(f, "%s(%s);\n", kind ? "clair_rt_matrix_free" : "clair_rt_list_free", owned_live[i - 1].name);
     }
 }
@@ -3592,6 +3610,10 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
     if (loop) loop_mark_count--;
     return ok;
 }
+
+/* C names of the float32 kernels: the float ones keep their names, the float32 ones end in F32 / _f32 */
+static int is_f32(const char *elem) { return elem && strcmp(elem, "float32") == 0; }
+static const char *kernel_ctype(const char *elem) { return is_f32(elem) ? "float" : "double"; }
 
 /* Functions written for the dense layers of the function being written (see PureCtx). */
 static FILE *layer_helpers = NULL;
@@ -3648,7 +3670,7 @@ static int emit_pure_stmt(FILE *f, const AstNode *n, int depth, const PureCtx *c
  */
 static int emit_layer_helper(FILE *f, const char *id, const MatvecPattern *mv, const PureCtx *c) {
     fprintf(f, "/* dense layer of %s: the sums of rows [first, last), then the rest of each row */\n", layer_fn_name);
-    fputs("typedef struct {\n    ClairMatvecJob sums;\n", f);
+    fprintf(f, "typedef struct {\n    ClairMatvecJob%s sums;\n", is_f32(mv->elem) ? "F32" : "");
     for (size_t t = 0; t < c->target_count; t++) {
         fprintf(f, "    %s *clair_data_%s;\n", list_element_c_type(c->target_types[t]), c->target_names[t]);
     }
@@ -3658,7 +3680,7 @@ static int emit_layer_helper(FILE *f, const char *id, const MatvecPattern *mv, c
     fprintf(f, "} ClairLayer_%s;\n\n", id);
     fprintf(f, "static void clair_layer_%s(const void *clair_job, int64_t clair_first, int64_t clair_last) {\n", id);
     fprintf(f, "    const ClairLayer_%s *clair_layer = clair_job;\n", id);
-    fputs("    clair_rt_matvec_rows(&clair_layer->sums, clair_first, clair_last);\n", f);
+    fprintf(f, "    clair_rt_matvec_rows%s(&clair_layer->sums, clair_first, clair_last);\n", is_f32(mv->elem) ? "_f32" : "");
     for (size_t t = 0; t < c->target_count; t++) {
         fprintf(f, "    %s *clair_data_%s = clair_layer->clair_data_%s;\n", list_element_c_type(c->target_types[t]),
                 c->target_names[t], c->target_names[t]);
@@ -3670,7 +3692,7 @@ static int emit_layer_helper(FILE *f, const char *id, const MatvecPattern *mv, c
     fprintf(f, "    for (int64_t %s = clair_first; %s < clair_last; %s++) {\n", mv->i, mv->i, mv->i);
     int uses_s = 0;
     for (size_t st = 2; st < mv->body->child_count; st++) uses_s |= name_mentioned_in(mv->body->children[st], mv->s);
-    if (uses_s) fprintf(f, "        double %s = clair_layer->sums.s[%s];\n", mv->s, mv->i);
+    if (uses_s) fprintf(f, "        %s %s = clair_layer->sums.s[%s];\n", kernel_ctype(mv->elem), mv->s, mv->i);
     for (size_t st = 2; st < mv->body->child_count; st++) {
         if (!emit_pure_stmt(f, mv->body->children[st], 2, c)) return 0;
     }
@@ -4313,19 +4335,20 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 #undef MV_AND
                 fputs(") {\n", f);
 
+                const char *ct = kernel_ctype(mv.elem), *sfx = is_f32(mv.elem) ? "_f32" : "";
                 indent(f, depth + 1);
-                fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.w_name, mv.w_expr);
+                fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n", ct, mv.w_name, ct, mv.w_expr);
                 if (mv.w_matrix) {
                     indent(f, depth + 1);
                     fprintf(f, "int64_t clair_cols_%s = %s->cols;\n", mv.w_name, mv.w_expr);
                 }
                 if (strcmp(mv.x_name, mv.w_name) != 0) {
                     indent(f, depth + 1);
-                    fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.x_name, mv.x_expr);
+                    fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n", ct, mv.x_name, ct, mv.x_expr);
                 }
                 if (mv.b_expr && strcmp(mv.b_name, mv.w_name) != 0 && strcmp(mv.b_name, mv.x_name) != 0) {
                     indent(f, depth + 1);
-                    fprintf(f, "double *clair_data_%s = (double *)%s->data;\n", mv.b_name, mv.b_expr);
+                    fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n", ct, mv.b_name, ct, mv.b_expr);
                 }
                 /*
                  * 1. every sum, on all cores (nothing else happens meanwhile:
@@ -4333,13 +4356,13 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                  * 2. what followed each sum, row by row, in the original order.
                  */
                 indent(f, depth + 1);
-                fputs("double clair_sums_small[CLAIR_SUMS_SMALL];\n", f);
+                fprintf(f, "%s clair_sums_small[CLAIR_SUMS_SMALL];\n", ct);
                 indent(f, depth + 1);
-                fputs("double *clair_sums = clair_rt_sums_make(", f);
+                fprintf(f, "%s *clair_sums = clair_rt_sums_make%s(", ct, sfx);
                 if (!emit_expr(f, mv.m_stop)) return 0;
                 fputs(", clair_sums_small);\n", f);
                 if (owned_live_count >= OWN_MAX) return 0;
-                owned_live[owned_live_count++] = (OwnedVar){ "clair_sums", 2 };
+                owned_live[owned_live_count++] = (OwnedVar){ "clair_sums", is_f32(mv.elem) ? 3 : 2 };
                 indent(f, depth + 1);
                 fprintf(f, "for (int64_t %s = 0; %s < ", mv.i, mv.i);
                 if (!emit_operand(f, mv.m_stop, PREC_RELATIONAL, 1)) return 0;
@@ -4366,14 +4389,14 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                     for (size_t k = 0; k < lc.capture_count; k++) fprintf(f, ", %s", lc.captures[k]->text);
                     fputs(" };\n", f);
                     indent(f, depth + 1);
-                    fputs("clair_rt_layer_f64(", f);
+                    fprintf(f, "clair_rt_layer_%s(", is_f32(mv.elem) ? "f32" : "f64");
                     if (!emit_expr(f, mv.m_stop)) return 0;
                     fputs(", ", f);
                     if (!emit_expr(f, mv.n_stop)) return 0;
                     fprintf(f, ", clair_layer_%s, &clair_layer);\n", id);
                 } else {
                     indent(f, depth + 1);
-                    fputs("clair_rt_matvec_f64(", f);
+                    fprintf(f, "clair_rt_matvec_%s(", is_f32(mv.elem) ? "f32" : "f64");
                     if (!emit_expr(f, mv.m_stop)) return 0;
                     fputs(", ", f);
                     if (!emit_expr(f, mv.n_stop)) return 0;
@@ -4391,7 +4414,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                     fprintf(f, "; %s++) {\n", mv.i);
                     if (uses_s) {
                         indent(f, depth + 2);
-                        fprintf(f, "double %s = clair_sums[%s];\n", mv.s, mv.i);
+                        fprintf(f, "%s %s = clair_sums[%s];\n", ct, mv.s, mv.i);
                     }
                     size_t own_mark = owned_live_count;
                     for (size_t st = 2; st < body->child_count && ok; st++) ok = emit_stmt(f, body->children[st], depth + 2);
@@ -4403,7 +4426,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 }
                 owned_live_count--;                     /* clair_sums */
                 indent(f, depth + 1);
-                fputs("clair_rt_sums_free(clair_sums, clair_sums_small);\n", f);
+                fprintf(f, "clair_rt_sums_free%s(clair_sums, clair_sums_small);\n", sfx);
                 matvec_suppress = 1;
                 if (ok) {
                     indent(f, depth);
@@ -4444,7 +4467,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 }
                 fputs(")) {\n", f);
                 indent(f, depth + 1);
-                fputs("clair_rt_matmul_f64(", f);
+                fprintf(f, "clair_rt_matmul_%s(", is_f32(mm.elem) ? "f32" : "f64");
                 for (int d = 0; d < 3; d++) {
                     if (!emit_expr(f, dims[d])) return 0;
                     fputs(d < 2 ? ", " : ",\n", f);
@@ -4453,7 +4476,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 const AstNode *lds[3] = { mm.lda, mm.ldb, mm.ldc };
                 for (int d = 0; d < 3; d++) {
                     indent(f, depth + 2);
-                    fprintf(f, "(%sdouble *)%s->data, ", d < 2 ? "const " : "", names[d]);
+                    fprintf(f, "(%s%s *)%s->data, ", d < 2 ? "const " : "", kernel_ctype(mm.elem), names[d]);
                     if (mm.list_form) { if (!emit_expr(f, lds[d])) return 0; }
                     else fprintf(f, "%s->cols", names[d]);
                     fputs(d < 2 ? ",\n" : ");\n", f);
@@ -5583,6 +5606,64 @@ static void emit_big_runtime(FILE *f, const AstNode *program) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Kernels of matrix products and dense layers: written for float     */
+/* (double); the float32 copy is the same text with float, and names  */
+/* ending in F32 / _f32.  Its matrix product keeps a 4 x 16 block of  */
+/* c in registers (4 float32 per NEON register instead of 2 double).  */
+/* ------------------------------------------------------------------ */
+
+static void kernel_kinds_in(const AstNode *n, int matmul, int *kinds) {
+    if (!n) return;
+    if (n->kind == AST_FOR) {
+        if (matmul) {
+            MatmulPattern p;
+            if (matmul_pattern(n, &p)) *kinds |= is_f32(p.elem) ? 2 : 1;
+        } else {
+            MatvecPattern p;
+            if (matvec_pattern(n, &p)) *kinds |= is_f32(p.elem) ? 2 : 1;
+            fast_plan_free(&p.bases);
+        }
+    }
+    for (size_t i = 0; i < n->child_count; i++) kernel_kinds_in(n->children[i], matmul, kinds);
+}
+
+/* 1: float kernels used, 2: float32 kernels used */
+static int program_kernel_kinds(const AstNode *program, int matmul) {
+    int kinds = 0;
+    kernel_kinds_in(program, matmul, &kinds);
+    return kinds;
+}
+
+static void emit_kernel_text(FILE *f, int f32, int with_f64, const char *text) {
+    if (!f32) {
+        fputs(text, f);
+        return;
+    }
+    static const char *const swaps[][2] = {
+        { "#define CLAIR_SUMS_SMALL 64\n", NULL },        /* already there with the float kernels */
+        { "ClairMatvecJob", "ClairMatvecJobF32" }, { "clair_rt_matvec_rows", "clair_rt_matvec_rows_f32" },
+        { "clair_rt_matvec_f64", "clair_rt_matvec_f32" }, { "clair_rt_layer_f64", "clair_rt_layer_f32" },
+        { "clair_rt_sums_make", "clair_rt_sums_make_f32" }, { "clair_rt_sums_free", "clair_rt_sums_free_f32" },
+        { "ClairMatmulJob", "ClairMatmulJobF32" }, { "clair_rt_matmul_rows", "clair_rt_matmul_rows_f32" },
+        { "clair_rt_matmul_f64", "clair_rt_matmul_f32" },
+        { "4 x 8 block", "4 x 16 block" }, { "acc[4][8]", "acc[4][16]" }, { "j + 8 <= n; j += 8", "j + 16 <= n; j += 16" },
+        { "q < 8", "q < 16" }, { "double", "float" },
+    };
+    for (const char *p = text; *p;) {
+        size_t k = 0, count = sizeof(swaps) / sizeof(swaps[0]);
+        for (; k < count; k++) {
+            size_t len = strlen(swaps[k][0]);
+            if (strncmp(p, swaps[k][0], len) != 0) continue;
+            if (swaps[k][1]) fputs(swaps[k][1], f);
+            else if (!with_f64) fputs(swaps[k][0], f);
+            p += len;
+            break;
+        }
+        if (k == count) fputc(*p++, f);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Runtime of the machine integers: only the helpers the program uses. */
 /* ------------------------------------------------------------------ */
 
@@ -6354,8 +6435,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
         );
     }
 
-    if (program_has_matvec(program)) {
-        fputs(
+    int matvec_kinds = program_kernel_kinds(program, 0);
+    for (int k = 0; k < 2; k++) {
+        if (!(matvec_kinds & (1 << k))) continue;
+        emit_kernel_text(f, k, (matvec_kinds & 1) != 0,
             "typedef struct {\n"
             "    int64_t n, ldw;\n"
             "    const double *w, *x;\n"
@@ -6424,13 +6507,15 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "\n"
             "static inline void clair_rt_sums_free(double *s, const double *small) {\n"
             "    if (s != small) free(s);\n"
-            "}\n",
-            f
+            "}\n"
         );
     }
 
-    if (program_has_matmul(program)) {
-        fputs(
+    int matmul_kinds = program_kernel_kinds(program, 1);
+    if (matmul_kinds) {
+        for (int k = 0; k < 2; k++) {
+            if (!(matmul_kinds & (1 << k))) continue;
+            emit_kernel_text(f, k, (matmul_kinds & 1) != 0,
             "typedef struct {\n"
             "    int64_t n, kk, lda, ldb, ldc;\n"
             "    const double *a, *b;\n"
@@ -6491,10 +6576,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    ClairMatmulJob job = { n, kk, lda, ldb, ldc, a, b, c };\n"
             "    if ((double)m * (double)n * (double)kk < 1048576.0) clair_rt_matmul_rows(&job, 0, m);\n"
             "    else clair_rt_parallel_for(clair_rt_matmul_rows, &job, m, 8);\n"
-            "}\n",
-            f
-        );
-        if (node_uses_matrix_kind(program, "[float]")) {
+            "}\n"
+            );
+        }
+        if (node_uses_matrix_kind(program, "[float]") || node_uses_matrix_kind(program, "[float32]")) {
             fputs(
                 "/* The kernel may replace the loops: shapes large enough, c distinct from a and b. */\n"
                 "static inline bool clair_rt_matmul_ok(ClairMatrix a, ClairMatrix b, ClairMatrix c,\n"

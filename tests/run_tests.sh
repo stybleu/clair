@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.35 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.36 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -632,6 +632,17 @@ grep -Fq 'axpy(0.25f, x, y)' build/test_float32.generated.c
 grep -Fq 'sqrtf(s)' build/test_float32.generated.c
 printf '%s\n' 'float32.cl : OK -> float32 identique a NumPy : calculs, listes, matrices, couche dense, boucles rapides en float'
 expect_compile_error invalid_float32_to_int "cannot initialize int 'n' with float32"
+
+./build/clair tests/noyaux_float32.cl -o build/test_noyaux_float32
+[ "$(./build/test_noyaux_float32)" = "$(cat tests/noyaux_float32.expected)" ]
+for threads in 1 2 3 7; do
+    [ "$(CLAIR_THREADS=$threads ./build/test_noyaux_float32)" = "$(cat tests/noyaux_float32.expected)" ]
+done
+[ "$(grep -c 'clair_rt_matmul_f32(' build/test_noyaux_float32.generated.c)" = "3" ]
+grep -Fq 'clair_rt_layer_f32(w->rows, w->cols, clair_layer_couche_1, &clair_layer);' build/test_noyaux_float32.generated.c
+grep -Fq 'clair_rt_matvec_f32(' build/test_noyaux_float32.generated.c
+grep -Fq 'float acc[4][16];' build/test_noyaux_float32.generated.c
+printf '%s\n' 'noyaux_float32.cl : OK -> produits de matrices et couches denses float32 en blocs, sur 1, 2, 3 ou 7 coeurs, identiques au bit pres aux boucles simples'
 
 ./build/clair tests/entiers_machine.cl -o build/test_entiers_machine
 [ "$(./build/test_entiers_machine)" = "$(cat tests/entiers_machine.expected)" ]
