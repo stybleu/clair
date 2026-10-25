@@ -4,7 +4,7 @@ def main() -> int {
     while i < 3 {
         print(i)
         print(v[i + 1])
-        v[i] = 0
+        v[i - 3] = 0
         i = i + 1
     }
     return 0

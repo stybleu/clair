@@ -617,6 +617,161 @@ static int check_text_call(Semantic *s, AstNode *n) {
     return set_type(n, result) ? 1 : -1;
 }
 
+/*
+ * [expr for v in xs if cond] becomes a call to a small function written here:
+ *
+ *   def comprehension_1(captured variables...) -> list[T] {
+ *       let @result: list[T] = []          (clair_h_result in C)
+ *       for v in xs { if cond { @result.append(expr) } }
+ *       return @result
+ *   }
+ *
+ * The variables of the enclosing function that the expression reads are
+ * passed as arguments (their value at that moment, like Python).
+ */
+static int comprehension_count = 0;
+
+static AstNode *new_node(AstKind kind, const char *text, const char *type) {
+    AstNode *n = ast_new(kind, text, text ? strlen(text) : 0);
+    if (n && type && !ast_set_type(n, type, strlen(type))) { ast_free(n); return NULL; }
+    return n;
+}
+
+static void collect_captures(Semantic *s, const AstNode *n, const char *var, const char **names, const char **types,
+                             size_t *count) {
+    if (!n) return;
+    if (n->kind == AST_IDENTIFIER && n->text && strcmp(n->text, var) != 0) {
+        const char *type = find_var(s, n->text);
+        size_t k = 0;
+        while (k < *count && strcmp(names[k], n->text) != 0) k++;
+        if (type && k == *count && *count < 64) {
+            names[*count] = n->text;
+            types[(*count)++] = type;
+        }
+    }
+    for (size_t i = 0; i < n->child_count; i++) collect_captures(s, n->children[i], var, names, types, count);
+}
+
+static const char *check_comprehension(Semantic *s, AstNode *n) {
+    if (n->child_count < 3 || n->child_count > 4) return NULL;
+    const char *var = n->children[0]->text;
+    AstNode *expr = n->children[1], *iter = n->children[2], *cond = n->child_count == 4 ? n->children[3] : NULL;
+    int is_range = iter->kind == AST_CALL && iter->text && strcmp(iter->text, "range") == 0 && !find_function(s, "range");
+    /* untyped copies for the function, the originals only give the types here */
+    AstNode *body_expr = ast_clone(expr), *body_iter = ast_clone(iter), *body_cond = cond ? ast_clone(cond) : NULL;
+    if (!body_expr || !body_iter || (cond && !body_cond)) return NULL;
+
+    const char *element = "int";
+    if (is_range) {
+        if (iter->child_count < 1 || iter->child_count > 3) {
+            error_type(s, "range() expects 1 to 3 arguments");
+            return NULL;
+        }
+        for (size_t i = 0; i < iter->child_count; i++) {
+            const char *t = expr_type(s, iter->children[i]);
+            if (!t) return NULL;
+            if (!is_index_type(t)) {
+                fprintf(stderr, "semantic error: range() expects int bounds, got %s\n", t);
+                s->had_error = 1;
+                return NULL;
+            }
+        }
+    } else {
+        const char *t = expr_type(s, iter);
+        if (!t) return NULL;
+        element = is_dict_type(t) ? "string" : list_element_type(t);
+        if (!element) {
+            fprintf(stderr, "semantic error: [... for %s in ...] needs a list, a dictionary or range(), got %s\n", var, t);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    enter_scope(s);
+    const char *et = add_var(s, var, element) ? expr_type(s, expr) : NULL;
+    const char *ct = et && cond ? expr_type(s, cond) : "bool";
+    leave_scope(s);
+    if (!et || !ct) return NULL;
+    if (strcmp(ct, "bool") != 0) {
+        fprintf(stderr, "semantic error: the condition of [... if ...] must be a bool, got %s\n", ct);
+        s->had_error = 1;
+        return NULL;
+    }
+    char list_type[64];
+    snprintf(list_type, sizeof(list_type), "list[%s]", et);
+    if (!is_list_type(list_type)) {
+        fprintf(stderr, "semantic error: [... for ...] makes a list of numbers, bool or strings, got %s\n", et);
+        s->had_error = 1;
+        return NULL;
+    }
+
+    /* the variables read inside, other than v */
+    const char *names[64], *types[64];
+    size_t count = 0;
+    collect_captures(s, body_expr, var, names, types, &count);
+    collect_captures(s, body_iter, "", names, types, &count);
+    if (body_cond) collect_captures(s, body_cond, var, names, types, &count);
+
+    char fn_name[64];
+    do snprintf(fn_name, sizeof(fn_name), "comprehension_%d", ++comprehension_count);
+    while (find_function(s, fn_name) || find_class(s, fn_name));
+    AstNode *fn = new_node(AST_FUNCTION, fn_name, list_type);
+    AstNode *body = new_node(AST_BLOCK, NULL, NULL);
+    AstNode *let = new_node(AST_LET, "@result", list_type);
+    AstNode *empty = new_node(AST_LIST, NULL, NULL);
+    AstNode *loop = new_node(is_range ? AST_FOR : AST_FOR_EACH, var, NULL);
+    AstNode *loop_body = new_node(AST_BLOCK, NULL, NULL);
+    AstNode *append = new_node(AST_LIST_APPEND, "@result", NULL);
+    AstNode *ret = new_node(AST_RETURN, NULL, NULL);
+    AstNode *result = new_node(AST_IDENTIFIER, "@result", NULL);
+    if (!fn || !body || !let || !empty || !loop || !loop_body || !append || !ret || !result) return NULL;
+    for (size_t k = 0; k < count; k++) {
+        AstNode *param = new_node(AST_PARAM, names[k], types[k]);
+        if (!param || !ast_add_child(fn, param)) return NULL;
+    }
+    ast_add_child(let, empty);
+    ast_add_child(append, body_expr);
+    if (body_cond) {
+        AstNode *test = new_node(AST_IF, NULL, NULL), *then = new_node(AST_BLOCK, NULL, NULL);
+        if (!test || !then) return NULL;
+        ast_add_child(test, body_cond);
+        ast_add_child(then, append);
+        ast_add_child(test, then);
+        ast_add_child(loop_body, test);
+    } else {
+        ast_add_child(loop_body, append);
+    }
+    if (is_range) {
+        for (size_t i = 0; i < body_iter->child_count; i++) {
+            ast_add_child(loop, body_iter->children[i]);
+            body_iter->children[i] = NULL;
+        }
+        body_iter->child_count = 0;
+        ast_free(body_iter);
+    } else {
+        ast_add_child(loop, body_iter);
+    }
+    ast_add_child(loop, loop_body);
+    ast_add_child(ret, result);
+    ast_add_child(body, let);
+    ast_add_child(body, loop);
+    ast_add_child(body, ret);
+    ast_add_child(fn, body);
+    if (!ast_add_child(s->program, fn)) return NULL;        /* checked after the functions already there */
+
+    /* the expression becomes comprehension_1(captured variables...) */
+    for (size_t i = 0; i < n->child_count; i++) ast_free(n->children[i]);
+    n->child_count = 0;
+    free(n->text);
+    n->text = malloc(strlen(fn_name) + 1);
+    if (!n->text) return NULL;
+    strcpy(n->text, fn_name);
+    for (size_t k = 0; k < count; k++) {
+        AstNode *arg = new_node(AST_IDENTIFIER, names[k], NULL);
+        if (!arg || !ast_add_child(n, arg)) return NULL;
+    }
+    return expr_type(s, n);
+}
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -958,6 +1113,39 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         right = expr_type(s, rhs);
     }
     if (!left || !right) return NULL;
+    if (strcmp(n->text, "in") == 0 || strcmp(n->text, "not in") == 0) {
+        /* x in xs (a list), s in text (a string), key in d (a dictionary), like Python */
+        const char *element = list_element_type(right);
+        int ok = 0;
+        if (element) {
+            if (strcmp(element, left) == 0) ok = 1;
+            else if (is_small_machine(element) && is_int_literal(lhs)) ok = machine_literal(s, lhs, element) != NULL;
+            else if (strcmp(element, "float32") == 0 && is_float_literal(lhs)) ok = set_float32_literal(lhs);
+            else if (is_numeric(left) && is_numeric(element) && numeric_result(left, element) &&
+                     strcmp(numeric_result(left, element), element) == 0) ok = 1;   /* 2 in list[float] */
+            if (!ok && !s->had_error) {
+                fprintf(stderr, "semantic error: '%s' cannot look for %s in %s: convert it first, e.g. %s(x)\n",
+                        n->text, left, right, element);
+                s->had_error = 1;
+                return NULL;
+            }
+        } else if (strcmp(right, "string") == 0 || is_dict_type(right)) {
+            ok = strcmp(left, "string") == 0;
+            if (!ok) {
+                fprintf(stderr, "semantic error: '%s' %s expects a string on the left, got %s\n", n->text,
+                        is_dict_type(right) ? "with a dictionary" : "in a string", left);
+                s->had_error = 1;
+                return NULL;
+            }
+        } else {
+            fprintf(stderr, "semantic error: '%s' needs a list, a string or a dictionary on the right, got %s\n",
+                    n->text, right);
+            s->had_error = 1;
+            return NULL;
+        }
+        if (!ok) return NULL;
+        return set_type(n, "bool") ? n->type_name : NULL;
+    }
     if (is_big(left) || is_big(right)) return big_binary_type(s, n, left, right);
     if (strcmp(left, "float32") == 0 && is_float_literal(rhs)) {
         if (!set_float32_literal(rhs)) return NULL;
@@ -1284,6 +1472,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
         }
         case AST_CALL: {
             if (n->text && strncmp(n->text, "@slice", 6) == 0 && !n->type_name) return check_slice(s, n);
+            if (n->text && strcmp(n->text, "@comprehension") == 0) return check_comprehension(s, n);
             if (n->text && n->text[0] == '@') return n->type_name;  /* builtin already checked */
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) {
@@ -1723,6 +1912,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *list = expr_type(s, n->children[0]);
             if (!list) return 0;
             const char *element = list_element_type(list);
+            if (is_dict_type(list)) element = "string";             /* for k in d: the keys, in order */
             if (!element) {
                 char message[160];
                 if (is_matrix_type(list)) {

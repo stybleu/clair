@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.38 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.39 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -230,11 +230,12 @@ printf '%s\n' 'list_bounds.cl : OK -> index hors limites refuse a l execution'
 
 ./build/clair tests/list_negative_index.cl -o build/test_list_negative_index
 if ./build/test_list_negative_index >build/list_negative_index.stdout 2>build/list_negative_index.stderr; then
-    printf '%s\n' 'list_negative_index.cl : ECHEC -> index negatif aurait du echouer' >&2
+    printf '%s\n' 'list_negative_index.cl : ECHEC -> index negatif trop grand aurait du echouer' >&2
     exit 1
 fi
-grep -Fq 'Clair runtime error: list index -1 out of bounds for length 1' build/list_negative_index.stderr
-printf '%s\n' 'list_negative_index.cl : OK -> index negatif refuse a l execution'
+[ "$(cat build/list_negative_index.stdout)" = "10" ]
+grep -Fq 'Clair runtime error: list index -2 out of bounds for length 1' build/list_negative_index.stderr
+printf '%s\n' 'list_negative_index.cl : OK -> xs[-1] est le dernier element, xs[-2] hors limites refuse'
 
 if ./build/clair tests/invalid_list_element.cl -o build/test_invalid_list_element >build/invalid_list_element.stdout 2>build/invalid_list_element.stderr; then
     printf '%s\n' 'invalid_list_element.cl : ECHEC -> element float dans list[int] aurait du etre refuse' >&2
@@ -300,11 +301,12 @@ printf '%s\n' 'list_set_bounds.cl : OK -> ecriture hors limites refusee a l exec
 
 ./build/clair tests/list_set_negative_index.cl -o build/test_list_set_negative_index
 if ./build/test_list_set_negative_index >build/list_set_negative_index.stdout 2>build/list_set_negative_index.stderr; then
-    printf '%s\n' 'list_set_negative_index.cl : ECHEC -> ecriture index negatif aurait du echouer' >&2
+    printf '%s\n' 'list_set_negative_index.cl : ECHEC -> ecriture index negatif trop grand aurait du echouer' >&2
     exit 1
 fi
-grep -Fq 'Clair runtime error: list index -1 out of bounds for length 1' build/list_set_negative_index.stderr
-printf '%s\n' 'list_set_negative_index.cl : OK -> ecriture index negatif refusee'
+[ "$(cat build/list_set_negative_index.stdout)" = "9" ]
+grep -Fq 'Clair runtime error: list index -2 out of bounds for length 1' build/list_set_negative_index.stderr
+printf '%s\n' 'list_set_negative_index.cl : OK -> xs[-1] = v ecrit le dernier element, xs[-2] hors limites refuse'
 
 if ./build/clair tests/invalid_list_set_non_list.cl -o build/test_invalid_list_set_non_list >build/invalid_list_set_non_list.stdout 2>build/invalid_list_set_non_list.stderr; then
     printf '%s\n' 'invalid_list_set_non_list.cl : ECHEC -> ecriture indexee sur int aurait du etre refusee' >&2
@@ -577,7 +579,7 @@ expected_while_fast_path="$(printf '55\n3\n7.5\n24\n6\n6\n15\n40\n3')"
 [ "$out_while_fast_path" = "$expected_while_fast_path" ]
 grep -Fq 'while (i < clair_stop_i) {' build/test_while_fast_path.generated.c
 printf '%s\n' 'while_fast_path.cl : OK -> boucles while rapides, continue, break, borne modifiee, matrice'
-expect_runtime_error while_fast_path_bounds '-1\n1' 'Clair runtime error: list index -1 out of bounds for length 3'
+expect_runtime_error while_fast_path_bounds '-1\n1' 'Clair runtime error: list index -4 out of bounds for length 3'
 
 ./build/clair tests/nest_fast_path.cl -o build/test_nest_fast_path
 out_nest_fast_path="$(./build/test_nest_fast_path)"
@@ -665,6 +667,16 @@ expect_runtime_error csv_ragged_runtime '3' "Clair runtime error: load_csv(): li
 expect_runtime_error float_string_runtime '4.5' "Clair runtime error: could not convert string to float: 'abc'"
 expect_runtime_error int_string_runtime '12' "Clair runtime error: invalid literal for int() with base 10: '1.5'"
 expect_runtime_error split_empty_runtime '2' 'Clair runtime error: split() empty separator'
+./build/clair tests/briques_python.cl -o build/test_briques_python
+[ "$(./build/test_briques_python)" = "$(cat tests/briques_python.expected)" ]
+grep -Fq 'static ClairList clair_fn_comprehension_1(ClairList xs) {' build/test_briques_python.generated.c
+grep -Fq 'clair_rt_list_has_i64(xs, 4)' build/test_briques_python.generated.c
+printf '%s\n' 'briques_python.cl : OK -> xs[-1], x in xs, [x * x for x in xs if ...], for k in dico ; identique a Python'
+expect_runtime_error dict_changed_runtime 'a' 'Clair runtime error: dictionary changed size during iteration'
+expect_compile_error invalid_in_type "'in' cannot look for float in list[int]: convert it first, e.g. int(x)"
+expect_compile_error invalid_in_right "'in' needs a list, a string or a dictionary on the right, got int"
+expect_compile_error invalid_comprehension_list "[... for ...] makes a list of numbers, bool or strings, got list[int]"
+expect_compile_error invalid_comprehension_cond "the condition of [... if ...] must be a bool, got int"
 expect_compile_error invalid_load_csv_kind 'argument 2 of load_csv() must be written "float", "float32" or "int"'
 
 ./build/clair tests/entiers_machine.cl -o build/test_entiers_machine

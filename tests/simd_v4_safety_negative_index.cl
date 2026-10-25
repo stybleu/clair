@@ -9,7 +9,7 @@ def main() -> int {
     values[0] = 9223372036854775807
     values[1] = -9223372036854775807 - 1
 
-    let i: int = -1
+    let i: int = -17
 
     while i < len(values) {
         values[i] = values[i] + 1

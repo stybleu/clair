@@ -11,7 +11,8 @@ Son compilateur est écrit en C et utilise Clang.
 - Fichiers CSV de nombres (`load_csv`, `save_csv`), lignes de texte (`read_lines`, `split`, `strip`), `int("42")` et `float("2.5")` comme en Python
 - Nombres aléatoires `seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice` : mêmes tirages que Python pour la même graine
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
-- Fonctions, conditions et boucles, dont `for v in liste` et `for i, v in enumerate(liste)` comme en Python
+- Fonctions, conditions et boucles, dont `for v in liste`, `for i, v in enumerate(liste)` et `for k in dico` comme en Python
+- `xs[-1]`, `x in xs`, `x not in xs`, listes en compréhension `[x * x for x in xs if x > 0]`
 - `x += v`, `-=`, `*=`, `/=`, `%=` ; tranches `xs[a:b:pas]` sur les listes et les chaînes, avec les règles de Python
 - Listes et dictionnaires typés
 - Matrices `matrix[float]`, `matrix[int]`, `matrix[u8]`... : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
@@ -87,6 +88,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.39](docs/README_V0.39.md) : `xs[-1]`, `x in xs`, listes en compréhension `[x * x for x in xs if ...]`, `for k in dico`
 - [Clair V0.38](docs/README_V0.38.md) : fichiers CSV (`load_csv`, `save_csv`), `read_lines`, `split`, `strip`, `int()` et `float()` de chaînes, `\t` et `\n` dans les chaînes
 - [Clair V0.37](docs/README_V0.37.md) : nombres aléatoires (`seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice`), mêmes tirages que Python ; couches denses 8 lignes à la fois
 - [Clair V0.36](docs/README_V0.36.md) : produits de matrices et couches denses `float32` en blocs, sur tous les cœurs

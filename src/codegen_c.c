@@ -244,6 +244,16 @@ static int int_div_is_safe(const AstNode *n) {
 
 static int is_int_type(const char *t) { return t && strcmp(t, "int") == 0; }
 
+/* x in xs / x not in xs: 0 no, 1 in a list, 2 in a string, 3 in a dictionary */
+static int membership_kind(const AstNode *n) {
+    if (!n || n->kind != AST_BINARY || !n->text || n->child_count != 2) return 0;
+    if (strcmp(n->text, "in") != 0 && strcmp(n->text, "not in") != 0) return 0;
+    const char *t = n->children[1]->type_name;
+    if (is_list_type(t)) return 1;
+    if (t && strcmp(t, "string") == 0) return 2;
+    return is_dict_type(t) ? 3 : 0;
+}
+
 /* load_csv, save_csv, read_lines, split, strip (after the '@') */
 static int is_text_call(const char *name) {
     static const char *const names[] = { "load_csv", "save_csv", "read_lines", "split", "strip", NULL };
@@ -1961,6 +1971,8 @@ static int expr_prec(const AstNode *n) {
             if (big_bits(n->type_name)) return PREC_POSTFIX;               /* clair_i256_neg(x) */
             return PREC_UNARY;
         case AST_BINARY: {
+            if (membership_kind(n) == 2) return PREC_EQUALITY;                       /* strstr(s, x) != NULL */
+            if (membership_kind(n)) return n->text[0] == 'n' ? PREC_UNARY : PREC_POSTFIX;   /* !clair_rt_list_has... */
             if (const_int_value(n, &k)) return k >= 0 ? PREC_POSTFIX : PREC_UNARY;
             const char *op = n->text;
             if (n == cast_skip) return machine_op_prec(op);
@@ -3317,6 +3329,23 @@ static int emit_expr(FILE *f, const AstNode *n) {
         case AST_BINARY: {
             if (n->child_count != 2 || !n->text) return 0;
             const char *op = n->text;
+            int member = membership_kind(n);
+            if (member) {
+                /* x in xs: clair_rt_list_has_i64(xs, x); s in text: strstr(text, s) != NULL */
+                int negated = op[0] == 'n';
+                if (member == 2) fputs("strstr(", f);
+                else {
+                    if (negated) fputc('!', f);
+                    if (member == 3) fputs("clair_rt_dict_has(", f);
+                    else fprintf(f, "clair_rt_list_has_%s(", element_kinds[element_kind_of(n->children[1]->type_name, "list[")][2]);
+                }
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputc(')', f);
+                if (member == 2) fputs(negated ? " == NULL" : " != NULL", f);
+                return 1;
+            }
 
             int bits = big_bits(n->children[0]->type_name);
             char tag = big_tag(n->children[0]->type_name);
@@ -4816,6 +4845,33 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
              * v takes xs[0], xs[1], ... while the index is below len(xs).
              */
             if (!n->text || n->child_count != 2 || !n->type_name) return 0;
+            if (is_dict_type(n->type_name)) {
+                /*
+                 * for k in d: the keys in the order they were added; adding a key
+                 * meanwhile stops the program, like Python's RuntimeError.
+                 */
+                const char *k = n->text;
+                fputs("{\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "ClairDict clair_dict_%s = ", k);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(";\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "size_t clair_count_%s = clair_dict_%s->len;\n", k, k);
+                indent(f, depth + 1);
+                fprintf(f, "for (size_t clair_k_%s = 0; clair_rt_dict_more(clair_dict_%s, clair_count_%s, clair_k_%s); clair_k_%s++) {\n",
+                        k, k, k, k, k);
+                if (name_mentioned_in(n->children[1], k)) {
+                    indent(f, depth + 2);
+                    fprintf(f, "const char *%s = clair_dict_%s->keys[clair_k_%s];\n", k, k, k);
+                }
+                if (!emit_block(f, n->children[1], depth + 2)) return 0;
+                indent(f, depth + 1);
+                fputs("}\n", f);
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
             const char *elem = list_element_c_type(n->type_name);
             if (!elem) return 0;
             const AstNode *list = n->children[0], *body = n->children[1];
@@ -6002,6 +6058,59 @@ static void emit_random_runtime(FILE *f, const AstNode *program) {
 /* CSV files of numbers (load_csv, save_csv).                          */
 /* ------------------------------------------------------------------ */
 
+/* bit e of *kinds: x in list[element_kinds[e]]; *dict: key in a dictionary */
+static void membership_uses(const AstNode *n, unsigned *kinds, int *dict) {
+    if (!n) return;
+    int member = membership_kind(n);
+    if (member == 1) *kinds |= 1u << element_kind_of(n->children[1]->type_name, "list[");
+    if (member == 3) *dict = 1;
+    for (size_t i = 0; i < n->child_count; i++) membership_uses(n->children[i], kinds, dict);
+}
+
+static int node_iterates_dict(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_FOR_EACH && is_dict_type(n->type_name)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (node_iterates_dict(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+static void emit_membership_runtime(FILE *f, const AstNode *program) {
+    unsigned kinds = 0;
+    int dict = 0;
+    membership_uses(program, &kinds, &dict);
+    for (size_t e = 0; e < ELEMENT_KIND_COUNT; e++) {
+        if (!(kinds & (1u << e))) continue;
+        const char *ct = element_kinds[e][1], *sfx = element_kinds[e][2];
+        int text = strcmp(element_kinds[e][0], "string") == 0;
+        fprintf(f, "/* x in xs, like Python */\n"
+                   "static bool clair_rt_list_has_%s(ClairList xs, %s%sx) {\n"
+                   "    %s%s*items = (%s%s*)xs->data;\n"
+                   "    for (size_t i = 0; i < xs->len; i++) if (%s) return true;\n"
+                   "    return false;\n"
+                   "}\n\n", sfx, ct, text ? "" : " ", ct, text ? "" : " ", ct, text ? "" : " ",
+                text ? "strcmp(items[i], x) == 0" : "items[i] == x");
+    }
+    if (node_iterates_dict(program)) {
+        fputs("/* for k in d: one more key, unless keys were added meanwhile (like Python) */\n"
+              "static inline bool clair_rt_dict_more(ClairDict d, size_t count, size_t i) {\n"
+              "    if (d->len != count) {\n"
+              "        fputs(\"Clair runtime error: dictionary changed size during iteration\\n\", stderr);\n"
+              "        exit(EXIT_FAILURE);\n"
+              "    }\n"
+              "    return i < count;\n"
+              "}\n\n", f);
+    }
+    if (dict) {
+        fputs("/* key in d, like Python */\n"
+              "static bool clair_rt_dict_has(ClairDict d, const char *key) {\n"
+              "    for (size_t i = 0; i < d->len; i++) if (strcmp(d->keys[i], key) == 0) return true;\n"
+              "    return false;\n"
+              "}\n\n", f);
+    }
+}
+
 static int node_uses_string_conversion(const AstNode *n) {
     if (!n) return 0;
     if (is_string_conversion(n)) return 1;
@@ -6634,6 +6743,11 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "    if (!list) fputs(\"Clair runtime error: null list\\n\", stderr);\n"
                 "    else fprintf(stderr, \"Clair runtime error: list index %\" PRId64 \" out of bounds for length %zu\\n\", index, len);\n"
                 "    exit(EXIT_FAILURE);\n"
+                "}\n\n"
+                "/* xs[-1] is the last element, like Python; anything else out of range stops the program */\n"
+                "static __attribute__((noinline)) int64_t clair_rt_index_wrap(const void *list, int64_t index, size_t len) {\n"
+                "    if (list && index < 0 && (uint64_t)-(index + 1) < len) return index + (int64_t)len;\n"
+                "    clair_rt_index_error(list, index, len);\n"
                 "}\n\n",
                 f
             );
@@ -6645,14 +6759,14 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 if (unchecked_mode) {
                     fprintf(f,
                         "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
-                        "    return (%s *)list->data + index;  /* --sans-verif */\n"
+                        "    return (%s *)list->data + (index < 0 ? index + (int64_t)list->len : index);  /* --sans-verif */\n"
                         "}\n\n",
                         ctype, suffix, ctype);
                     continue;
                 }
                 fprintf(f,
                     "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
-                    "    if (!list || index < 0 || (uint64_t)index >= list->len) clair_rt_index_error(list, index, list ? list->len : 0);\n"
+                    "    if (!list || (uint64_t)index >= list->len) index = clair_rt_index_wrap(list, index, list ? list->len : 0);\n"
                     "    return (%s *)list->data + index;\n"
                     "}\n\n",
                     ctype, suffix, ctype);
@@ -7319,6 +7433,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
     }
 
     emit_random_runtime(f, program);
+    emit_membership_runtime(f, program);
     {
         int csv = node_uses_call_named(program, "@load_csv"), lines = node_uses_call_named(program, "@read_lines");
         int split = node_uses_call_named(program, "@split"), strip = node_uses_call_named(program, "@strip");

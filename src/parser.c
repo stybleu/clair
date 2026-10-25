@@ -128,6 +128,50 @@ static AstNode *parse_atom(Parser *p) {
             for (;;) {
                 AstNode *item = parse_expression(p);
                 if (!item) { ast_free(list); return NULL; }
+                if (list->child_count == 0 && p->current.kind == TOKEN_FOR) {
+                    /*
+                     * [expr for v in xs if cond]: @comprehension(v, expr, xs, cond),
+                     * turned into a small function by the semantic pass
+                     */
+                    ast_free(list);
+                    next(p);
+                    Token var = p->current;
+                    AstNode *comp = ast_new(AST_CALL, "@comprehension", strlen("@comprehension"));
+                    AstNode *name = var.kind == TOKEN_IDENTIFIER ? ast_new(AST_IDENTIFIER, var.start, var.length) : NULL;
+                    if (!comp || !name || !ast_add_child(comp, name) || !ast_add_child(comp, item)) {
+                        if (var.kind != TOKEN_IDENTIFIER)
+                            fprintf(stderr, "parse error at %zu:%zu: expected a variable after 'for'\n", var.line, var.column);
+                        p->had_error = 1;
+                        ast_free(comp);
+                        return NULL;
+                    }
+                    next(p);
+                    if (!expect(p, TOKEN_IN, "in")) { ast_free(comp); return NULL; }
+                    AstNode *iterable = NULL;
+                    if (p->current.kind == TOKEN_RANGE) {
+                        /* range(a, b, step): kept as a call, the semantic pass makes it a for loop */
+                        next(p);
+                        iterable = ast_new(AST_CALL, "range", 5);
+                        if (!iterable || !expect(p, TOKEN_LPAREN, "'('")) { ast_free(iterable); ast_free(comp); return NULL; }
+                        while (p->current.kind != TOKEN_RPAREN) {
+                            AstNode *arg = parse_expression(p);
+                            if (!arg || !ast_add_child(iterable, arg)) { ast_free(arg); ast_free(iterable); ast_free(comp); return NULL; }
+                            if (p->current.kind != TOKEN_COMMA) break;
+                            next(p);
+                        }
+                        if (!expect(p, TOKEN_RPAREN, "')'")) { ast_free(iterable); ast_free(comp); return NULL; }
+                    } else {
+                        iterable = parse_expression(p);
+                    }
+                    if (!iterable || !ast_add_child(comp, iterable)) { ast_free(iterable); ast_free(comp); return NULL; }
+                    if (p->current.kind == TOKEN_IF) {
+                        next(p);
+                        AstNode *cond = parse_expression(p);
+                        if (!cond || !ast_add_child(comp, cond)) { ast_free(cond); ast_free(comp); return NULL; }
+                    }
+                    if (!expect(p, TOKEN_RBRACKET, "']'")) { ast_free(comp); return NULL; }
+                    return comp;
+                }
                 if (!ast_add_child(list, item)) { ast_free(item); ast_free(list); return NULL; }
                 if (p->current.kind != TOKEN_COMMA) break;
                 next(p);
@@ -469,6 +513,19 @@ static AstNode *parse_comparison(Parser *p) {
         AstNode *right = parse_bitor(p);
         if (!right) { ast_free(left); return NULL; }
         left = make_binary(op, left, right);
+        if (!left) return NULL;
+    } else if (p->current.kind == TOKEN_IN || p->current.kind == TOKEN_NOT) {
+        /* x in xs, x not in xs: like Python, at the level of the comparisons */
+        Token op = p->current;
+        int negated = op.kind == TOKEN_NOT;
+        next(p);
+        if (negated && !expect(p, TOKEN_IN, "in")) { ast_free(left); return NULL; }
+        AstNode *right = parse_bitor(p);
+        if (!right) { ast_free(left); return NULL; }
+        Token text = op;
+        text.start = negated ? "not in" : "in";
+        text.length = negated ? 6 : 2;
+        left = make_binary(text, left, right);
         if (!left) return NULL;
     }
 
