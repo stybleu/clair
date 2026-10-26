@@ -1142,9 +1142,12 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
-        "sinh", "cosh", "tanh", "floor", "ceil", NULL
+        "sinh", "cosh", "tanh", "floor", "ceil",
+        /* V0.47, as in Python's math module */
+        "asinh", "acosh", "atanh", "cbrt", "exp2", "expm1", "log1p", "erf", "erfc", "gamma", "lgamma",
+        "trunc", "degrees", "radians", NULL
     };
-    static const char *const float_binary[] = { "pow", "atan2", "hypot", NULL };
+    static const char *const float_binary[] = { "pow", "atan2", "hypot", "fmod", "copysign", NULL };
 
     const char *name = n->text;
 
@@ -1932,6 +1935,16 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+            /* V0.47: m.sqrt(x) after import math as m: the builtin, even if the program has its own sqrt */
+            int from_math = 0;
+            if (n->text && strncmp(n->text, "math.", 5) == 0) {
+                char *plain = malloc(strlen(n->text + 5) + 1);
+                if (!plain) return NULL;
+                strcpy(plain, n->text + 5);
+                free(n->text);
+                n->text = plain;
+                from_math = 1;
+            }
             if (n->text && (strcmp(n->text, "bigint") == 0 || strcmp(n->text, "bigfloat") == 0)) {
                 int flt = strcmp(n->text, "bigfloat") == 0;
                 size_t count = flt ? 2 : 1;
@@ -2025,7 +2038,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 return n->type_name;
             }
 
-            const AstNode *fn = find_function(s, n->text);
+            const AstNode *fn = from_math ? NULL : find_function(s, n->text);
             if (!fn) {
                 int builtin = check_bignum_call(s, n);
                 if (builtin == 0) builtin = check_matrix_builtin(s, n);
@@ -2037,7 +2050,17 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_format_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
-                fprintf(stderr, "semantic error: undefined function or class '%s'\n", n->text);
+                fprintf(stderr, "semantic error: undefined function or class '%s'", n->text);
+                /* V0.47: f of an imported module is written orbite.f(...) */
+                for (size_t i = 0; i < s->program->child_count; i++) {
+                    const AstNode *other = s->program->children[i];
+                    const char *dot = other->kind == AST_FUNCTION && other->text ? strchr(other->text, '.') : NULL;
+                    if (dot && strcmp(dot + 1, n->text) == 0) {
+                        fprintf(stderr, " (did you mean %s(...)?)", other->text);
+                        break;
+                    }
+                }
+                fputc('\n', stderr);
                 s->had_error = 1;
                 return NULL;
             }
@@ -2665,6 +2688,22 @@ static int collides_with_c(const char *name) {
 
 static void mangle_node(AstNode *n) {
     if (!n) return;
+
+    /* V0.47: the function f of the module orbite is orbite.f in Clair, orbite__mod__f in C */
+    if ((n->kind == AST_FUNCTION || n->kind == AST_CALL) && n->text && n->text[0] != '@' && strchr(n->text, '.')) {
+        size_t dots = 0;
+        for (const char *q = n->text; *q; q++) dots += *q == '.';
+        char *renamed = malloc(strlen(n->text) + dots * 6 + 1), *w = renamed;
+        if (renamed) {
+            for (const char *q = n->text; *q; q++) {
+                if (*q == '.') { memcpy(w, "__mod__", 7); w += 7; }
+                else *w++ = *q;
+            }
+            *w = '\0';
+            free(n->text);
+            n->text = renamed;
+        }
+    }
 
     switch (n->kind) {
         case AST_IDENTIFIER:

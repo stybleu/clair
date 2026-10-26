@@ -3516,6 +3516,12 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_FLOAT:
+            if (n->text && (strcmp(n->text, "inf") == 0 || strcmp(n->text, "nan") == 0)) {
+                /* V0.47: math.inf, math.nan */
+                int f32 = n->type_name && strcmp(n->type_name, "float32") == 0;
+                fprintf(f, "%s%s", f32 ? "(float)" : "", n->text[0] == 'i' ? "__builtin_inf()" : "__builtin_nan(\"\")");
+                return 1;
+            }
             if (n->type_name && strcmp(n->type_name, "float32") == 0) {
                 /*
                  * 0.1f, unless reading the number straight into a float gives
@@ -3899,7 +3905,17 @@ static int emit_expr(FILE *f, const AstNode *n) {
                     fputc(')', f);
                     return 1;
                 }
+                if (strcmp(name, "degrees") == 0 || strcmp(name, "radians") == 0) {
+                    /* V0.47: like Python, x times 180 / pi (pi / 180), the constant rounded once */
+                    int f32 = n->type_name && strcmp(n->type_name, "float32") == 0;
+                    fprintf(f, "%s((%s) * (double)(", f32 ? "(float)" : "",
+                            name[0] == 'd' ? "180.0 / 3.141592653589793" : "3.141592653589793 / 180.0");
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fputs("))", f);
+                    return 1;
+                }
                 const char *c_name = name;
+                if (strcmp(name, "gamma") == 0) c_name = "tgamma";      /* V0.47: math.gamma */
                 if (strcmp(name, "abs") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_abs_i64" : "fabs";
                 if (strcmp(name, "min") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_min_i64" : "fmin";
                 if (strcmp(name, "max") == 0) c_name = is_int_type(n->type_name) ? "clair_rt_max_i64" : "fmax";

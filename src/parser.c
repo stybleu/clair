@@ -1685,6 +1685,70 @@ void parser_init(Parser *p, const char *source) {
     next(p);
 }
 
+/* V0.47: a name, optionally followed by `as alias` (the alias becomes its child) */
+static AstNode *parse_import_name(Parser *p) {
+    Token name = p->current;
+    if (!expect(p, TOKEN_IDENTIFIER, "a module or a name")) return NULL;
+    AstNode *node = ast_new(AST_IDENTIFIER, name.start, name.length);
+    if (!node) return NULL;
+    if (p->current.kind == TOKEN_AS) {
+        next(p);
+        Token alias = p->current;
+        if (!expect(p, TOKEN_IDENTIFIER, "a name after 'as'")) { ast_free(node); return NULL; }
+        AstNode *a = ast_new(AST_IDENTIFIER, alias.start, alias.length);
+        if (!a || !ast_add_child(node, a)) { ast_free(a); ast_free(node); return NULL; }
+    }
+    return node;
+}
+
+/*
+ * import math as m, orbite      -> two AST_IMPORT nodes (text: module, child: alias if any)
+ * from astro import GM_mars, UA -> one AST_IMPORT node, type_name "from", children: the names
+ */
+static int parse_import(Parser *p, AstNode *program) {
+    if (p->current.kind == TOKEN_FROM) {
+        next(p);
+        AstNode *module = parse_import_name(p);
+        if (!module) return 0;
+        if (module->child_count) {
+            fprintf(stderr, "parse error at %zu:%zu: write 'import %s as ...' to rename a module, not 'from'\n",
+                    p->current.line, p->current.column, module->text);
+            p->had_error = 1;
+            ast_free(module);
+            return 0;
+        }
+        AstNode *imp = ast_new(AST_IMPORT, module->text, strlen(module->text));
+        ast_free(module);
+        if (!imp || !ast_set_type(imp, "from", 4)) { ast_free(imp); return 0; }
+        if (!expect(p, TOKEN_IMPORT, "'import'")) { ast_free(imp); return 0; }
+        for (;;) {
+            AstNode *name = parse_import_name(p);
+            if (!name || !ast_add_child(imp, name)) { ast_free(name); ast_free(imp); return 0; }
+            if (p->current.kind != TOKEN_COMMA) break;
+            next(p);
+        }
+        if (!ast_add_child(program, imp)) { ast_free(imp); return 0; }
+        return 1;
+    }
+    next(p);                                   /* import */
+    for (;;) {
+        AstNode *module = parse_import_name(p);
+        if (!module) return 0;
+        AstNode *imp = ast_new(AST_IMPORT, module->text, strlen(module->text));
+        if (!imp) { ast_free(module); return 0; }
+        if (module->child_count) {
+            AstNode *alias = module->children[0];
+            module->child_count = 0;
+            if (!ast_add_child(imp, alias)) { ast_free(alias); ast_free(module); ast_free(imp); return 0; }
+        }
+        ast_free(module);
+        if (!ast_add_child(program, imp)) { ast_free(imp); return 0; }
+        if (p->current.kind != TOKEN_COMMA) break;
+        next(p);
+    }
+    return 1;
+}
+
 AstNode *parser_parse_program(Parser *p) {
     AstNode *program = ast_new(AST_PROGRAM, NULL, 0);
     if (!program) return NULL;
@@ -1698,6 +1762,14 @@ AstNode *parser_parse_program(Parser *p) {
         }
 
         AstNode *decl = NULL;
+        if (p->current.kind == TOKEN_IMPORT || p->current.kind == TOKEN_FROM) {
+            if (!parse_import(p, program)) {
+                p->had_error = 1;
+                ast_free(program);
+                return NULL;
+            }
+            continue;
+        }
         if (p->current.kind == TOKEN_CLASS) {
             decl = parse_class(p, program);
         } else if (p->current.kind == TOKEN_DEF) {
@@ -1713,7 +1785,7 @@ AstNode *parser_parse_program(Parser *p) {
                 if (body->text) strcpy(body->text, "absolue");
             }
         } else {
-            fprintf(stderr, "parse error at %zu:%zu: expected Class or def, got %s\n",
+            fprintf(stderr, "parse error at %zu:%zu: expected Class, def or import, got %s\n",
                     p->current.line, p->current.column, token_kind_name(p->current.kind));
             p->had_error = 1;
             ast_free(program);

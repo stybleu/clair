@@ -1,6 +1,7 @@
 #include "parser.h"
 #include "codegen_c.h"
 #include "semantic.h"
+#include "modules.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,13 @@ int main(int argc, char **argv) {
     parser_init(&parser, source);
     AstNode *program = parser_parse_program(&parser);
     if (!program || parser.had_error) {
+        ast_free(program);
+        free(source);
+        return 1;
+    }
+
+    /* V0.47: import math as m, import orbite (orbite.cl next to the program)... */
+    if (!modules_resolve(program, input)) {
         ast_free(program);
         free(source);
         return 1;

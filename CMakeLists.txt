@@ -8,6 +8,7 @@ add_executable(clair
     src/ast.c
     src/parser.c
     src/semantic.c
+    src/modules.c
     src/codegen_c.c
 )
 target_compile_options(clair PRIVATE -Wall -Wextra -Wpedantic)

@@ -12,6 +12,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Fichiers CSV de nombres (`load_csv`, `save_csv`), lignes de texte (`read_lines`, `split`, `strip`), `int("42")` et `float("2.5")` comme en Python
 - Entrée et sortie comme en Python : `input()`, `read_lines()`, `read_text()`, `read_bytes()` (l'entrée ou un fichier), `write(s)` sans aller à la ligne, `write(octets)`, `write_file` ; octets `list[u8]` avec `encode`, `decode`, `ord`, `chr`
 - Listes toutes faites : `[0] * n`, `[1, 2] * 3`, comme en Python
+- `import math as m`, `from astro import GM_mars`, `import orbite` (un fichier `orbite.cl`) comme en Python ; modules `math`, `phys` (constantes CODATA 2022) et `astro` (UAI, éphéméride DE440) rangés dans le compilateur, sans coût à l'exécution
 - Nombres aléatoires `seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice` : mêmes tirages que Python pour la même graine
 - Fonctions mathématiques (`sqrt`, `exp`, `log`, `tanh`, `pow`, `abs`, `min`, `max`…), conversions `int()` et `float()`, opérateur `%`, notation `1e-3`
 - Fonctions, conditions et boucles, dont `for v in liste`, `for i, v in enumerate(liste)` et `for k in dico` comme en Python
@@ -95,6 +96,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.47](docs/README_V0.47.md) : `import`, `from ... import`, `as`, modules en fichiers `.cl`, modules `math`, `phys`, `astro` ; `cbrt`, `erf`, `gamma`, `degrees`...
 - [Clair V0.46](docs/README_V0.46.md) : `input()`, `read_text`, `read_bytes`, `write`, `write_file`, octets (`encode`, `decode`, `ord`, `chr`), `[0] * n`, jeux fasta et reverse-complement
 - [Clair V0.45](docs/README_V0.45.md) : `sqrt`, `exp`, `log`, `sin`, `cos`, `atan2`, `pow`, `pi(chiffres)`... pour les `bigfloat`, `isqrt`, `gcd`, `pow(b, e, m)` pour les `bigint`, comparés à mpmath
 - [Clair V0.44](docs/README_V0.44.md) : indices qui montent et descendent prouvés une fois (nqueen), `bigint` avec `int` comme en Python, grands nombres plus rapides

@@ -71,6 +71,9 @@ typedef enum {
     TOKEN_CARET_EQUAL,
     TOKEN_SHL_EQUAL,
     TOKEN_SHR_EQUAL,
+    TOKEN_IMPORT,           /* V0.47: import, from, as */
+    TOKEN_FROM,
+    TOKEN_AS,
     TOKEN_ERROR
 } TokenKind;
 

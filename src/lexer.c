@@ -24,6 +24,9 @@ static TokenKind keyword_kind(const char *s, size_t n) {
     if (n == 5 && strncmp(s, "Class", 5) == 0) return TOKEN_CLASS;
     if (n == 3 && strncmp(s, "def", 3) == 0) return TOKEN_DEF;
     if (n == 7 && strncmp(s, "absolue", 7) == 0) return TOKEN_ABSOLUE;
+    if (n == 6 && strncmp(s, "import", 6) == 0) return TOKEN_IMPORT;
+    if (n == 4 && strncmp(s, "from", 4) == 0) return TOKEN_FROM;
+    if (n == 2 && strncmp(s, "as", 2) == 0) return TOKEN_AS;
     if (n == 6 && strncmp(s, "return", 6) == 0) return TOKEN_RETURN;
     if (n == 3 && strncmp(s, "let", 3) == 0) return TOKEN_LET;
     if (n == 3 && strncmp(s, "int", 3) == 0) return TOKEN_INT;
@@ -211,6 +214,7 @@ const char *token_kind_name(TokenKind kind) {
         case TOKEN_SHL: return "<<"; case TOKEN_SHR: return ">>"; case TOKEN_AMP_EQUAL: return "&=";
         case TOKEN_PIPE_EQUAL: return "|="; case TOKEN_CARET_EQUAL: return "^="; case TOKEN_SHL_EQUAL: return "<<=";
         case TOKEN_SHR_EQUAL: return ">>=";
+        case TOKEN_IMPORT: return "import"; case TOKEN_FROM: return "from"; case TOKEN_AS: return "as";
         case TOKEN_ERROR: return "error";
     }
     return "unknown";

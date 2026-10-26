@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.46 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.47 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -910,6 +910,25 @@ printf '%s\n' 'jeu fasta (1000) : OK -> sortie de l algorithme officiel'
 [ "$(./build/jeu_fasta <<< 1000 | ./build/jeu_revcomp | md5sum | cut -c1-32)" = 'c071aa7e007a9770b2fb4304f55a17e5' ] ||
     { printf '%s\n' 'tools/jeux/revcomp.cl : ECHEC -> sortie differente pour fasta 1000' >&2; exit 1; }
 printf '%s\n' 'jeu revcomp (fasta 1000) : OK -> sortie de l algorithme officiel'
+
+# V0.47 : import, from ... import, as ; les modules math, phys, astro et des fichiers .cl
+./build/clair tests/modules/importe.cl -o build/test_importe 2> build/importe.stderr
+./build/test_importe > build/importe.out
+cmp -s build/importe.out tests/modules/importe.expected
+grep -Fq 'clair_fn_orbite__mod__periode(' build/test_importe.generated.c
+grep -Fq '6.67430e-11' build/test_importe.generated.c
+! grep -q 'orbite seul' build/importe.out
+printf '%s\n' 'importe.cl : OK -> import math as m, phys, astro, modules qui s importent l un l autre, classe d un module, alias ; identique a Python'
+./build/clair tests/modules/orbite.cl -o build/test_orbite_seul
+[ "$(./build/test_orbite_seul | head -n 1)" = 'orbite seul' ]
+printf '%s\n' 'orbite.cl : OK -> un module lance seul garde son main'
+mkdir -p build/modules
+expect_compile_error modules/sans_module "import error: no module named 'absent' (no file tests/modules/absent.cl)"
+expect_compile_error modules/math_inconnu "import error: module 'math' has no 'sqr'"
+expect_compile_error modules/constante_appelee 'import error: phys.G is a constant, not a function'
+expect_compile_error modules/fonction_sans_prefixe "undefined function or class 'periode' (did you mean orbite.periode(...)?)"
+expect_compile_error modules/nom_absent "import error: cannot import 'vitesse' from 'orbite'"
+expect_compile_error modules/constante_changee 'import error: phys.c: the values of a module cannot be changed'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

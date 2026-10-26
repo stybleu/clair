@@ -38,7 +38,10 @@ typedef enum {
     AST_INDEX,
     AST_IDENTIFIER,
     AST_BINARY,
-    AST_UNARY
+    AST_UNARY,
+    AST_IMPORT          /* V0.47: import m [as a] (type_name NULL, child: the alias) or
+                           from m import x [as y], ... (type_name "from", children: x, each with its alias);
+                           resolved and removed by modules_resolve before the semantic pass */
 } AstKind;
 
 typedef struct AstNode {
