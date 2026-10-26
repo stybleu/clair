@@ -35,7 +35,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Optimisations SIMD ARM64 NEON
 - Division entière contrôlée
 
-- Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
+- Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), avec leurs fonctions mathématiques (`sqrt`, `sin`, `exp`, `log`, `pi(1000)`, `isqrt`, `gcd`...), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
 
 ## Compilation sous Termux
 
@@ -93,6 +93,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.45](docs/README_V0.45.md) : `sqrt`, `exp`, `log`, `sin`, `cos`, `atan2`, `pow`, `pi(chiffres)`... pour les `bigfloat`, `isqrt`, `gcd`, `pow(b, e, m)` pour les `bigint`, comparés à mpmath
 - [Clair V0.44](docs/README_V0.44.md) : indices qui montent et descendent prouvés une fois (nqueen), `bigint` avec `int` comme en Python, grands nombres plus rapides
 - [Clair V0.43](docs/README_V0.43.md) : jeux de tests des langages (Benchmarks Game, PLB2) dans le rapport, `str()`, `format()`, `bigint(k)`, boucles triangulaires et à deux bouts vérifiées une fois
 - [Clair V0.42](docs/README_V0.42.md) : mémoire des `bigint` et `bigfloat` rendue dans toutes les fonctions, `clair` depuis n'importe quel dossier, `let x = x + 1` dans un bloc

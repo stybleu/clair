@@ -21,4 +21,8 @@ int clair_bf_add(ClairBigFloat *out, const ClairBigFloat *a, const ClairBigFloat
 int clair_bf_sub(ClairBigFloat *out, const ClairBigFloat *a, const ClairBigFloat *b, uint32_t precision);
 int clair_bf_mul(ClairBigFloat *out, const ClairBigFloat *a, const ClairBigFloat *b, uint32_t precision);
 int clair_bf_div(ClairBigFloat *out, const ClairBigFloat *a, const ClairBigFloat *b, uint32_t precision);
+/* V0.45 : coefficient * 10^exp10 arrondi a 'precision' chiffres ; sticky : des chiffres non nuls
+   ont ete coupes plus bas (le resultat exact n'est pas a mi-chemin). */
+int clair_bf_from_scaled(ClairBigFloat *out, const ClairBigInt *coefficient, int64_t exp10,
+                         uint32_t precision, int sticky);
 #endif

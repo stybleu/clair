@@ -3315,6 +3315,8 @@ static int emit_param_list(FILE *f, const AstNode *fn) {
 
 static int emit_pinned(FILE *f, const AstNode *value);          /* V0.42 big numbers */
 static int emit_str_call(FILE *f, const AstNode *n);            /* V0.43 str(), format() */
+static int emit_bignum_call(FILE *f, const AstNode *n);         /* V0.45 sqrt(bigfloat)... */
+static int emit_as_bigfloat(FILE *f, const AstNode *n);
 static int emit_return_value(FILE *f, const AstNode *value);
 static int clair_num_frame_open;     /* the function being written has a ClairNumFrameGuard */
 static int emit_expr(FILE *f, const AstNode *n);
@@ -3641,6 +3643,22 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
         case AST_CALL:
             if (n->text && !strcmp(n->text,"bigint") && n->child_count == 1 &&
+                n->children[0]->type_name && !strcmp(n->children[0]->type_name, "bigfloat")) {
+                fputs("clair_rt_bigfloat_floor(", f);                     /* bigint(x): vers zero */
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(", 0)", f);
+                return 1;
+            }
+            if (n->text && !strcmp(n->text,"bigfloat") && n->child_count == 2 &&
+                n->children[0]->type_name && strcmp(n->children[0]->type_name, "string") != 0) {
+                fputs("clair_rt_bigfloat_round(", f);                     /* bigfloat(k, p), bigfloat(x, p) */
+                if (!emit_as_bigfloat(f, n->children[0])) return 0;
+                fputs(", (int64_t)(", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputs("))", f);
+                return 1;
+            }
+            if (n->text && !strcmp(n->text,"bigint") && n->child_count == 1 &&
                 n->children[0]->type_name && strcmp(n->children[0]->type_name, "string") != 0) {
                 fputs("clair_rt_bigint_from_int((int64_t)(", f);          /* bigint(k) */
                 if (!emit_expr(f, n->children[0])) return 0;
@@ -3689,6 +3707,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
                     return 1;
                 }
                 if (strcmp(name, "str") == 0 || strcmp(name, "format") == 0) return emit_str_call(f, n);
+                if (strncmp(name, "bn_", 3) == 0) return emit_bignum_call(f, n);
                 if (is_absolue_call(name)) {
                     const char *pt = n->type_name;
                     if (strcmp(name, "address") == 0 || strcmp(name, "bytes") == 0) {
@@ -3876,6 +3895,19 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
             const char *dyn = n->children[0]->type_name, *dyn_r = n->children[1]->type_name;
             int big_l = dyn && !strcmp(dyn, "bigint"), big_r = dyn_r && !strcmp(dyn_r, "bigint");
+            int bf_l = dyn && !strcmp(dyn, "bigfloat"), bf_r = dyn_r && !strcmp(dyn_r, "bigfloat");
+            if (bf_l != bf_r) {
+                /* V0.45 : bigfloat avec un int, un float ou un bigint, converti exactement */
+                const char *fn = !strcmp(op, "+") ? "add" : !strcmp(op, "-") ? "sub" : !strcmp(op, "*") ? "mul" :
+                                 !strcmp(op, "/") ? "div" : NULL;
+                fprintf(f, fn ? "clair_rt_bigfloat_%s(" : "(clair_rt_bigfloat_cmp(", fn ? fn : "");
+                if (!emit_as_bigfloat(f, n->children[0])) return 0;
+                fputs(", ", f);
+                if (!emit_as_bigfloat(f, n->children[1])) return 0;
+                if (fn) fputc(')', f);
+                else fprintf(f, ") %s 0)", op);
+                return 1;
+            }
             if (big_l && big_r && !strcmp(op, "+")) {
                 /* acc + num * 2, num * 3 + acc : un seul passage (clair_rt_bigint_addmul_int) */
                 for (int side = 0; side < 2; side++) {
@@ -4361,6 +4393,100 @@ static int emit_str_call(FILE *f, const AstNode *n) {
     fputs("clair_rt_format_float((double)(", f);
     if (!emit_expr(f, x)) return 0;
     fprintf(f, "), \"%%%s%s%c\")", width, precision, kind);
+    return 1;
+}
+
+/* a number in a bigfloat calculation: converted exactly (its precision does not count) */
+static int emit_as_bigfloat(FILE *f, const AstNode *n) {
+    const char *t = n->type_name;
+    if (!t) return 0;
+    if (!strcmp(t, "bigfloat")) return emit_expr(f, n);
+    if (!strcmp(t, "bigint")) fputs("clair_rt_bigfloat_exact_bigint(", f);
+    else if (!strcmp(t, "float") || !strcmp(t, "float32")) fputs("clair_rt_bigfloat_exact_float((double)(", f);
+    else fputs("clair_rt_bigfloat_exact_int((int64_t)(", f);
+    if (!emit_expr(f, n)) return 0;
+    fputs(!strcmp(t, "bigint") ? ")" : "))", f);
+    return 1;
+}
+static int emit_as_bigint(FILE *f, const AstNode *n) {
+    if (n->type_name && !strcmp(n->type_name, "bigint")) return emit_expr(f, n);
+    fputs("clair_rt_bigint_from_int((int64_t)(", f);
+    if (!emit_expr(f, n)) return 0;
+    fputs("))", f);
+    return 1;
+}
+
+/* V0.45 : @bn_sqrt(x), @bn_pow(b, e, m), @bn_pi(50)... checked by check_bignum_call */
+static int emit_bignum_call(FILE *f, const AstNode *n) {
+    const char *name = n->text + 4;                    /* after "@bn_" */
+    const char *t0 = n->child_count ? n->children[0]->type_name : NULL;
+    int bf0 = t0 && !strcmp(t0, "bigfloat");
+    size_t argc = n->child_count;
+    if (!strcmp(name, "pi")) {
+        fputs("clair_rt_bigfloat_pi((int64_t)(", f);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputs("))", f);
+        return 1;
+    }
+    if (!strcmp(name, "floor") || !strcmp(name, "ceil")) {
+        if (!bf0) return emit_expr(f, n->children[0]);   /* floor(bigint) = lui-meme */
+        fputs("clair_rt_bigfloat_floor(", f);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fprintf(f, ", %d)", name[0] == 'f' ? -1 : 1);
+        return 1;
+    }
+    if (!strcmp(name, "int") || !strcmp(name, "float") || !strcmp(name, "abs")) {
+        fprintf(f, "clair_rt_%s_%s(", bf0 ? "bigfloat" : "bigint",
+                !strcmp(name, "int") ? "to_int" : !strcmp(name, "float") ? "to_float" : "abs");
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputc(')', f);
+        return 1;
+    }
+    if (!strcmp(name, "isqrt") || !strcmp(name, "gcd")) {
+        int big = n->type_name && !strcmp(n->type_name, "bigint");
+        if (!big) {
+            fprintf(f, "clair_rt_int_%s(", name);
+            for (size_t i = 0; i < argc; i++) {
+                if (i) fputs(", ", f);
+                fputs("(int64_t)(", f);
+                if (!emit_expr(f, n->children[i])) return 0;
+                fputc(')', f);
+            }
+            fputc(')', f);
+            return 1;
+        }
+        fprintf(f, "clair_rt_bigint_%s(", name);
+        for (size_t i = 0; i < argc; i++) {
+            if (i) fputs(", ", f);
+            if (!emit_as_bigint(f, n->children[i])) return 0;
+        }
+        fputc(')', f);
+        return 1;
+    }
+    if (!strcmp(name, "pow") && n->type_name && !strcmp(n->type_name, "bigint")) {
+        if (argc == 3) {
+            fputs("clair_rt_bigint_powmod(", f);
+            for (size_t i = 0; i < 3; i++) {
+                if (i) fputs(", ", f);
+                if (!emit_as_bigint(f, n->children[i])) return 0;
+            }
+            fputc(')', f);
+            return 1;
+        }
+        fputs("clair_rt_bigint_pow(", f);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputs(", (int64_t)(", f);
+        if (!emit_expr(f, n->children[1])) return 0;
+        fputs("))", f);
+        return 1;
+    }
+    /* sqrt(x), atan2(y, x), pow(x, y), hypot(x, y) of bigfloat */
+    fprintf(f, "clair_rt_bigfloat_%s(", name);
+    for (size_t i = 0; i < argc; i++) {
+        if (i) fputs(", ", f);
+        if (!emit_as_bigfloat(f, n->children[i])) return 0;
+    }
+    fputc(')', f);
     return 1;
 }
 

@@ -566,6 +566,103 @@ static int check_random_call(Semantic *s, AstNode *n) {
 }
 
 /*
+ * V0.45 : mathematics of big numbers, the same names as for float:
+ *   sqrt exp log log10 log2 sin cos tan asin acos atan sinh cosh tanh (bigfloat -> bigfloat)
+ *   atan2(y, x), hypot(x, y), pow(x, y) with a bigfloat (the other: bigfloat, int, float, bigint)
+ *   floor, ceil (bigfloat -> bigint), abs, pow(b, k) and pow(b, e, m) of bigint, isqrt, gcd,
+ *   pi(digits), int(b), float(b).  Renamed @bn_<name>; 0 when the call is not about big numbers.
+ */
+static int is_dyn_type(const char *t) { return t && (!strcmp(t, "bigint") || !strcmp(t, "bigfloat")); }
+static int to_bigfloat_ok(const char *t) {
+    return t && (!strcmp(t, "bigfloat") || !strcmp(t, "bigint") || is_index_type(t) || is_float_type(t));
+}
+static int check_bignum_call(Semantic *s, AstNode *n) {
+    static const char *const unary[] = { "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos",
+                                         "atan", "sinh", "cosh", "tanh", NULL };
+    static const char *const others[] = { "floor", "ceil", "abs", "pow", "atan2", "hypot", "isqrt", "gcd", "pi",
+                                          "int", "float", NULL };
+    const char *name = n->text;
+    int is_unary = 0, known = 0;
+    for (size_t i = 0; unary[i]; i++) if (!strcmp(name, unary[i])) is_unary = known = 1;
+    for (size_t i = 0; others[i]; i++) if (!strcmp(name, others[i])) known = 1;
+    if (!known) return 0;
+    int own = !strcmp(name, "isqrt") || !strcmp(name, "gcd") || !strcmp(name, "pi");
+    if (n->child_count == 0 || n->child_count > 3) {
+        if (!own) return 0;
+        fprintf(stderr, "semantic error: %s() expects %s\n", name, !strcmp(name, "gcd") ? "2 arguments" : "1 argument");
+        s->had_error = 1;
+        return -1;
+    }
+    const char *t[3] = { NULL, NULL, NULL };
+    int any_dyn = 0, any_float = 0, any_bigint = 0;
+    for (size_t i = 0; i < n->child_count; i++) {
+        t[i] = expr_type(s, n->children[i]);
+        if (!t[i]) return -1;
+        any_dyn |= is_dyn_type(t[i]);
+        any_float |= !strcmp(t[i], "bigfloat");
+        any_bigint |= !strcmp(t[i], "bigint");
+    }
+    if (!any_dyn && !own) return 0;
+    const char *result = NULL;
+    size_t argc = n->child_count;
+    #define BN_FAIL(...) do { fprintf(stderr, "semantic error: " __VA_ARGS__); s->had_error = 1; return -1; } while (0)
+    if (is_unary) {
+        if (argc != 1) BN_FAIL("%s() expects 1 argument, got %zu\n", name, argc);
+        if (strcmp(t[0], "bigfloat") != 0)
+            BN_FAIL("%s() of a %s: convert it first, e.g. %s(bigfloat(x, 50))\n", name, t[0], name);
+        result = "bigfloat";
+    } else if (!strcmp(name, "floor") || !strcmp(name, "ceil")) {
+        if (argc != 1) BN_FAIL("%s() expects 1 argument, got %zu\n", name, argc);
+        result = "bigint";
+    } else if (!strcmp(name, "abs")) {
+        if (argc != 1) BN_FAIL("abs() expects 1 argument, got %zu\n", argc);
+        result = t[0];
+    } else if (!strcmp(name, "int") || !strcmp(name, "float")) {
+        if (argc != 1) BN_FAIL("%s() expects 1 argument, got %zu\n", name, argc);
+        result = name[0] == 'i' ? "int" : "float";
+    } else if (!strcmp(name, "atan2") || !strcmp(name, "hypot")) {
+        if (argc != 2) BN_FAIL("%s() expects 2 arguments, got %zu\n", name, argc);
+        if (!any_float || !to_bigfloat_ok(t[0]) || !to_bigfloat_ok(t[1]))
+            BN_FAIL("%s() of big numbers needs a bigfloat, got %s(%s, %s)\n", name, name, t[0], t[1]);
+        result = "bigfloat";
+    } else if (!strcmp(name, "pow")) {
+        if (argc == 3) {
+            for (size_t i = 0; i < 3; i++)
+                if (strcmp(t[i], "bigint") != 0 && !is_index_type(t[i]))
+                    BN_FAIL("pow(b, e, m) works on bigint and int, got pow(%s, %s, %s)\n", t[0], t[1], t[2]);
+            result = "bigint";
+        } else if (argc == 2 && any_float) {
+            if (!to_bigfloat_ok(t[0]) || !to_bigfloat_ok(t[1]))
+                BN_FAIL("pow() cannot use %s and %s\n", t[0], t[1]);
+            result = "bigfloat";
+        } else if (argc == 2 && !strcmp(t[0], "bigint") && is_index_type(t[1])) {
+            result = "bigint";
+        } else BN_FAIL("pow() of a bigint expects pow(bigint, int), got pow(%s, %s)\n", t[0], argc > 1 ? t[1] : "?");
+    } else if (!strcmp(name, "isqrt")) {
+        if (argc != 1) BN_FAIL("isqrt() expects 1 argument, got %zu\n", argc);
+        if (strcmp(t[0], "bigint") != 0 && !is_index_type(t[0])) BN_FAIL("isqrt() expects an int or a bigint, got %s\n", t[0]);
+        result = any_bigint ? "bigint" : "int";
+    } else if (!strcmp(name, "gcd")) {
+        if (argc != 2) BN_FAIL("gcd() expects 2 arguments, got %zu\n", argc);
+        for (size_t i = 0; i < 2; i++)
+            if (strcmp(t[i], "bigint") != 0 && !is_index_type(t[i])) BN_FAIL("gcd() expects int or bigint, got %s\n", t[i]);
+        result = any_bigint ? "bigint" : "int";
+    } else if (!strcmp(name, "pi")) {
+        if (argc != 1 || !is_index_type(t[0])) BN_FAIL("pi() expects the number of digits, e.g. pi(50)\n");
+        result = "bigfloat";
+    }
+    #undef BN_FAIL
+    if (!result) return 0;
+    char *renamed = malloc(strlen(name) + 5);
+    if (!renamed) return -1;
+    strcpy(renamed, "@bn_");
+    strcat(renamed, name);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, result) ? 1 : -1;
+}
+
+/*
  * format(x, "spec"): the common part of Python's format mini-language,
  * [width][.precision][f|e|g|d]. 1 when spec is valid for a value of type t.
  */
@@ -1327,6 +1424,20 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         /* V0.44 : bigint avec un int (num * k, acc + 1, x > 0), comme en Python */
         int with_int = (!strcmp(left, "bigint") && is_index_type(right)) ||
                        (!strcmp(right, "bigint") && is_index_type(left));
+        /* V0.45 : bigfloat avec un int, un float ou un bigint (converti exactement) */
+        int lf = !strcmp(left, "bigfloat"), rf = !strcmp(right, "bigfloat");
+        if ((lf || rf) && !(lf && rf)) {
+            const char *other = lf ? right : left;
+            if (is_index_type(other) || is_float_type(other) || !strcmp(other, "bigint")) {
+                if (!strcmp(op, "%")) arithmetic = 0;
+                if (!comparison && !arithmetic) {
+                    fprintf(stderr, "semantic error: operator '%s' is not defined for bigfloat\n", op);
+                    s->had_error = 1; return NULL;
+                }
+                set_type(n, comparison ? "bool" : "bigfloat");
+                return n->type_name;
+            }
+        }
         if ((strcmp(left,right) && !with_int) || (!comparison && !arithmetic)) {
             fprintf(stderr, "semantic error: unsupported or mixed big-number operands: %s %s %s\n",
                     left,op,right);
@@ -1737,9 +1848,16 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                     set_type(n, "bigint");
                     return n->type_name;
                 }
-                if (!arg || strcmp(arg, "string") != 0) {
+                if (!flt && arg && strcmp(arg, "bigfloat") == 0) { /* bigint(x): vers zero, comme int() (V0.45) */
+                    set_type(n, "bigint");
+                    return n->type_name;
+                }
+                /* bigfloat(k, p), bigfloat(x, p), bigfloat(b, p) : int, float, bigint (V0.45) */
+                int flt_from_number = flt && arg && (is_index_type(arg) || is_float_type(arg) ||
+                                                     strcmp(arg, "bigint") == 0 || strcmp(arg, "bigfloat") == 0);
+                if (!arg || (strcmp(arg, "string") != 0 && !flt_from_number)) {
                     fprintf(stderr, "semantic error: %s() expects a decimal string%s\n", n->text,
-                            flt ? "" : " or an int");
+                            flt ? ", an int, a float or a bigint" : ", an int or a bigfloat");
                     s->had_error = 1; return NULL;
                 }
                 if (flt) {
@@ -1813,7 +1931,8 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             const AstNode *fn = find_function(s, n->text);
             if (!fn) {
-                int builtin = check_matrix_builtin(s, n);
+                int builtin = check_bignum_call(s, n);
+                if (builtin == 0) builtin = check_matrix_builtin(s, n);
                 if (builtin == 0) builtin = check_builtin_call(s, n);
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);

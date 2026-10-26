@@ -75,6 +75,11 @@ done:
     free(raw);clair_bf_clear(&result);return rc;
 }
 
+int clair_bf_from_scaled(ClairBigFloat *out, const ClairBigInt *coefficient, int64_t exp10,
+                         uint32_t precision, int sticky) {
+    return from_coeff(out, coefficient, exp10, precision, sticky);
+}
+
 int clair_bf_parse(ClairBigFloat *out, const char *s, uint32_t precision) {
     if(!s || !*s || !precision || precision>1000000) return CLAIR_BIG_INVALID;
     const char *p=s;

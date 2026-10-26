@@ -1,8 +1,8 @@
 # Transmission V0.44 → V0.45
 
-La V0.45 (fonctions mathématiques pour `bigint` et `bigfloat`) part de la V0.43. Entre les deux,
-la V0.44 a touché aux fichiers des grands nombres. Claude reportera la V0.45 sur la V0.44 ; cette
-note dit exactement ce qui a changé, pour que rien ne se perde.
+Ce qui a changé dans les fichiers des grands nombres pendant la V0.44. Finalement, Claude a fait
+la V0.45 lui-même (fonctions mathématiques : `src/clair_bigmath.c`, voir
+`docs/README_V0.45.md`) ; cette note reste le résumé des changements de la V0.44.
 
 ## `src/clair_bigint.c` et `src/clair_bigint.h`
 

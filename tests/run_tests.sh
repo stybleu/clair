@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.44 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.45 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -851,6 +851,21 @@ printf '%s\n' 'bigint_avec_int.cl : OK -> a + 1, a * k, 1000000 / a, a + a * 9 e
 grep -Fq '(__int128)k >= 0 && (__int128)k <= ((__int128)n - 1)' build/test_indices_prouves.generated.c
 printf '%s\n' 'indices_prouves.cl : OK -> k qui monte et descend, prouve entre 0 et n - 1 avant la boucle'
 expect_runtime_error range_bounds_runtime '1\n3\n6' 'Clair runtime error: list index 3 out of bounds for length 3'
+
+# V0.45 : fonctions mathematiques des grands nombres
+./build/clair tests/grands_nombres_maths.cl -o build/test_grands_nombres_maths
+[ "$(./build/test_grands_nombres_maths)" = "$(cat tests/grands_nombres_maths.expected)" ]
+grep -Fq 'clair_rt_bigfloat_sqrt(x)' build/test_grands_nombres_maths.generated.c
+grep -Fq 'clair_rt_bigint_powmod(' build/test_grands_nombres_maths.generated.c
+printf '%s\n' 'grands_nombres_maths.cl : OK -> sqrt, sin, cos, exp, log, atan2, pow, pi(1000), isqrt, gcd, pow modulaire ; identique a mpmath et Python'
+expect_runtime_error bigfloat_domain_runtime '2e0' 'Clair runtime error: math domain error'
+expect_runtime_error bigfloat_log_zero_runtime '' 'Clair runtime error: math domain error'
+expect_runtime_error isqrt_negative_runtime '' 'Clair runtime error: isqrt() argument must be nonnegative'
+expect_runtime_error powmod_zero_runtime '' 'Clair runtime error: pow() 3rd argument cannot be 0'
+expect_runtime_error bigint_to_int_runtime '1000000000000000000' 'Clair runtime error: int() argument out of range'
+expect_compile_error invalid_bigint_sqrt 'sqrt() of a bigint: convert it first, e.g. sqrt(bigfloat(x, 50))'
+expect_compile_error invalid_pi_digits 'pi() expects the number of digits, e.g. pi(50)'
+expect_compile_error invalid_bigfloat_mod "operator '%' is not defined for bigfloat"
 
 # V0.43 : les jeux de tests des langages, sorties officielles sur de petites tailles
 jeu() {

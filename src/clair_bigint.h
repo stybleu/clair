@@ -12,7 +12,8 @@ typedef struct {
 } ClairBigInt;
 
 enum { CLAIR_BIG_OK = 0, CLAIR_BIG_NOMEM = -1, CLAIR_BIG_INVALID = -2,
-       CLAIR_BIG_DIVZERO = -3, CLAIR_BIG_TOO_LARGE = -4 };
+       CLAIR_BIG_DIVZERO = -3, CLAIR_BIG_TOO_LARGE = -4,
+       CLAIR_BIG_DOMAIN = -5 /* V0.45 : sqrt(-1), log(0), asin(2) */ };
 void clair_big_init(ClairBigInt *x);
 void clair_big_clear(ClairBigInt *x);
 int clair_big_from_i64(ClairBigInt *out, int64_t x);
