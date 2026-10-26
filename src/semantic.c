@@ -753,13 +753,14 @@ static int check_text_call(Semantic *s, AstNode *n) {
     size_t min = 1, max = 1;
     if (strcmp(name, "load_csv") == 0 || strcmp(name, "split") == 0) max = 2;
     if (strcmp(name, "save_csv") == 0) min = max = 2;
+    if (strcmp(name, "read_lines") == 0) min = 0;      /* read_lines(): the standard input (V0.46) */
     if (n->child_count < min || n->child_count > max) {
         if (min == max) fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
         else fprintf(stderr, "semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
         s->had_error = 1;
         return -1;
     }
-    const char *t0 = expr_type(s, n->children[0]);
+    const char *t0 = n->child_count ? expr_type(s, n->children[0]) : "string";
     if (!t0) return -1;
     if (strcmp(t0, "string") != 0) {
         fprintf(stderr, "semantic error: argument 1 of %s() expects a string, got %s\n", name, t0);
@@ -812,6 +813,73 @@ static int check_text_call(Semantic *s, AstNode *n) {
     free(n->text);
     n->text = renamed;
     return set_type(n, result) ? 1 : -1;
+}
+
+/*
+ * Standard input and output, files and bytes (V0.46):
+ *   input() / input(prompt) -> string          read_text() / read_text(path) -> string
+ *   read_bytes() / read_bytes(path) -> list[u8]
+ *   write(s), write(b), write(b, n) -> int     write_file(path, s or b) -> int
+ *   encode(s) -> list[u8]   decode(b) -> string   ord(s) -> int   chr(n) -> string
+ * Without a path, read_text and read_bytes read the standard input.
+ * 1 when n is one of them (renamed @input...), 0 otherwise, -1 on error.
+ */
+static int check_io_call(Semantic *s, AstNode *n) {
+    static const struct { const char *name; size_t min, max; const char *result; } calls[] = {
+        { "input", 0, 1, "string" }, { "read_text", 0, 1, "string" }, { "read_bytes", 0, 1, "list[u8]" },
+        { "write", 1, 2, "int" }, { "write_file", 2, 2, "int" }, { "encode", 1, 1, "list[u8]" },
+        { "decode", 1, 1, "string" }, { "ord", 1, 1, "int" }, { "chr", 1, 1, "string" },
+        { NULL, 0, 0, NULL }
+    };
+    size_t c = 0;
+    while (calls[c].name && strcmp(n->text, calls[c].name) != 0) c++;
+    if (!calls[c].name) return 0;
+    const char *name = calls[c].name;
+    size_t min = calls[c].min, max = calls[c].max;
+    if (n->child_count < min || n->child_count > max) {
+        if (min == max) fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
+        else fprintf(stderr, "semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        /* write([10]), write_file(path, [65, 0] * 3), decode([104, 105]): a list written here is a list[u8] */
+        AstNode *arg = n->children[i];
+        int bytes_arg = (strcmp(name, "write") == 0 && i == 0) || (strcmp(name, "write_file") == 0 && i == 1) ||
+                        strcmp(name, "decode") == 0;
+        int literal = arg->kind == AST_LIST || (arg->kind == AST_BINARY && arg->text && strcmp(arg->text, "*") == 0 &&
+                      arg->child_count == 2 && (arg->children[0]->kind == AST_LIST || arg->children[1]->kind == AST_LIST));
+        const char *t = bytes_arg && literal ? expr_type_expected(s, arg, "list[u8]") : expr_type(s, arg);
+        if (!t) return -1;
+        const char *want = NULL;      /* what argument i must be */
+        int is_text = strcmp(t, "string") == 0, is_bytes = strcmp(t, "list[u8]") == 0;
+        if (strcmp(name, "write") == 0) {
+            if (i == 0 && !(is_bytes || (is_text && n->child_count == 1)))
+                want = n->child_count == 1 ? "a string or a list[u8]" : "a list[u8] (write(b, n) writes its first n bytes)";
+            if (i == 1 && !is_index_type(t)) want = "an int";
+        } else if (strcmp(name, "write_file") == 0) {
+            if (i == 0 && !is_text) want = "a string";
+            if (i == 1 && !is_text && !is_bytes) want = "a string or a list[u8]";
+        } else if (strcmp(name, "decode") == 0) {
+            if (!is_bytes) want = "a list[u8]";
+        } else if (strcmp(name, "chr") == 0) {
+            if (!is_index_type(t)) want = "an int";
+        } else if (!is_text) {
+            want = "a string";
+        }
+        if (want) {
+            fprintf(stderr, "semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, name, want, t);
+            s->had_error = 1;
+            return -1;
+        }
+    }
+    char *renamed = malloc(strlen(name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, name);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, calls[c].result) ? 1 : -1;
 }
 
 /*
@@ -1392,6 +1460,8 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     if (n->child_count != 2 || !n->text) return NULL;
     AstNode *lhs = n->children[0], *rhs = n->children[1];
     const char *left, *right;
+    /* V0.46: [x] * n already typed by its context (let xs: list[u8] = [0] * n) */
+    if (strcmp(n->text, "*") == 0 && n->type_name && is_list_type(n->type_name)) return n->type_name;
     /*
      * A number written next to a big integer or a machine integer (u8, i32...)
      * takes its type (it must fit).  Not for shifts: in 1 << n, 1 is an int.
@@ -1412,6 +1482,17 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         right = expr_type(s, rhs);
     }
     if (!left || !right) return NULL;
+    /* V0.46: xs * n and n * xs repeat a list, like Python (n <= 0 gives an empty list) */
+    if (strcmp(n->text, "*") == 0 && (is_list_type(left) || is_list_type(right))) {
+        const char *list = is_list_type(left) ? left : right, *count = is_list_type(left) ? right : left;
+        if (!is_index_type(count)) {
+            fprintf(stderr, "semantic error: a list can only be repeated by an int (xs * n), got %s * %s\n",
+                    left, right);
+            s->had_error = 1;
+            return NULL;
+        }
+        return set_type(n, list) ? n->type_name : NULL;
+    }
     int dynleft = strcmp(left, "bigint") == 0 || strcmp(left, "bigfloat") == 0;
     int dynright = strcmp(right, "bigint") == 0 || strcmp(right, "bigfloat") == 0;
     if (dynleft || dynright) {
@@ -1712,6 +1793,21 @@ static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expec
 }
 
 static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char *expected) {
+    /* V0.46: let xs: list[u8] = [0] * n : the list written gets the expected type */
+    if (n && n->kind == AST_BINARY && n->text && strcmp(n->text, "*") == 0 && n->child_count == 2 &&
+        is_list_type(expected) && !n->type_name &&
+        (n->children[0]->kind == AST_LIST || n->children[1]->kind == AST_LIST)) {
+        size_t li = n->children[0]->kind == AST_LIST ? 0 : 1;
+        const char *lt = expr_type_expected_plain(s, n->children[li], expected);
+        const char *ct = lt ? expr_type(s, n->children[1 - li]) : NULL;
+        if (!lt || !ct) return NULL;
+        if (!is_index_type(ct)) {
+            fprintf(stderr, "semantic error: a list can only be repeated by an int (xs * n), got %s\n", ct);
+            s->had_error = 1;
+            return NULL;
+        }
+        return set_type(n, lt) ? n->type_name : NULL;
+    }
     if (n && n->kind == AST_CALL && n->text && strcmp(n->text, "matrix") == 0 &&
         is_matrix_type(expected) && !find_function(s, "matrix")) {
         return check_matrix_make(s, n, expected);
@@ -1936,6 +2032,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_builtin_call(s, n);
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
+                if (builtin == 0) builtin = check_io_call(s, n);
                 if (builtin == 0) builtin = check_absolue_call(s, n);
                 if (builtin == 0) builtin = check_format_call(s, n);
                 if (builtin == 1) return n->type_name;

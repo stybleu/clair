@@ -138,11 +138,14 @@ done
 # Game and PLB2, the same algorithm in Clair and in plain C.  The size is read
 # on the standard input; both programs must write exactly the same thing.
 JEUX="$ROOT/tools/jeux"
+# V0.46: the input of a game is its size, or a file ("fasta:N": what fasta writes for N)
+feed() {
+    if [ -n "$input_file" ]; then "$@" < "$input_file"; else "$@" <<< "$size"; fi
+}
 seconds_in() {
-    local input="$1" start end
-    shift
+    local start end
     start=$EPOCHREALTIME
-    "$@" <<< "$input" > /dev/null 2>&1
+    feed "$@" > /dev/null 2>&1
     end=$EPOCHREALTIME
     awk -v s="$start" -v e="$end" 'BEGIN { printf "%.4f", e - s }'
 }
@@ -150,6 +153,18 @@ printf '\nJEUX DE TESTS DES LANGAGES (memes algorithmes en Clair et en C)\n'
 printf '%-10s %-8s %-7s %-7s %s\n' "programme" "taille" "Clair" "C" "ecart"
 while read -r name size _; do
     case "$name" in ''|'#'*) continue ;; esac
+    input_file=""
+    shown="${size#fasta:}"
+    case "$size" in
+        fasta:*)
+            input_file="$WORK/entree_$name.txt"
+            if ! clang -std=c11 -O2 "$JEUX/fasta_ref.c" -o "$WORK/jeu_fasta_entree" > /dev/null 2>&1 ||
+               ! "$WORK/jeu_fasta_entree" <<< "${size#fasta:}" > "$input_file"; then
+                printf '%-10s ECHEC de l entree (fasta)\n' "$name"
+                continue
+            fi
+            ;;
+    esac
     if ! "$ROOT/build/clair" "$JEUX/$name.cl" -o "$WORK/jeu_$name" > "$WORK/jeu_$name.log" 2>&1; then
         printf '%-10s ECHEC de compilation Clair\n' "$name"
         continue
@@ -158,15 +173,15 @@ while read -r name size _; do
     [ "$name" = pidigits ] && libs="-lgmp"
     if ! clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 \
             "$JEUX/${name}_ref.c" -o "$WORK/jeu_${name}_ref" $libs >> "$WORK/jeu_$name.log" 2>&1; then
-        t_clair=$(seconds_in "$size" ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")
+        t_clair=$(seconds_in ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")
         if [ "$name" = pidigits ]; then
-            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$size" "$(printf '%.3f' "$t_clair")" "-" "C sans GMP (pkg install libgmp)"
+            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$shown" "$(printf '%.3f' "$t_clair")" "-" "C sans GMP (pkg install libgmp)"
         else
-            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$size" "$(printf '%.3f' "$t_clair")" "-" "ECHEC de compilation C"
+            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$shown" "$(printf '%.3f' "$t_clair")" "-" "ECHEC de compilation C"
         fi
         continue
     fi
-    out_clair=$("$WORK/jeu_$name" <<< "$size"); out_ref=$("$WORK/jeu_${name}_ref" <<< "$size")
+    out_clair=$(feed "$WORK/jeu_$name" | cksum); out_ref=$(feed "$WORK/jeu_${name}_ref" | cksum)
     same=""
     [ "$out_clair" = "$out_ref" ] || same=" RESULTAT DIFFERENT"
     if ! core_ok; then
@@ -175,11 +190,12 @@ while read -r name size _; do
     fi
     times_clair=(); times_ref=()
     for _ in $(seq "$ROUNDS"); do
-        times_clair+=("$(seconds_in "$size" ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")")
-        times_ref+=("$(seconds_in "$size" ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_${name}_ref")")
+        times_clair+=("$(seconds_in ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")")
+        times_ref+=("$(seconds_in ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_${name}_ref")")
     done
     t_clair=$(median "${times_clair[@]}")
     t_ref=$(median "${times_ref[@]}")
     gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
-    printf '%-10s %-8s %-7s %-7s %s%s\n' "$name" "$size" "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"
+    printf '%-10s %-8s %-7s %-7s %s%s\n' "$name" "$shown" "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"
+    [ -n "$input_file" ] && rm -f "$input_file"
 done < "$JEUX/tailles.txt"

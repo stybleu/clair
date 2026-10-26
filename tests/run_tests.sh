@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.45 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.46 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -520,7 +520,7 @@ printf '%s\n' 'loop_fast_path.cl : OK -> boucles rapides sans verification, alia
 expect_runtime_error() {
     local name="$1" stdout_expected="$2" message="$3"
     ./build/clair "tests/$name.cl" -o "build/test_$name"
-    if ./build/test_$name >"build/$name.stdout" 2>"build/$name.stderr"; then
+    if ./build/test_$name </dev/null >"build/$name.stdout" 2>"build/$name.stderr"; then
         printf '%s\n' "$name.cl : ECHEC -> aurait du s arreter sur une erreur" >&2
         exit 1
     fi
@@ -881,6 +881,35 @@ jeu fannkuch 7 '228\nPfannkuchen(7) = 16'
 jeu pidigits 27 '3141592653\t:10\n5897932384\t:20\n6264338   \t:27'
 jeu nqueen 8 '92'
 jeu plbmatmul 100 '-9.335833'
+
+# V0.46 : lire l'entree, ecrire des octets, [x] * n
+./build/clair tests/entree_sortie.cl -o build/test_entree_sortie
+printf 'Guillaume\n7\nligne a\r\nligne b\n\nfin' > build/entree_sortie.txt   # fin de ligne Windows, pas de fin a la fin
+./build/test_entree_sortie < build/entree_sortie.txt > build/entree_sortie.out
+cmp -s build/entree_sortie.out tests/entree_sortie.expected
+grep -Fq 'clair_rt_read_lines(NULL)' build/test_entree_sortie.generated.c
+grep -Fq 'clair_rt_affine_ok(comp, 255, 0' build/test_entree_sortie.generated.c
+printf '%s\n' 'entree_sortie.cl : OK -> input, read_lines, write, octets, encode, decode, ord, chr, [x] * n, fichiers ; identique a Python'
+expect_runtime_error input_eof_runtime 'avant' 'Clair runtime error: EOF when reading a line'
+expect_runtime_error decode_zero_runtime '3' 'Clair runtime error: decode(): a 0 byte cannot be in a string'
+expect_runtime_error ord_runtime '233' 'Clair runtime error: ord() expected a character, but string of length 2 found'
+expect_runtime_error chr_runtime '\xf4\x8f\xbf\xbf' 'Clair runtime error: chr() arg not in range(0x110000)'
+expect_runtime_error write_bytes_runtime 'abc' 'Clair runtime error: write(): 5 bytes asked from a list of length 3'
+expect_runtime_error read_text_zero_runtime '6' "Clair runtime error: read_text(): a 0 byte is not text, use read_bytes() for 'build/zero.bin'"
+expect_compile_error invalid_write_int 'argument 1 of write() expects a string or a list[u8], got int'
+expect_compile_error invalid_decode_string 'argument 1 of decode() expects a list[u8], got string'
+expect_compile_error invalid_list_repeat_float 'a list can only be repeated by an int (xs * n), got float'
+expect_compile_error invalid_write_count_string 'argument 1 of write() expects a list[u8] (write(b, n) writes its first n bytes), got string'
+
+# fasta ecrit des millions de lettres, reverse-complement les relit : sommes de controle
+./build/clair tools/jeux/fasta.cl -o build/jeu_fasta
+./build/clair tools/jeux/revcomp.cl -o build/jeu_revcomp
+[ "$(./build/jeu_fasta <<< 1000 | md5sum | cut -c1-32)" = '60cbd78a7793bcc8032ef153b4a37b56' ] ||
+    { printf '%s\n' 'tools/jeux/fasta.cl : ECHEC -> sortie differente pour 1000' >&2; exit 1; }
+printf '%s\n' 'jeu fasta (1000) : OK -> sortie de l algorithme officiel'
+[ "$(./build/jeu_fasta <<< 1000 | ./build/jeu_revcomp | md5sum | cut -c1-32)" = 'c071aa7e007a9770b2fb4304f55a17e5' ] ||
+    { printf '%s\n' 'tools/jeux/revcomp.cl : ECHEC -> sortie differente pour fasta 1000' >&2; exit 1; }
+printf '%s\n' 'jeu revcomp (fasta 1000) : OK -> sortie de l algorithme officiel'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='
