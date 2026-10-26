@@ -40,6 +40,17 @@ ClairDynInt *clair_rt_bigint_mul(const ClairDynInt *a, const ClairDynInt *b);
 ClairDynInt *clair_rt_bigint_div(const ClairDynInt *a, const ClairDynInt *b);
 ClairDynInt *clair_rt_bigint_mod(const ClairDynInt *a, const ClairDynInt *b);
 int clair_rt_bigint_cmp(const ClairDynInt *a, const ClairDynInt *b);
+/* V0.44 : un bigint avec un int, sans creer de bigint pour l'int (num * k, acc + 1) */
+ClairDynInt *clair_rt_bigint_add_int(const ClairDynInt *a, int64_t k);
+ClairDynInt *clair_rt_bigint_sub_int(const ClairDynInt *a, int64_t k);
+ClairDynInt *clair_rt_bigint_int_sub(int64_t k, const ClairDynInt *b);
+ClairDynInt *clair_rt_bigint_mul_int(const ClairDynInt *a, int64_t k);
+ClairDynInt *clair_rt_bigint_div_int(const ClairDynInt *a, int64_t k);
+ClairDynInt *clair_rt_bigint_mod_int(const ClairDynInt *a, int64_t k);
+ClairDynInt *clair_rt_bigint_int_div(int64_t k, const ClairDynInt *b);
+ClairDynInt *clair_rt_bigint_int_mod(int64_t k, const ClairDynInt *b);
+int clair_rt_bigint_cmp_int(const ClairDynInt *a, int64_t k);
+ClairDynInt *clair_rt_bigint_addmul_int(const ClairDynInt *a, const ClairDynInt *b, int64_t k);   /* a + b * k */
 void clair_rt_bigint_print(const ClairDynInt *v);
 
 ClairDynFloat *clair_rt_bigfloat_parse(const char *s, int64_t precision);

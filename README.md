@@ -21,7 +21,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Écriture directe dans les champs : `self.w[i][j] = x`, `self.items.append(x)`
 - Exemple complet : réseau de neurones entraîné sur XOR (`tests/xor_training.cl`)
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
-- Boucles rapides (`for` et `while`) : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang
+- Boucles rapides (`for` et `while`) : bornes vérifiées une fois avant la boucle, puis code vectorisable par Clang ; aussi les boucles triangulaires, à deux bouts, et les indices qui montent et descendent (piles, retours en arrière)
 - Doubles boucles (produit de matrices) vérifiées une seule fois avant la boucle extérieure
 - Produit de matrices reconnu et calculé en blocs : plus rapide que la triple boucle en C, résultat identique au bit près
 - Couche dense (matrice × vecteur) calculée 8 lignes à la fois : environ 2 fois plus rapide, résultat identique au bit près
@@ -35,7 +35,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Optimisations SIMD ARM64 NEON
 - Division entière contrôlée
 
-- Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
+- Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
 
 ## Compilation sous Termux
 
@@ -93,6 +93,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.44](docs/README_V0.44.md) : indices qui montent et descendent prouvés une fois (nqueen), `bigint` avec `int` comme en Python, grands nombres plus rapides
 - [Clair V0.43](docs/README_V0.43.md) : jeux de tests des langages (Benchmarks Game, PLB2) dans le rapport, `str()`, `format()`, `bigint(k)`, boucles triangulaires et à deux bouts vérifiées une fois
 - [Clair V0.42](docs/README_V0.42.md) : mémoire des `bigint` et `bigfloat` rendue dans toutes les fonctions, `clair` depuis n'importe quel dossier, `let x = x + 1` dans un bloc
 - [Clair V0.41](docs/README_V0.41.md) : blocs `absolue { }`, `ptr[T]`, `address`, `alloc` aligné, `copy`, `fill`, `free`, `bytes`, `absolue def`

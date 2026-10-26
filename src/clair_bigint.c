@@ -20,9 +20,10 @@ static int reserve(ClairBigInt *x, size_t needed) {
         size_t expanded=x->cap + x->cap/2 + 1;
         if (expanded > needed && expanded <= SIZE_MAX/sizeof(uint64_t)) new_cap=expanded;
     }
+    /* V0.44 : pas de mise a zero ici (un quart du temps de pidigits) ; les
+     * fonctions qui cumulent dans le resultat (mul, shift_left) la font elles-memes. */
     uint64_t *p = (uint64_t *)realloc(x->word, new_cap*sizeof(uint64_t));
     if (!p) return CLAIR_BIG_NOMEM;
-    memset(p+x->cap, 0, (new_cap-x->cap)*sizeof(uint64_t));
     x->word=p; x->cap=new_cap;
     return CLAIR_BIG_OK;
 }
@@ -72,25 +73,37 @@ int clair_big_set_bit(ClairBigInt *x, size_t bit) {
     x->sign=1; return 0;
 }
 static int add_abs(ClairBigInt *r,const ClairBigInt*a,const ClairBigInt*b) {
-    size_t n=a->len>b->len?a->len:b->len;
+    if(a->len<b->len){const ClairBigInt *t=a;a=b;b=t;}   /* a est le plus long */
+    size_t n=a->len, nb=b->len;
     if(n==SIZE_MAX) return CLAIR_BIG_TOO_LARGE;
     int rc=reserve(r,n+1); if(rc) return rc;
     uint64_t carry=0;
-    for(size_t i=0;i<n;i++) {
-        uint64_t x=i<a->len?a->word[i]:0,y=i<b->len?b->word[i]:0;
-        unsigned __int128 t=(unsigned __int128)x+y+carry;
+    size_t i=0;
+    for(;i<nb;i++) {                                  /* V0.44 : sans test par mot */
+        unsigned __int128 t=(unsigned __int128)a->word[i]+b->word[i]+carry;
         r->word[i]=(uint64_t)t;
         carry=(uint64_t)(t>>64);
+    }
+    for(;i<n;i++) {
+        uint64_t x=a->word[i];
+        r->word[i]=x+carry;
+        carry=carry && r->word[i]==0;
     }
     r->word[n]=carry; r->len=n+(carry!=0); return 0;
 }
 static void sub_abs(ClairBigInt *r,const ClairBigInt*a,const ClairBigInt*b) { /* |a| >= |b| */
     uint64_t borrow=0;
-    for(size_t i=0;i<a->len;i++) {
-        uint64_t x=a->word[i],y=i<b->len?b->word[i]:0;
+    size_t i=0, nb=b->len;
+    for(;i<nb;i++) {
+        uint64_t x=a->word[i],y=b->word[i];
         uint64_t t=x-y, under=x<y;
         r->word[i]=t-borrow;
         borrow=under || t<borrow;
+    }
+    for(;i<a->len;i++) {
+        uint64_t x=a->word[i];
+        r->word[i]=x-borrow;
+        borrow=borrow && x==0;
     }
     r->len=a->len; normalize(r);
 }
@@ -388,10 +401,65 @@ int clair_big_mul(ClairBigInt *out, const ClairBigInt *a, const ClairBigInt *b) 
     size_t n = a->len+b->len;
     int rc = reserve(&r,n);
     if (rc) return rc;
+    if (a->len == 1 || b->len == 1) {
+        /* V0.44 : par un seul mot (num * k, acc * 10) : un seul passage, sans mise a zero */
+        const ClairBigInt *big = a->len == 1 ? b : a;
+        uint64_t m = a->len == 1 ? a->word[0] : b->word[0], carry = 0;
+        for (size_t i = 0; i < big->len; i++) {
+            unsigned __int128 t = (unsigned __int128)big->word[i] * m + carry;
+            r.word[i] = (uint64_t)t;
+            carry = (uint64_t)(t >> 64);
+        }
+        r.word[big->len] = carry;
+        r.len = big->len + 1; r.sign = a->sign*b->sign; normalize(&r);
+        swap_big(out,&r); clair_big_clear(&r); return CLAIR_BIG_OK;
+    }
+    memset(r.word, 0, n*sizeof(uint64_t));
     rc = mul_words(r.word,a->word,a->len,b->word,b->len);
     if (rc) { clair_big_clear(&r); return rc; }
     r.len=n; r.sign=a->sign*b->sign; normalize(&r);
     swap_big(out,&r); clair_big_clear(&r); return CLAIR_BIG_OK;
+}
+/* V0.44 : out = a + b * k en un seul passage quand les signes s'accordent
+ * (acc + num * 2, num * 3 + acc) ; sinon multiplication puis addition. */
+int clair_big_addmul_i64(ClairBigInt *out, const ClairBigInt *a, const ClairBigInt *b, int64_t k) {
+    int ksign = k < 0 ? -1 : k > 0;
+    uint64_t m = k < 0 ? (uint64_t)(-(k + 1)) + 1u : (uint64_t)k;
+    if (!b->len || !ksign) return clair_big_copy(out, a);
+    if (a->len && a->sign != b->sign * ksign) {
+        ClairBigInt t; clair_big_init(&t);
+        uint64_t w = m;
+        ClairBigInt kb = { &w, 1, 1, ksign };
+        int rc = clair_big_mul(&t, b, &kb);
+        if (!rc) rc = clair_big_add(out, a, &t);
+        clair_big_clear(&t);
+        return rc;
+    }
+    size_t n = a->len > b->len ? a->len : b->len;
+    if (n >= SIZE_MAX - 1) return CLAIR_BIG_TOO_LARGE;
+    ClairBigInt r; clair_big_init(&r);
+    int rc = reserve(&r, n + 1);
+    if (rc) return rc;
+    uint64_t carry = 0;
+    size_t both = a->len < b->len ? a->len : b->len, i = 0;
+    for (; i < both; i++) {
+        unsigned __int128 t = (unsigned __int128)b->word[i] * m + a->word[i] + carry;   /* < 2^128 */
+        r.word[i] = (uint64_t)t;
+        carry = (uint64_t)(t >> 64);
+    }
+    for (; i < b->len; i++) {
+        unsigned __int128 t = (unsigned __int128)b->word[i] * m + carry;
+        r.word[i] = (uint64_t)t;
+        carry = (uint64_t)(t >> 64);
+    }
+    for (; i < a->len; i++) {
+        uint64_t x = a->word[i] + carry;
+        carry = carry && x == 0;
+        r.word[i] = x;
+    }
+    r.word[n] = carry;
+    r.len = n + 1; r.sign = b->sign * ksign; normalize(&r);
+    swap_big(out, &r); clair_big_clear(&r); return CLAIR_BIG_OK;
 }
 int clair_big_shift_left(ClairBigInt *out,const ClairBigInt*a,size_t bits) {
     ClairBigInt r;clair_big_init(&r);
@@ -400,6 +468,7 @@ int clair_big_shift_left(ClairBigInt *out,const ClairBigInt*a,size_t bits) {
     if(wordshift>SIZE_MAX-a->len-1) return CLAIR_BIG_TOO_LARGE;
     size_t n=wordshift+a->len+1;
     int rc=reserve(&r,n); if(rc) return rc;
+    memset(r.word,0,n*sizeof(uint64_t));
     for(size_t i=0;i<a->len;i++) {
         r.word[i+wordshift]|=a->word[i]<<rest;
         if(rest) r.word[i+wordshift+1]|=a->word[i]>>(64-rest);
@@ -537,6 +606,7 @@ int clair_big_divmod(ClairBigInt *quo,ClairBigInt *rem,const ClairBigInt*a,const
         size_t bits=clair_big_bit_length(a);
         rc=reserve(&q,(bits+63)/64);if(rc)goto fail;
         q.len=(bits+63)/64;
+        memset(q.word,0,q.len*sizeof(uint64_t));
         for(size_t bit=bits;bit>0;) {
             bit--;
             rc=shift1_add_bit(&r,clair_big_get_bit(a,bit));if(rc)goto fail;

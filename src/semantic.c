@@ -1322,13 +1322,17 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         int comparison = !strcmp(op,"==") || !strcmp(op,"!=") || !strcmp(op,"<") ||
                          !strcmp(op,"<=") || !strcmp(op,">") || !strcmp(op,">=");
         int arithmetic = !strcmp(op,"+") || !strcmp(op,"-") || !strcmp(op,"*") || !strcmp(op,"/") ||
-                         (!strcmp(op,"%") && !strcmp(left,"bigint"));
-        if (strcmp(left,right) || (!comparison && !arithmetic)) {
+                         (!strcmp(op,"%") && (!strcmp(left,"bigint") || !strcmp(right,"bigint")) &&
+                          strcmp(left,"bigfloat") && strcmp(right,"bigfloat"));
+        /* V0.44 : bigint avec un int (num * k, acc + 1, x > 0), comme en Python */
+        int with_int = (!strcmp(left, "bigint") && is_index_type(right)) ||
+                       (!strcmp(right, "bigint") && is_index_type(left));
+        if ((strcmp(left,right) && !with_int) || (!comparison && !arithmetic)) {
             fprintf(stderr, "semantic error: unsupported or mixed big-number operands: %s %s %s\n",
                     left,op,right);
             s->had_error=1; return NULL;
         }
-        set_type(n, comparison ? "bool" : left);
+        set_type(n, comparison ? "bool" : (dynleft ? left : right));
         return n->type_name;
     }
     if (is_ptr_type(left) || is_ptr_type(right)) {

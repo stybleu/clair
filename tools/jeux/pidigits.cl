@@ -6,23 +6,20 @@ def chiffres(n: int) -> int {
     let acc: bigint = bigint(0)
     let den: bigint = bigint(1)
     let num: bigint = bigint(1)
-    let trois: bigint = bigint(3)
-    let quatre: bigint = bigint(4)
-    let dix: bigint = bigint(10)
     let k: int = 0
     let i: int = 0
     let ligne: string = ""
     while i < n {
         k += 1
-        let k2: bigint = bigint(2 * k + 1)
-        acc = (acc + num + num) * k2
+        let k2: int = 2 * k + 1
+        acc = (acc + num * 2) * k2
         den = den * k2
-        num = num * bigint(k)
+        num = num * k
         if num > acc {
             continue
         }
-        let d: bigint = (num * trois + acc) / den
-        if d != (num * quatre + acc) / den {
+        let d: bigint = (num * 3 + acc) / den
+        if d != (num * 4 + acc) / den {
             continue
         }
         ligne = ligne + str(d)
@@ -31,8 +28,8 @@ def chiffres(n: int) -> int {
             print(ligne + "\t:" + str(i))
             ligne = ""
         }
-        acc = (acc - den * d) * dix
-        num = num * dix
+        acc = (acc - den * d) * 10
+        num = num * 10
     }
     if i % 10 != 0 {
         while len(ligne) < 10 {

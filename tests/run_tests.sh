@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.43 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.44 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -796,7 +796,7 @@ printf '%s\n' '=================================================='
 ./build/clair tests/big_numbers_v040.cl -o build/test_big_numbers_v040
 [ "$(./build/test_big_numbers_v040 | tail -n 1)" = 'CLAIR V0.40 : TESTS OK' ]
 if ./build/clair tests/big_numbers_invalid_v040.cl -o build/test_big_numbers_invalid_v040 >/dev/null 2>&1; then
-    echo 'ECHEC : bigint + int doit etre refuse' >&2
+    echo 'ECHEC : bigint + float doit etre refuse' >&2
     exit 1
 fi
 printf '%s\n' 'big_numbers_v040.cl : OK -> entiers et flottants dynamiques'
@@ -840,6 +840,17 @@ expect_compile_error invalid_format_spec 'format(x, ".3x"): write [width][.preci
 expect_compile_error invalid_format_int_d "format(x, \"d\"): 'd' writes an integer: use .Nf for a float"
 expect_compile_error invalid_format_dynamic 'argument 2 of format() must be written in the program'
 expect_compile_error invalid_str_list 'str() cannot write list[int]'
+
+# V0.44 : bigint avec int, indices qui montent et descendent prouves une fois
+./build/clair tests/bigint_avec_int.cl -o build/test_bigint_avec_int
+[ "$(./build/test_bigint_avec_int)" = "$(cat tests/bigint_avec_int.expected)" ]
+grep -Fq 'clair_rt_bigint_addmul_int(a, a, (int64_t)(9))' build/test_bigint_avec_int.generated.c
+printf '%s\n' 'bigint_avec_int.cl : OK -> a + 1, a * k, 1000000 / a, a + a * 9 en un passage ; identique a Python'
+./build/clair tests/indices_prouves.cl -o build/test_indices_prouves
+[ "$(./build/test_indices_prouves)" = "$(cat tests/indices_prouves.expected)" ]
+grep -Fq '(__int128)k >= 0 && (__int128)k <= ((__int128)n - 1)' build/test_indices_prouves.generated.c
+printf '%s\n' 'indices_prouves.cl : OK -> k qui monte et descend, prouve entre 0 et n - 1 avant la boucle'
+expect_runtime_error range_bounds_runtime '1\n3\n6' 'Clair runtime error: list index 3 out of bounds for length 3'
 
 # V0.43 : les jeux de tests des langages, sorties officielles sur de petites tailles
 jeu() {

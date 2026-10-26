@@ -178,6 +178,22 @@ static ClairDynInt *clair_int_bin(const ClairDynInt *a,const ClairDynInt *b,char
 #define INT_BIN(NAME, OP) ClairDynInt *clair_rt_bigint_##NAME(const ClairDynInt *a,const ClairDynInt *b){return clair_int_bin(a,b,OP);}
 INT_BIN(add,'+') INT_BIN(sub,'-') INT_BIN(mul,'*') INT_BIN(div,'/') INT_BIN(mod,'%')
 int clair_rt_bigint_cmp(const ClairDynInt *a,const ClairDynInt *b) {return clair_big_cmp(&a->v,&b->v);}
+/* Un int vu comme un bigint d'un mot, sur la pile : aucune allocation. */
+#define CLAIR_SMALL_INT(name, k) \
+    uint64_t name##_word = (k) < 0 ? (uint64_t)(-((k) + 1)) + 1u : (uint64_t)(k); \
+    ClairDynInt name = { { &name##_word, (k) != 0, 1, (k) < 0 ? -1 : (k) > 0 } }
+ClairDynInt *clair_rt_bigint_add_int(const ClairDynInt *a,int64_t k){CLAIR_SMALL_INT(b,k);return clair_int_bin(a,&b,'+');}
+ClairDynInt *clair_rt_bigint_sub_int(const ClairDynInt *a,int64_t k){CLAIR_SMALL_INT(b,k);return clair_int_bin(a,&b,'-');}
+ClairDynInt *clair_rt_bigint_int_sub(int64_t k,const ClairDynInt *b){CLAIR_SMALL_INT(a,k);return clair_int_bin(&a,b,'-');}
+ClairDynInt *clair_rt_bigint_mul_int(const ClairDynInt *a,int64_t k){CLAIR_SMALL_INT(b,k);return clair_int_bin(a,&b,'*');}
+ClairDynInt *clair_rt_bigint_div_int(const ClairDynInt *a,int64_t k){CLAIR_SMALL_INT(b,k);return clair_int_bin(a,&b,'/');}
+ClairDynInt *clair_rt_bigint_mod_int(const ClairDynInt *a,int64_t k){CLAIR_SMALL_INT(b,k);return clair_int_bin(a,&b,'%');}
+ClairDynInt *clair_rt_bigint_int_div(int64_t k,const ClairDynInt *b){CLAIR_SMALL_INT(a,k);return clair_int_bin(&a,b,'/');}
+ClairDynInt *clair_rt_bigint_int_mod(int64_t k,const ClairDynInt *b){CLAIR_SMALL_INT(a,k);return clair_int_bin(&a,b,'%');}
+ClairDynInt *clair_rt_bigint_addmul_int(const ClairDynInt *a,const ClairDynInt *b,int64_t k){
+    ClairDynInt *r=clair_new_int();clair_num_check(clair_big_addmul_i64(&r->v,&a->v,&b->v,k));return r;
+}
+int clair_rt_bigint_cmp_int(const ClairDynInt *a,int64_t k){CLAIR_SMALL_INT(b,k);return clair_big_cmp(&a->v,&b.v);}
 void clair_rt_bigint_print(const ClairDynInt *v) {
     char *str=NULL;clair_num_check(clair_big_to_decimal(&v->v,&str));puts(str);free(str);
 }

@@ -1021,6 +1021,366 @@ static int fast_plan_two_ends(const AstNode *loop, FastPlan *plan, const char **
 }
 
 /* ------------------------------------------------------------------ */
+/* Ranges of an index (V0.44): while k >= 0 { ... l[k] ...; if k < n - 1 { k += 1 } else { k -= 1 } } */
+/*                                                                    */
+/* The index goes up and down, so no affine proof applies.  Clair     */
+/* guesses an interval for k at the start of every turn (from the     */
+/* loop condition and the tests around k += 1), then proves it:       */
+/* running the body over intervals from that one must come back       */
+/* inside it.  Bounds are numbers or "n + c" with n fixed in the loop */
+/* (a name or len(list)); two bounds compare only if they share n.    */
+/* The accesses l[k + c] are then checked once, before the loop:      */
+/* bound + c against len(l), with the value of n at the entry.        */
+/* ------------------------------------------------------------------ */
+
+typedef struct { int inf; const char *sym; int64_t c; } RBound;    /* inf: -1 -inf, +1 +inf; sym NULL: a number */
+typedef struct { RBound lo, hi; int dead; } RState;
+
+typedef struct {
+    const char *k;
+    const AstNode *body, *cond;
+    RState head;                      /* the interval to prove */
+    int ok;
+    const AstNode *nodes[FAST_MAX];   /* accesses l[k + c] and the interval of k there */
+    const char *bases[FAST_MAX];
+    const char *types[FAST_MAX];
+    int64_t offs[FAST_MAX];
+    RState at[FAST_MAX];
+    size_t count;
+    char *owned[64];                  /* symbol texts built here (len(xs)) */
+    size_t owned_count;
+} RangeCtx;
+
+static int is_ident(const AstNode *e, const char *name);
+static int is_binary(const AstNode *e, const char *op);
+
+/* a <= b provable? */
+static int rb_le(RBound a, RBound b) {
+    if (a.inf < 0 || b.inf > 0) return 1;
+    if (a.inf > 0 || b.inf < 0) return 0;
+    if ((a.sym == NULL) != (b.sym == NULL)) return 0;
+    if (a.sym && strcmp(a.sym, b.sym) != 0) return 0;
+    return a.c <= b.c;
+}
+static RBound rb_shift(RBound a, int64_t d) {
+    if (a.inf) return a;
+    if ((d > 0 && a.c > INT64_MAX / 2) || (d < 0 && a.c < INT64_MIN / 2)) { a.inf = d > 0 ? 1 : -1; return a; }
+    a.c += d;
+    return a;
+}
+
+/* a bound written in the program: 5, n, n - 1, len(xs) + 2 (n not changed in the loop) */
+static int rb_parse(RangeCtx *cx, const AstNode *e, RBound *out) {
+    int64_t v;
+    if (const_int_value(e, &v)) { if (v < INT64_MIN / 2 || v > INT64_MAX / 2) return 0; *out = (RBound){ 0, NULL, v }; return 1; }
+    if (!e || !e->type_name || strcmp(e->type_name, "int") != 0) return 0;
+    if (e->kind == AST_IDENTIFIER && e->text && strcmp(e->text, cx->k) != 0 && !name_changes_in(cx->body, e->text)) {
+        *out = (RBound){ 0, e->text, 0 };
+        return 1;
+    }
+    if (e->kind == AST_CALL && e->text && strcmp(e->text, "len") == 0 && e->child_count == 1 &&
+        is_ident(e->children[0], NULL) && is_list_type(e->children[0]->type_name) &&
+        !name_changes_in(cx->body, e->children[0]->text) && cx->owned_count < 64) {
+        char *text = str_fmt("(int64_t)%s->len", e->children[0]->text);
+        cx->owned[cx->owned_count++] = text;
+        *out = (RBound){ 0, text, 0 };
+        return 1;
+    }
+    if (is_binary(e, "+") || is_binary(e, "-")) {
+        int64_t d;
+        int minus = strcmp(e->text, "-") == 0;
+        if (const_int_value(e->children[1], &d) && d > INT64_MIN / 2 && d < INT64_MAX / 2 && rb_parse(cx, e->children[0], out)) {
+            *out = rb_shift(*out, minus ? -d : d);
+            return !out->inf;
+        }
+        if (!minus && const_int_value(e->children[0], &d) && d > INT64_MIN / 2 && d < INT64_MAX / 2 && rb_parse(cx, e->children[1], out)) {
+            *out = rb_shift(*out, d);
+            return !out->inf;
+        }
+    }
+    return 0;
+}
+
+/* k + c, c + k, k - c, k: the offset c */
+static int range_index_offset(const char *k, const AstNode *e, int64_t *c) {
+    int64_t d;
+    if (is_ident(e, k)) { *c = 0; return 1; }
+    if (is_binary(e, "+") && is_ident(e->children[0], k) && const_int_value(e->children[1], &d)) { *c = d; return d > INT64_MIN / 2 && d < INT64_MAX / 2; }
+    if (is_binary(e, "+") && is_ident(e->children[1], k) && const_int_value(e->children[0], &d)) { *c = d; return d > INT64_MIN / 2 && d < INT64_MAX / 2; }
+    if (is_binary(e, "-") && is_ident(e->children[0], k) && const_int_value(e->children[1], &d)) { *c = -d; return d > INT64_MIN / 2 && d < INT64_MAX / 2; }
+    return 0;
+}
+
+/* refines st with "k op E" true (or false when negate) */
+static void range_refine(RangeCtx *cx, const AstNode *cond, int negate, RState *st) {
+    if (!cond || st->dead) return;
+    if (!negate && is_binary(cond, "and")) {
+        range_refine(cx, cond->children[0], 0, st);
+        range_refine(cx, cond->children[1], 0, st);
+        return;
+    }
+    if (negate && is_binary(cond, "or")) {
+        range_refine(cx, cond->children[0], 1, st);
+        range_refine(cx, cond->children[1], 1, st);
+        return;
+    }
+    if (cond->kind == AST_UNARY && cond->text && strcmp(cond->text, "not") == 0 && cond->child_count == 1) {
+        range_refine(cx, cond->children[0], !negate, st);
+        return;
+    }
+    if (cond->kind != AST_BINARY || !cond->text || cond->child_count != 2) return;
+    const char *op = cond->text;
+    const AstNode *other;
+    int flip;
+    if (is_ident(cond->children[0], cx->k)) { other = cond->children[1]; flip = 0; }
+    else if (is_ident(cond->children[1], cx->k)) { other = cond->children[0]; flip = 1; }
+    else return;
+    RBound e;
+    if (!rb_parse(cx, other, &e)) return;
+    /* k op e */
+    char o[3] = "";
+    if (!strcmp(op, "<")) strcpy(o, flip ? ">" : "<");
+    else if (!strcmp(op, "<=")) strcpy(o, flip ? ">=" : "<=");
+    else if (!strcmp(op, ">")) strcpy(o, flip ? "<" : ">");
+    else if (!strcmp(op, ">=")) strcpy(o, flip ? "<=" : ">=");
+    else if (!strcmp(op, "==") && !negate) strcpy(o, "==");
+    else if (!strcmp(op, "!=") && negate) strcpy(o, "==");
+    else return;
+    if (negate && strcmp(o, "==") != 0) {
+        if (!strcmp(o, "<")) strcpy(o, ">=");
+        else if (!strcmp(o, "<=")) strcpy(o, ">");
+        else if (!strcmp(o, ">")) strcpy(o, "<=");
+        else strcpy(o, "<");
+    }
+    RBound up = e, down = e;
+    int set_up = 0, set_down = 0;
+    if (!strcmp(o, "<")) { up = rb_shift(e, -1); set_up = 1; }
+    else if (!strcmp(o, "<=")) set_up = 1;
+    else if (!strcmp(o, ">")) { down = rb_shift(e, 1); set_down = 1; }
+    else if (!strcmp(o, ">=")) set_down = 1;
+    else { set_up = set_down = 1; }
+    /* keep the tighter bound when they compare, the old one otherwise (both are true) */
+    if (set_up && (st->hi.inf > 0 || rb_le(up, st->hi))) st->hi = up;
+    if (set_down && (st->lo.inf < 0 || rb_le(st->lo, down))) st->lo = down;
+}
+
+static RState range_join(RState a, RState b) {
+    if (a.dead) return b;
+    if (b.dead) return a;
+    RState r = a;
+    r.lo = rb_le(a.lo, b.lo) ? a.lo : rb_le(b.lo, a.lo) ? b.lo : (RBound){ -1, NULL, 0 };
+    r.hi = rb_le(b.hi, a.hi) ? a.hi : rb_le(a.hi, b.hi) ? b.hi : (RBound){ 1, NULL, 0 };
+    return r;
+}
+
+/* back to the loop head: inside the interval to prove, once the loop condition holds */
+static void range_back_edge(RangeCtx *cx, RState st) {
+    if (st.dead) return;
+    range_refine(cx, cx->cond, 0, &st);
+    if (st.dead) return;
+    if (!rb_le(cx->head.lo, st.lo) || !rb_le(st.hi, cx->head.hi)) cx->ok = 0;
+}
+
+static void range_scan(RangeCtx *cx, const AstNode *n, const RState *st) {
+    if (!n || !cx->ok) return;
+    const AstNode *index = NULL;
+    const char *base = NULL, *type = NULL;
+    if (n->kind == AST_INDEX && n->child_count == 2 && is_ident(n->children[0], NULL) &&
+        is_list_type(n->children[0]->type_name)) {
+        base = n->children[0]->text; type = n->children[0]->type_name; index = n->children[1];
+    } else if (n->kind == AST_INDEX_ASSIGN && n->child_count == 2 && n->text && is_list_type(n->type_name)) {
+        base = n->text; type = n->type_name; index = n->children[0];
+    }
+    int64_t off;
+    if (base && strcmp(base, cx->k) != 0 && !name_changes_in(cx->body, base) && !st->dead &&
+        range_index_offset(cx->k, index, &off) && cx->count < FAST_MAX) {
+        cx->nodes[cx->count] = n; cx->bases[cx->count] = base; cx->types[cx->count] = type;
+        cx->offs[cx->count] = off; cx->at[cx->count] = *st;
+        cx->count++;
+    }
+    for (size_t i = 0; i < n->child_count; i++) range_scan(cx, n->children[i], st);
+}
+
+static void range_block(RangeCtx *cx, const AstNode *block, RState *st);
+
+static void range_stmt(RangeCtx *cx, const AstNode *n, RState *st) {
+    if (!cx->ok || st->dead) return;
+    const char *k = cx->k;
+    switch (n->kind) {
+        case AST_ASSIGN:
+            if (n->text && strcmp(n->text, k) == 0) {
+                int64_t c, v;
+                const AstNode *e = n->children[0];
+                range_scan(cx, e, st);
+                if (range_index_offset(k, e, &c)) { st->lo = rb_shift(st->lo, c); st->hi = rb_shift(st->hi, c); }
+                else if (const_int_value(e, &v) && v > INT64_MIN / 2 && v < INT64_MAX / 2) st->lo = st->hi = (RBound){ 0, NULL, v };
+                else cx->ok = 0;
+                return;
+            }
+            range_scan(cx, n, st);
+            return;
+        case AST_LET:
+            if (n->text && strcmp(n->text, k) == 0) { cx->ok = 0; return; }
+            range_scan(cx, n, st);
+            return;
+        case AST_IF: {
+            if (n->child_count < 2) { cx->ok = 0; return; }
+            range_scan(cx, n->children[0], st);
+            RState yes = *st, no = *st;
+            range_refine(cx, n->children[0], 0, &yes);
+            range_refine(cx, n->children[0], 1, &no);
+            range_block(cx, n->children[1], &yes);
+            if (n->child_count == 3) range_block(cx, n->children[2], &no);
+            *st = range_join(yes, no);
+            return;
+        }
+        case AST_WHILE:
+        case AST_FOR:
+        case AST_FOR_EACH:
+            /* an inner loop that leaves k alone: k keeps its interval in it */
+            if (name_changes_in(n, k)) { cx->ok = 0; return; }
+            range_scan(cx, n, st);
+            return;
+        case AST_CONTINUE:
+            range_back_edge(cx, *st);
+            st->dead = 1;
+            return;
+        case AST_BREAK:
+        case AST_RETURN:
+            range_scan(cx, n, st);
+            st->dead = 1;
+            return;
+        default:
+            if (name_changes_in(n, k)) { cx->ok = 0; return; }
+            range_scan(cx, n, st);
+            return;
+    }
+}
+
+static void range_block(RangeCtx *cx, const AstNode *block, RState *st) {
+    if (!block) return;
+    if (block->kind != AST_BLOCK) { range_stmt(cx, block, st); return; }
+    for (size_t i = 0; i < block->child_count && cx->ok && !st->dead; i++) range_stmt(cx, block->children[i], st);
+}
+
+/* bounds that k may get: from the loop condition and from the tests around k += c / k -= c */
+static void range_candidates(RangeCtx *cx, const AstNode *n, RBound *los, size_t *nlo, RBound *his, size_t *nhi) {
+    if (!n) return;
+    if (n->kind == AST_IF && n->child_count >= 2) {
+        for (int branch = 1; branch < (int)n->child_count; branch++) {
+            const AstNode *blk = n->children[branch];
+            for (size_t i = 0; blk && i < blk->child_count; i++) {
+                const AstNode *st = blk->children[i];
+                int64_t c;
+                if (st->kind != AST_ASSIGN || !st->text || strcmp(st->text, cx->k) != 0 ||
+                    !range_index_offset(cx->k, st->children[0], &c) || c == 0) continue;
+                RState probe = { { -1, NULL, 0 }, { 1, NULL, 0 }, 0 };
+                range_refine(cx, n->children[0], branch == 2, &probe);
+                if (c > 0 && !probe.hi.inf && *nhi < 4) his[(*nhi)++] = rb_shift(probe.hi, c);
+                if (c < 0 && !probe.lo.inf && *nlo < 4) los[(*nlo)++] = rb_shift(probe.lo, c);
+            }
+        }
+    }
+    for (size_t i = 0; i < n->child_count; i++) range_candidates(cx, n->children[i], los, nlo, his, nhi);
+}
+
+static void range_ctx_free(RangeCtx *cx) {
+    for (size_t i = 0; i < cx->owned_count; i++) free(cx->owned[i]);
+    cx->owned_count = 0;
+}
+
+/* proves an interval for k in this while loop; cx->count accesses l[k + c] with their interval */
+static int range_prove(const AstNode *loop, const char *k, RangeCtx *cx) {
+    memset(cx, 0, sizeof(*cx));
+    cx->k = k;
+    cx->cond = loop->children[0];
+    cx->body = loop->children[1];
+    RState probe = { { -1, NULL, 0 }, { 1, NULL, 0 }, 0 };
+    range_refine(cx, cx->cond, 0, &probe);
+    RBound los[6], his[6];
+    size_t nlo = 0, nhi = 0;
+    if (!probe.lo.inf) los[nlo++] = probe.lo;
+    if (!probe.hi.inf) his[nhi++] = probe.hi;
+    range_candidates(cx, cx->body, los, &nlo, his, &nhi);
+    for (size_t a = 0; a < nlo; a++) {
+        for (size_t b = 0; b < nhi; b++) {
+            cx->head = (RState){ los[a], his[b], 0 };
+            cx->ok = 1;
+            cx->count = 0;
+            RState st = cx->head;
+            range_block(cx, cx->body, &st);
+            range_back_edge(cx, st);
+            if (cx->ok && cx->count > 0) return 1;
+        }
+    }
+    range_ctx_free(cx);
+    return 0;
+}
+
+static int tree_mentions_ident(const AstNode *n, const char *name) {
+    if (!n) return 0;
+    if (n->kind == AST_IDENTIFIER && n->text && strcmp(n->text, name) == 0) return 1;
+    for (size_t i = 0; i < n->child_count; i++) if (tree_mentions_ident(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* which int variable indexes lists in the body and is moved by k += c: the first one that proves */
+static int fast_plan_range(const AstNode *loop, RangeCtx *cx) {
+    if (fast_suppress || !loop || loop->kind != AST_WHILE || loop->child_count != 2) return 0;
+    const AstNode *body = loop->children[1];
+    if (!body || body->kind != AST_BLOCK || tree_may_grow_lists(body)) return 0;
+    /* candidates: identifiers of the loop condition */
+    const AstNode *stack[64];
+    size_t top = 0;
+    stack[top++] = loop->children[0];
+    while (top) {
+        const AstNode *e = stack[--top];
+        if (is_ident(e, NULL) && e->type_name && strcmp(e->type_name, "int") == 0 &&
+            name_changes_in(body, e->text) && tree_mentions_ident(body, e->text)) {
+            if (range_prove(loop, e->text, cx)) return 1;
+        }
+        for (size_t i = 0; i < e->child_count && top < 64; i++) stack[top++] = e->children[i];
+    }
+    return 0;
+}
+
+/* a bound in C, as a wide number: ((__int128)n - 1); NULL for a number */
+static char *rbound_text(RBound b, int64_t extra) {
+    long long c = (long long)b.c + (long long)extra;
+    if (!b.sym) return str_fmt("%lld", c);
+    if (c == 0) return str_fmt("(__int128)%s", b.sym);
+    return c > 0 ? str_fmt("((__int128)%s + %lld)", b.sym, c) : str_fmt("((__int128)%s - %lld)", b.sym, -c);
+}
+
+/* the conditions proven once before the loop, without repeats */
+static size_t range_conditions(const RangeCtx *cx, char **out, size_t max) {
+    size_t n = 0;
+    #define RANGE_ADD(TEXT) do {                                                   \
+        char *t_ = (TEXT); int dup_ = 0;                                           \
+        for (size_t q_ = 0; q_ < n; q_++) if (strcmp(out[q_], t_) == 0) dup_ = 1;   \
+        if (dup_ || n >= max) free(t_); else out[n++] = t_;                        \
+    } while (0)
+    char *lo = rbound_text(cx->head.lo, 0), *hi = rbound_text(cx->head.hi, 0);
+    RANGE_ADD(str_fmt("(__int128)%s >= %s && (__int128)%s <= %s", cx->k, lo, cx->k, hi));
+    free(lo); free(hi);
+    for (size_t i = 0; i < cx->count; i++) {
+        RState at = cx->at[i];
+        if (at.lo.inf || at.hi.inf) continue;
+        RANGE_ADD(str_fmt("%s->len <= (size_t)INT64_MAX", cx->bases[i]));
+        if (at.lo.sym || at.lo.c + cx->offs[i] < 0) {
+            char *t = rbound_text(at.lo, cx->offs[i]);
+            RANGE_ADD(str_fmt("%s >= 0", t));
+            free(t);
+        }
+        char *t = rbound_text(at.hi, cx->offs[i]);
+        RANGE_ADD(str_fmt("%s < (__int128)%s->len", t, cx->bases[i]));
+        free(t);
+    }
+    #undef RANGE_ADD
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
 /* Double loops: one bounds proof for  for k { ...; for j { ... } }   */
 /* ------------------------------------------------------------------ */
 
@@ -3514,7 +3874,63 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 return 1;
             }
 
-            const char *dyn = n->children[0]->type_name;
+            const char *dyn = n->children[0]->type_name, *dyn_r = n->children[1]->type_name;
+            int big_l = dyn && !strcmp(dyn, "bigint"), big_r = dyn_r && !strcmp(dyn_r, "bigint");
+            if (big_l && big_r && !strcmp(op, "+")) {
+                /* acc + num * 2, num * 3 + acc : un seul passage (clair_rt_bigint_addmul_int) */
+                for (int side = 0; side < 2; side++) {
+                    const AstNode *prod = n->children[side], *other = n->children[1 - side];
+                    if (prod->kind != AST_BINARY || !prod->text || strcmp(prod->text, "*") != 0 || prod->child_count != 2) continue;
+                    const char *pl = prod->children[0]->type_name, *pr = prod->children[1]->type_name;
+                    int lbig = pl && !strcmp(pl, "bigint"), rbig = pr && !strcmp(pr, "bigint");
+                    if (lbig == rbig) continue;
+                    fputs("clair_rt_bigint_addmul_int(", f);
+                    if (!emit_expr(f, other)) return 0;
+                    fputs(", ", f);
+                    if (!emit_expr(f, prod->children[lbig ? 0 : 1])) return 0;
+                    fputs(", (int64_t)(", f);
+                    if (!emit_expr(f, prod->children[lbig ? 1 : 0])) return 0;
+                    fputs("))", f);
+                    return 1;
+                }
+            }
+            if (big_l != big_r) {
+                /* V0.44 : bigint avec un int, sans bigint pour l'int : clair_rt_bigint_mul_int(num, k) */
+                const char *fn = NULL;
+                int swap = !big_l;               /* the int is on the left */
+                if (!strcmp(op, "+")) fn = "add";
+                else if (!strcmp(op, "-")) fn = "sub";
+                else if (!strcmp(op, "*")) fn = "mul";
+                else if (!strcmp(op, "/")) fn = "div";
+                else if (!strcmp(op, "%")) fn = "mod";
+                const AstNode *big = n->children[swap], *small = n->children[1 - swap];
+                int commutes = fn && (!strcmp(fn, "add") || !strcmp(fn, "mul"));
+                if (!fn) {                       /* comparison: k < b is b > k */
+                    fprintf(f, "(clair_rt_bigint_cmp_int(");
+                    if (!emit_expr(f, big)) return 0;
+                    fputs(", (int64_t)(", f);
+                    if (!emit_expr(f, small)) return 0;
+                    const char *cmp = op;
+                    if (swap) cmp = !strcmp(op, "<") ? ">" : !strcmp(op, ">") ? "<" : !strcmp(op, "<=") ? ">=" :
+                                    !strcmp(op, ">=") ? "<=" : op;
+                    fprintf(f, ")) %s 0)", cmp);
+                    return 1;
+                }
+                if (!swap || commutes) {
+                    fprintf(f, "clair_rt_bigint_%s_int(", fn);
+                    if (!emit_expr(f, big)) return 0;
+                    fputs(", (int64_t)(", f);
+                    if (!emit_expr(f, small)) return 0;
+                    fputs("))", f);
+                } else {
+                    fprintf(f, "clair_rt_bigint_int_%s((int64_t)(", fn);
+                    if (!emit_expr(f, small)) return 0;
+                    fputs("), ", f);
+                    if (!emit_expr(f, big)) return 0;
+                    fputc(')', f);
+                }
+                return 1;
+            }
             if (dyn && (!strcmp(dyn,"bigint") || !strcmp(dyn,"bigfloat"))) {
                 const char *name = !strcmp(dyn,"bigint") ? "bigint" : "bigfloat";
                 const char *fn = NULL;
@@ -4591,6 +5007,77 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             }
 
             if (n->child_count != 2) return 0;
+            {
+                RangeCtx *cx = calloc(1, sizeof(RangeCtx));
+                FastPlan probe;
+                const char *pv = NULL, *pl = NULL;
+                const AstNode *ps = NULL;
+                int other = fast_plan_two_ends(n, &probe, &pl, &pv);
+                fast_plan_free(&probe);
+                if (!other) { other = fast_plan_while(n, &probe, &pv, &ps); fast_plan_free(&probe); }
+                if (cx && !other && fast_plan_range(n, cx)) {
+                    /* k proven between head.lo and head.hi at every turn: each l[k + c] checked once here */
+                    if (unchecked_mode) fputs("{\n", f);
+                    else {
+                        char *conds[FAST_MAX * 3];
+                        size_t ncond = range_conditions(cx, conds, FAST_MAX * 3);
+                        fputs("if (", f);
+                        for (size_t i = 0; i < ncond; i++) {
+                            if (i) { fputs(" &&\n", f); indent(f, depth + 1); }
+                            fputs(conds[i], f);
+                            free(conds[i]);
+                        }
+                        fputs(") {\n", f);
+                    }
+                    size_t fast_n = 0;
+                    const char *declared[FAST_MAX];
+                    size_t ndeclared = 0;
+                    for (size_t i = 0; i < cx->count; i++) {
+                        if (cx->at[i].lo.inf || cx->at[i].hi.inf) continue;
+                        fast_access[fast_n++] = (FastAccess){ cx->nodes[i], cx->bases[i] };
+                        int known = 0;
+                        for (size_t j = 0; j < ndeclared; j++) if (strcmp(declared[j], cx->bases[i]) == 0) known = 1;
+                        if (known) continue;
+                        declared[ndeclared++] = cx->bases[i];
+                        const char *elem = list_element_c_type(cx->types[i]);
+                        indent(f, depth + 1);
+                        fprintf(f, "%s *clair_data_%s = (%s *)%s->data;\n", elem, cx->bases[i], elem, cx->bases[i]);
+                    }
+                    fast_access_count = fast_n;
+                    indent(f, depth + 1);
+                    fputs("while (", f);
+                    if (!emit_expr(f, n->children[0])) { range_ctx_free(cx); free(cx); return 0; }
+                    fputs(") {\n", f);
+                    int saved_suppress = fast_suppress;
+                    fast_suppress = 1;               /* inner loops: plain, so the list above stays in force */
+                    fast_access_active = 1;
+                    int ok = emit_block(f, n->children[1], depth + 2);
+                    fast_access_active = 0;
+                    fast_access_count = 0;
+                    fast_suppress = saved_suppress;
+                    range_ctx_free(cx);
+                    free(cx);
+                    if (!ok) return 0;
+                    indent(f, depth + 1);
+                    fputs("}\n", f);
+                    indent(f, depth);
+                    if (unchecked_mode) fputs("}\n", f);
+                    else {
+                        fputs("} else {\n", f);
+                        indent(f, depth + 1);
+                        fputs("while (", f);
+                        if (!emit_expr(f, n->children[0])) return 0;
+                        fputs(") {\n", f);
+                        if (!emit_block(f, n->children[1], depth + 2)) return 0;
+                        indent(f, depth + 1);
+                        fputs("}\n", f);
+                        indent(f, depth);
+                        fputs("}\n", f);
+                    }
+                    return 1;
+                }
+                free(cx);
+            }
             {
                 FastPlan plan;
                 const char *lo = NULL, *hi = NULL;

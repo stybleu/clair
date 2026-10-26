@@ -27,6 +27,7 @@ int clair_big_shift_left(ClairBigInt *out, const ClairBigInt *a, size_t bits);
 int clair_big_add(ClairBigInt *out, const ClairBigInt *a, const ClairBigInt *b);
 int clair_big_sub(ClairBigInt *out, const ClairBigInt *a, const ClairBigInt *b);
 int clair_big_mul(ClairBigInt *out, const ClairBigInt *a, const ClairBigInt *b);
+int clair_big_addmul_i64(ClairBigInt *out, const ClairBigInt *a, const ClairBigInt *b, int64_t k); /* a + b*k */
 int clair_big_divmod(ClairBigInt *quo, ClairBigInt *rem,
                      const ClairBigInt *a, const ClairBigInt *b); /* vers zero */
 int clair_big_pow_u64(ClairBigInt *out, const ClairBigInt *base, uint64_t exponent);
