@@ -1,5 +1,6 @@
 #include "modules.h"
 #include "parser.h"
+#include "units.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,12 +9,12 @@
 /* The modules that live in the compiler                              */
 /* ------------------------------------------------------------------ */
 
-typedef struct { const char *name; const char *value; } ModConst;
+typedef struct { const char *name; const char *value; const char *unit; } ModConst;   /* unit: V0.48 */
 
 /* "inf" and "nan" are written __builtin_inf() / __builtin_nan("") by code generation */
 static const ModConst math_consts[] = {
-    { "pi", "3.141592653589793" }, { "e", "2.718281828459045" }, { "tau", "6.283185307179586" },
-    { "inf", "inf" }, { "nan", "nan" }, { NULL, NULL }
+    { "pi", "3.141592653589793", "1" }, { "e", "2.718281828459045", "1" }, { "tau", "6.283185307179586", "1" },
+    { "inf", "inf", NULL }, { "nan", "nan", NULL }, { NULL, NULL, NULL }
 };
 
 /* the functions of math, by their Python name; fabs is Clair's abs */
@@ -28,58 +29,58 @@ static const char *const math_funcs[] = {
 
 /* CODATA 2022 (NIST), SI units; exact values as defined, derived exact ones rounded to the nearest double */
 static const ModConst phys_consts[] = {
-    { "c", "299792458.0" },                     /* m/s, exact */
-    { "h", "6.62607015e-34" },                  /* J s, exact */
-    { "hbar", "1.0545718176461565e-34" },       /* J s, h / 2 pi */
-    { "e", "1.602176634e-19" },                 /* C, exact */
-    { "N_A", "6.02214076e23" },                 /* 1/mol, exact */
-    { "k_B", "1.380649e-23" },                  /* J/K, exact */
-    { "R", "8.31446261815324" },                /* J/(mol K), N_A k_B */
-    { "F", "96485.33212331001" },               /* C/mol, N_A e */
-    { "sigma", "5.6703744191844294e-08" },      /* W/(m2 K4), Stefan-Boltzmann */
-    { "b_wien", "0.0028977719551851727" },      /* m K */
-    { "g0", "9.80665" },                        /* m/s2, exact */
-    { "atm", "101325.0" },                      /* Pa, exact */
-    { "eV", "1.602176634e-19" },                /* J, exact */
-    { "G", "6.67430e-11" },                     /* m3/(kg s2), +- 0.00015e-11 */
-    { "m_e", "9.1093837139e-31" },              /* kg */
-    { "m_p", "1.67262192595e-27" },             /* kg */
-    { "m_n", "1.67492750056e-27" },             /* kg */
-    { "m_u", "1.66053906892e-27" },             /* kg */
-    { "eps0", "8.8541878188e-12" },             /* F/m */
-    { "mu0", "1.25663706127e-06" },             /* N/A2 */
-    { "alpha", "0.0072973525643" },             /* fine structure */
-    { "R_inf", "10973731.568157" },             /* 1/m, Rydberg */
-    { "a0", "5.29177210544e-11" },              /* m, Bohr radius */
-    { "l_P", "1.616255e-35" },                  /* m, Planck length */
-    { "m_P", "2.176434e-08" },                  /* kg, Planck mass */
-    { "t_P", "5.391247e-44" },                  /* s, Planck time */
-    { "T_P", "1.416784e32" },                   /* K, Planck temperature */
-    { NULL, NULL }
+    { "c", "299792458.0", "m/s" },                     /* m/s, exact */
+    { "h", "6.62607015e-34", "J*s" },                  /* J s, exact */
+    { "hbar", "1.0545718176461565e-34", "J*s" },       /* J s, h / 2 pi */
+    { "e", "1.602176634e-19", "C" },                 /* C, exact */
+    { "N_A", "6.02214076e23", "1/mol" },                 /* 1/mol, exact */
+    { "k_B", "1.380649e-23", "J/K" },                  /* J/K, exact */
+    { "R", "8.31446261815324", "J/(mol*K)" },                /* J/(mol K), N_A k_B */
+    { "F", "96485.33212331001", "C/mol" },               /* C/mol, N_A e */
+    { "sigma", "5.6703744191844294e-08", "W/(m^2*K^4)" },      /* W/(m2 K4), Stefan-Boltzmann */
+    { "b_wien", "0.0028977719551851727", "m*K" },      /* m K */
+    { "g0", "9.80665", "m/s^2" },                        /* m/s2, exact */
+    { "atm", "101325.0", "Pa" },                      /* Pa, exact */
+    { "eV", "1.602176634e-19", "J" },                /* J, exact */
+    { "G", "6.67430e-11", "m^3/(kg*s^2)" },                     /* m3/(kg s2), +- 0.00015e-11 */
+    { "m_e", "9.1093837139e-31", "kg" },              /* kg */
+    { "m_p", "1.67262192595e-27", "kg" },             /* kg */
+    { "m_n", "1.67492750056e-27", "kg" },             /* kg */
+    { "m_u", "1.66053906892e-27", "kg" },             /* kg */
+    { "eps0", "8.8541878188e-12", "F/m" },             /* F/m */
+    { "mu0", "1.25663706127e-06", "N/A^2" },             /* N/A2 */
+    { "alpha", "0.0072973525643", "1" },             /* fine structure */
+    { "R_inf", "10973731.568157", "1/m" },             /* 1/m, Rydberg */
+    { "a0", "5.29177210544e-11", "m" },              /* m, Bohr radius */
+    { "l_P", "1.616255e-35", "m" },                  /* m, Planck length */
+    { "m_P", "2.176434e-08", "kg" },                  /* kg, Planck mass */
+    { "t_P", "5.391247e-44", "s" },                  /* s, Planck time */
+    { "T_P", "1.416784e32", "K" },                   /* K, Planck temperature */
+    { NULL, NULL, NULL }
 };
 
 /* SI units.  GM: JPL ephemeris DE440 (system of the planet with its moons, except the Earth and
    the Moon); radii and solar luminosity: IAU 2015 resolution B3 (nominal); au: IAU 2012 B2. */
 static const ModConst astro_consts[] = {
-    { "UA", "149597870700.0" }, { "AU", "149597870700.0" },      /* m, exact */
-    { "pc", "3.085677581491367e16" },                            /* m, au * 648000 / pi */
-    { "al", "9460730472580800.0" }, { "ly", "9460730472580800.0" },  /* m, c * 365.25 days, exact */
-    { "jour", "86400.0" }, { "an", "31557600.0" },               /* s, Julian year */
-    { "GM_soleil", "1.32712440041279419e20" },
-    { "GM_mercure", "2.2031868551e13" },
-    { "GM_venus", "3.24858592e14" },
-    { "GM_terre", "3.98600435507e14" },
-    { "GM_lune", "4.902800118e12" },
-    { "GM_mars", "4.2828375816e13" },
-    { "GM_jupiter", "1.267127641e17" },
-    { "GM_saturne", "3.79405848418e16" },
-    { "GM_uranus", "5.7945564e15" },
-    { "GM_neptune", "6.83652710058e15" },
-    { "GM_pluton", "9.755e11" },
-    { "R_soleil", "6.957e8" }, { "L_soleil", "3.828e26" },
-    { "R_terre", "6.3781e6" }, { "R_terre_polaire", "6.3568e6" },
-    { "R_jupiter", "7.1492e7" }, { "R_jupiter_polaire", "6.6854e7" },
-    { NULL, NULL }
+    { "UA", "149597870700.0", "m" }, { "AU", "149597870700.0", "m" },      /* m, exact */
+    { "pc", "3.085677581491367e16", "m" },                            /* m, au * 648000 / pi */
+    { "al", "9460730472580800.0", "m" }, { "ly", "9460730472580800.0", "m" },  /* m, c * 365.25 days, exact */
+    { "jour", "86400.0", "s" }, { "an", "31557600.0", "s" },               /* s, Julian year */
+    { "GM_soleil", "1.32712440041279419e20", "m^3/s^2" },
+    { "GM_mercure", "2.2031868551e13", "m^3/s^2" },
+    { "GM_venus", "3.24858592e14", "m^3/s^2" },
+    { "GM_terre", "3.98600435507e14", "m^3/s^2" },
+    { "GM_lune", "4.902800118e12", "m^3/s^2" },
+    { "GM_mars", "4.2828375816e13", "m^3/s^2" },
+    { "GM_jupiter", "1.267127641e17", "m^3/s^2" },
+    { "GM_saturne", "3.79405848418e16", "m^3/s^2" },
+    { "GM_uranus", "5.7945564e15", "m^3/s^2" },
+    { "GM_neptune", "6.83652710058e15", "m^3/s^2" },
+    { "GM_pluton", "9.755e11", "m^3/s^2" },
+    { "R_soleil", "6.957e8", "m" }, { "L_soleil", "3.828e26", "W" },
+    { "R_terre", "6.3781e6", "m" }, { "R_terre_polaire", "6.3568e6", "m" },
+    { "R_jupiter", "7.1492e7", "m" }, { "R_jupiter_polaire", "6.6854e7", "m" },
+    { NULL, NULL, NULL }
 };
 
 static const ModConst *builtin_consts(const char *module) {
@@ -94,6 +95,12 @@ static int is_builtin_module(const char *module) { return builtin_consts(module)
 static const char *builtin_const(const char *module, const char *name) {
     const ModConst *table = builtin_consts(module);
     for (size_t i = 0; table && table[i].name; i++) if (strcmp(table[i].name, name) == 0) return table[i].value;
+    return NULL;
+}
+
+static const char *builtin_unit(const char *module, const char *name) {
+    const ModConst *table = builtin_consts(module);
+    for (size_t i = 0; table && table[i].name; i++) if (strcmp(table[i].name, name) == 0) return table[i].unit;
     return NULL;
 }
 
@@ -293,14 +300,22 @@ static void set_text(AstNode *n, const char *text) {
     n->text = d;
 }
 
-/* the node becomes the number of a constant */
-static void make_number(AstNode *n, const char *value) {
+/* the node becomes the number of a constant, with its unit (V0.48) */
+static void make_number(AstNode *n, const char *module, const char *member) {
     for (size_t i = 0; i < n->child_count; i++) ast_free(n->children[i]);
     n->child_count = 0;
     n->kind = AST_FLOAT;
     free(n->type_name);
     n->type_name = NULL;
-    set_text(n, value);
+    const char *unit = builtin_unit(module, member);      /* before set_text: member may be n->text */
+    set_text(n, builtin_const(module, member));
+    free(n->unit);
+    n->unit = NULL;
+    if (unit) {
+        char err[160];
+        n->unit = units_normalize(unit, err, sizeof(err));
+        if (!n->unit) failed = 1;
+    }
 }
 
 /* receiver.method(args) becomes the call name(args) */
@@ -386,7 +401,7 @@ static void rewrite(Scope *s, AstNode *n) {
                 const char *module = scope_alias(s, n->children[0]->text);
                 if (module) {
                     if (!member_ok(s, module, n->text, 0)) return;
-                    make_number(n, builtin_const(module, n->text));
+                    make_number(n, module, n->text);
                     return;
                 }
             }
@@ -403,7 +418,7 @@ static void rewrite(Scope *s, AstNode *n) {
                 const char *module, *member;
                 if (scope_name(s, n->text, &module, &member)) {
                     if (!member_ok(s, module, member, 0)) return;
-                    make_number(n, builtin_const(module, member));
+                    make_number(n, module, member);
                     return;
                 }
             }
@@ -485,16 +500,20 @@ static int process_file(AstNode *program, const char *module, const char *file) 
     }
     if (failed) ok = 0;
     /* now the imports and the module's main can go, and the module's functions get their full name */
+    /* names first: is_method looks at every class of the file, nothing may be freed yet */
+    for (size_t i = 0; module && i < program->child_count; i++) {
+        AstNode *c = program->children[i];
+        if (c->kind == AST_FUNCTION && strcmp(c->text, "main") != 0 && !is_method(program, c)) {
+            char *full = join(module, ".", c->text);
+            if (full) { free(c->text); c->text = full; }
+        }
+    }
     size_t out = 0;
     for (size_t i = 0; i < program->child_count; i++) {
         AstNode *c = program->children[i];
         if (c->kind == AST_IMPORT || (module && c->kind == AST_FUNCTION && strcmp(c->text, "main") == 0)) {
             ast_free(c);
             continue;
-        }
-        if (module && c->kind == AST_FUNCTION && !is_method(program, c)) {
-            char *full = join(module, ".", c->text);
-            if (full) { free(c->text); c->text = full; }
         }
         program->children[out++] = c;
     }

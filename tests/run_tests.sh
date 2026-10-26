@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.47 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.48 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -929,6 +929,20 @@ expect_compile_error modules/constante_appelee 'import error: phys.G is a consta
 expect_compile_error modules/fonction_sans_prefixe "undefined function or class 'periode' (did you mean orbite.periode(...)?)"
 expect_compile_error modules/nom_absent "import error: cannot import 'vitesse' from 'orbite'"
 expect_compile_error modules/constante_changee 'import error: phys.c: the values of a module cannot be changed'
+
+# V0.48 : les unites verifiees a la compilation, puis oubliees
+./build/clair tests/unites.cl -o build/test_unites
+[ "$(./build/test_unites)" = "$(cat tests/unites.expected)" ]
+grep -Fq 'double dv1 = ' build/test_unites.generated.c
+printf '%s\n' 'unites.cl : OK -> transfert de Hohmann Terre-Mars, km convertis, N, J, W, deg, listes ; identique a Python'
+expect_compile_error invalid_unite_addition 'unit error: cannot add m and s (in main)'
+expect_compile_error invalid_unite_nombre 'unit error: 1.5 has no unit next to m: write 1.5[m] (in main)'
+expect_compile_error invalid_unite_sinus 'unit error: sin() needs a number without unit, it receives m (in main)'
+expect_compile_error invalid_unite_argument 'unit error: argument 1 of aire (r) is in m, it receives s (in main)'
+expect_compile_error invalid_unite_km 'unit error: cannot add km and m (in main)'
+expect_compile_error invalid_unite_retour 'unit error: the value returned is in m/s, it receives m*s (in vitesse)'
+expect_compile_error invalid_unite_constante 'unit error: x is in m, it receives m^3/(kg*s^2) (in main)'
+expect_compile_error invalid_unite_ecrite 'parse error at 2:17: empty unit'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

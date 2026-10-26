@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include "parser.h"
+#include "units.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@ static int expect(Parser *p, TokenKind kind, const char *what) {
 static AstNode *parse_expression(Parser *p);
 static AstNode *parse_block(Parser *p);
 static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_len);
+static int parse_unit(Parser *p, AstNode *node);
 
 static AstNode *make_binary(Token op, AstNode *left, AstNode *right) {
     AstNode *bin = ast_new(AST_BINARY, op.start, op.length);
@@ -72,6 +74,18 @@ static AstNode *parse_atom(Parser *p) {
             return NULL;
         }
         next(p);
+        if (p->current.kind == TOKEN_LBRACKET) {
+            /* V0.48: 400000[m] is the float 400000.0[m] */
+            if (strlen(digits) + 3 > sizeof(digits)) {
+                fprintf(stderr, "parse error at %zu:%zu: number too long for a unit\n", t.line, t.column);
+                p->had_error = 1;
+                return NULL;
+            }
+            strcat(digits, ".0");
+            AstNode *num = ast_new(AST_FLOAT, digits, strlen(digits));
+            if (!num || !parse_unit(p, num)) { ast_free(num); return NULL; }
+            return num;
+        }
         return ast_new(AST_INTEGER, digits, strlen(digits));
     }
 
@@ -83,7 +97,12 @@ static AstNode *parse_atom(Parser *p) {
             if (t.start[i] != '_') text[n++] = t.start[i];
         }
         next(p);
-        return ast_new(AST_FLOAT, text, n);
+        AstNode *num = ast_new(AST_FLOAT, text, n);
+        if (num && p->current.kind == TOKEN_LBRACKET && !parse_unit(p, num)) {   /* V0.48: 9.81[m/s^2] */
+            ast_free(num);
+            return NULL;
+        }
+        return num;
     }
 
     if (t.kind == TOKEN_TRUE || t.kind == TOKEN_FALSE) {
@@ -967,6 +986,45 @@ static const char *machine_type_token(Token t) {
     return NULL;
 }
 
+/*
+ * V0.48: [m/s^2] after float, float32 or a number: the unit, kept in canonical
+ * form in node->unit.  The tokens between the brackets are put back together
+ * and read by units_normalize.
+ */
+static int parse_unit(Parser *p, AstNode *node) {
+    Token open = p->current;
+    next(p);                                         /* [ */
+    char text[512];
+    size_t n = 0;
+    int depth = 0;
+    while (!(p->current.kind == TOKEN_RBRACKET && depth == 0)) {
+        if (p->current.kind == TOKEN_EOF || p->current.kind == TOKEN_ERROR ||
+            p->current.kind == TOKEN_LBRACE || n + p->current.length + 2 >= sizeof(text)) {
+            fprintf(stderr, "parse error at %zu:%zu: unit not closed by ']'\n", open.line, open.column);
+            p->had_error = 1;
+            return 0;
+        }
+        if (p->current.kind == TOKEN_LPAREN) depth++;
+        if (p->current.kind == TOKEN_RPAREN) depth--;
+        memcpy(text + n, p->current.start, p->current.length);
+        n += p->current.length;
+        text[n++] = ' ';
+        next(p);
+    }
+    text[n] = '\0';
+    next(p);                                         /* ] */
+    char err[160];
+    char *canon = units_normalize(text, err, sizeof(err));
+    if (!canon) {
+        fprintf(stderr, "parse error at %zu:%zu: %s\n", open.line, open.column, err);
+        p->had_error = 1;
+        return 0;
+    }
+    free(node->unit);
+    node->unit = canon;
+    return 1;
+}
+
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
 
@@ -1027,6 +1085,16 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         t.kind == TOKEN_BOOL || t.kind == TOKEN_STRING_TYPE ||
         t.kind == TOKEN_IDENTIFIER) {
         next(p);
+        if (p->current.kind == TOKEN_LBRACKET) {
+            /* V0.48: float[m/s] */
+            if (t.kind != TOKEN_FLOAT && !is_float32_token(t)) {
+                fprintf(stderr, "parse error at %zu:%zu: a unit goes with float or float32, not %.*s\n",
+                        p->current.line, p->current.column, (int)t.length, t.start);
+                p->had_error = 1;
+                return 0;
+            }
+            if (!parse_unit(p, node)) return 0;
+        }
         return ast_set_type(node, t.start, t.length);
     }
 
@@ -1061,7 +1129,18 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
                 return 0;
         }
 
+        Token element = p->current;
         next(p);
+        if (p->current.kind == TOKEN_LBRACKET) {
+            /* V0.48: list[float[m]] */
+            if (element.kind != TOKEN_FLOAT && !is_float32_token(element)) {
+                fprintf(stderr, "parse error at %zu:%zu: a unit goes with float or float32\n",
+                        p->current.line, p->current.column);
+                p->had_error = 1;
+                return 0;
+            }
+            if (!parse_unit(p, node)) return 0;
+        }
         if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
         return ast_set_type(node, list_type, list_type_len);
     }

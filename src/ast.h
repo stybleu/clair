@@ -51,6 +51,7 @@ typedef struct AstNode {
     struct AstNode **children;
     size_t child_count;
     size_t child_capacity;
+    char *unit;          /* V0.48: the unit written (float[m/s], 9.81[m/s^2]), canonical ("m^1 s^-1"), or NULL */
 } AstNode;
 
 AstNode *ast_new(AstKind kind, const char *text, size_t text_len);

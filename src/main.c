@@ -2,6 +2,7 @@
 #include "codegen_c.h"
 #include "semantic.h"
 #include "modules.h"
+#include "units.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,6 +120,13 @@ int main(int argc, char **argv) {
     }
 
     if (!semantic_check(program)) {
+        ast_free(program);
+        free(source);
+        return 1;
+    }
+
+    /* V0.48: float[m], float[m/s]... checked here, then forgotten */
+    if (!units_check(program)) {
         ast_free(program);
         free(source);
         return 1;
