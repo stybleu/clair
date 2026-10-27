@@ -98,6 +98,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.50](docs/README_V0.50.md) : calculs certifiés avec certfloat, certsqrt(), certdigits() et mémoire améliorée
 - [Clair V0.49](docs/README_V0.49.md) : chaque erreur de compilation dit sa ligne, et son fichier dans un module
 - [Clair V0.48](docs/README_V0.48.md) : unités vérifiées à la compilation (`float[m/s]`, `9.81[m/s^2]`, `N`, `J`, `W`...), sans coût à l'exécution
 - [Clair V0.47](docs/README_V0.47.md) : `import`, `from ... import`, `as`, modules en fichiers `.cl`, modules `math`, `phys`, `astro` ; `cbrt`, `erf`, `gamma`, `degrees`...
