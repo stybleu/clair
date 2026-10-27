@@ -117,6 +117,7 @@ static const char *c_type_name(const char *clair_type) {
     if (!clair_type) return NULL;
     if (strcmp(clair_type, "bigint") == 0) return "ClairDynInt *";
     if (strcmp(clair_type, "bigfloat") == 0) return "ClairDynFloat *";
+    if (strcmp(clair_type, "certfloat") == 0) return "ClairCertFloat *";
     if (ptr_kind(clair_type) >= 0) {
         int k = ptr_kind(clair_type);
         if (!ptr_types[k][0]) snprintf(ptr_types[k], sizeof(ptr_types[k]), "%s *", element_kinds[k][1]);
@@ -3352,6 +3353,8 @@ static int emit_param_list(FILE *f, const AstNode *fn) {
     return 1;
 }
 
+static int clair_num_type_dynamic(const char *type);
+static const AstNode *clair_num_lookup_class(const char *name);
 static int emit_pinned(FILE *f, const AstNode *value);          /* V0.42 big numbers */
 static int emit_str_call(FILE *f, const AstNode *n);            /* V0.43 str(), format() */
 static int emit_bignum_call(FILE *f, const AstNode *n);         /* V0.45 sqrt(bigfloat)... */
@@ -3627,7 +3630,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (!emit_expr(f, row->children[1])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
-                fputc(')', f);
+                fprintf(f, ", %zu)", n->line);
                 return 1;
             }
             const char *element_type = c_type_name(n->type_name);
@@ -3648,7 +3651,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
-                fputc(')', f);
+                fprintf(f, ", %zu)", n->line);
                 return 1;
             }
 
@@ -3666,6 +3669,17 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
         case AST_CONSTRUCT: {
             if (!n->text || !n->type_name) return 0;
+            const AstNode *cls = clair_num_lookup_class(n->text);
+            if (!cls) return 0;
+            size_t fields = 0;
+            for (size_t i = 0; i < cls->child_count; ++i)
+                if (clair_num_type_dynamic(cls->children[i]->type_name))
+                    ++fields;
+
+            if (fields)
+                fprintf(f, "((ClairClass_%s *)clair_rt_num_track_fields(",
+                        n->text);
+
             fprintf(f, "((ClairClass_%s *)clair_rt_object_make(&(ClairClass_%s){",
                     n->text, n->text);
             if (n->child_count == 0) {
@@ -3677,6 +3691,20 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 }
             }
             fprintf(f, "}, sizeof(ClairClass_%s)))", n->text);
+
+            if (fields) {
+                fprintf(f, ", %zu, (const size_t[]){", fields);
+                int first = 1;
+                for (size_t i = 0; i < cls->child_count; ++i) {
+                    const AstNode *field = cls->children[i];
+                    if (!clair_num_type_dynamic(field->type_name))
+                        continue;
+                    fprintf(f, "%s__builtin_offsetof(ClairClass_%s, %s)",
+                            first ? "" : ", ", n->text, field->text);
+                    first = 0;
+                }
+                fputs("}))", f);
+            }
             return 1;
         }
 
@@ -3687,6 +3715,19 @@ static int emit_expr(FILE *f, const AstNode *n) {
             return 1;
 
         case AST_CALL:
+            if (n->text && (!strcmp(n->text, "certfloat") ||
+                            !strcmp(n->text, "certsqrt") ||
+                            !strcmp(n->text, "certdigits"))) {
+                fprintf(f, "clair_rt_%s(", n->text);
+
+                for (size_t i = 0; i < n->child_count; i++) {
+                    if (i) fputs(", ", f);
+                    if (!emit_expr(f, n->children[i])) return 0;
+                }
+
+                fputc(')', f);
+                return 1;
+            }
             if (n->text && !strcmp(n->text,"bigint") && n->child_count == 1 &&
                 n->children[0]->type_name && !strcmp(n->children[0]->type_name, "bigfloat")) {
                 fputs("clair_rt_bigfloat_floor(", f);                     /* bigint(x): vers zero */
@@ -4006,6 +4047,20 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 return 1;
             }
 
+            if (n->type_name && !strcmp(n->type_name, "certfloat")) {
+                const char *fn =
+                    !strcmp(op, "+") ? "add" :
+                    !strcmp(op, "-") ? "sub" :
+                    !strcmp(op, "*") ? "mul" : "div";
+
+                fprintf(f, "clair_rt_certfloat_%s(", fn);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputc(')', f);
+                return 1;
+            }
+
             const char *dyn = n->children[0]->type_name, *dyn_r = n->children[1]->type_name;
             int big_l = dyn && !strcmp(dyn, "bigint"), big_r = dyn_r && !strcmp(dyn_r, "bigint");
             int bf_l = dyn && !strcmp(dyn, "bigfloat"), bf_r = dyn_r && !strcmp(dyn_r, "bigfloat");
@@ -4134,6 +4189,8 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
+                if (is_int_type(n->type_name))
+                    fprintf(f, ", %zu", n->line);
                 fputc(')', f);
                 return 1;
             }
@@ -4154,7 +4211,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
-                fputc(')', f);
+                fprintf(f, ", %zu)", n->line);
                 return 1;
             }
 
@@ -4436,7 +4493,18 @@ static int emit_jump(FILE *f, const char *jump, size_t mark, int depth) {
 static int clair_num_gc_enabled;
 
 static int clair_num_type_dynamic(const char *type) {
-    return type && (!strcmp(type, "bigint") || !strcmp(type, "bigfloat"));
+    return type && (!strcmp(type, "bigint") || !strcmp(type, "bigfloat") || !strcmp(type, "certfloat"));
+}
+
+static const AstNode *clair_num_lookup_class(const char *name) {
+    if (!name || !codegen_program) return NULL;
+    for (size_t i = 0; i < codegen_program->child_count; ++i) {
+        const AstNode *cls = codegen_program->children[i];
+        if (cls->kind == AST_CLASS && cls->text &&
+            strcmp(cls->text, name) == 0)
+            return cls;
+    }
+    return NULL;
 }
 static void clair_num_scan_ast(const AstNode *n, int *uses, int *field) {
     if (!n) return;
@@ -4605,11 +4673,7 @@ static int emit_bignum_call(FILE *f, const AstNode *n) {
 
 /* objet.champ = v, Classe(v) : le nombre vit dans un objet, il est epingle */
 static int emit_pinned(FILE *f, const AstNode *value) {
-    if (!clair_num_gc_enabled || !clair_num_type_dynamic(value->type_name)) return emit_expr(f, value);
-    fputs("clair_rt_num_pin(", f);
-    if (!emit_expr(f, value)) return 0;
-    fputc(')', f);
-    return 1;
+    return emit_expr(f, value);
 }
 /* return v : la valeur rendue survit a la sortie de l'appel */
 static int emit_return_value(FILE *f, const AstNode *value) {
@@ -4931,7 +4995,32 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
 
         case AST_MEMBER_ASSIGN:
             if (n->child_count != 2 || !n->text) return 0;
-            if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
+            if (clair_num_gc_enabled &&
+                clair_num_type_dynamic(n->children[1]->type_name)) {
+                size_t id = list_mutation_counter++;
+                fputs("{\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "__auto_type __clair_field_obj_%zu = ", id);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(";\n", f);
+                indent(f, depth + 1);
+                fprintf(f, "__auto_type __clair_field_new_%zu = ", id);
+                if (!emit_expr(f, n->children[1])) return 0;
+                fputs(";\n", f);
+                indent(f, depth + 1);
+                fprintf(
+                    f,
+                    "clair_rt_num_assign_field((void *)&"
+                    "(__clair_field_obj_%zu->%s), "
+                    "(const void *)__clair_field_new_%zu);\n",
+                    id, n->text, id
+                );
+                indent(f, depth);
+                fputs("}\n", f);
+                return 1;
+            }
+            if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0))
+                return 0;
             fprintf(f, "->%s = ", n->text);
             if (!emit_pinned(f, n->children[1])) return 0;
             fputs(";\n", f);
@@ -4963,7 +5052,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
-                fputs(") = ", f);
+                fprintf(f, ", %zu) = ", n->line);
                 if (!emit_expr(f, n->children[2])) return 0;
                 fputs(";\n", f);
                 return 1;
@@ -4986,7 +5075,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             indent(f, depth + 1);
             fprintf(f, "*%s(", accessor);
             if (!emit_write_target(f, n, 3)) return 0;
-            fprintf(f, ", __clair_row_%zu, __clair_col_%zu) = __clair_value_%zu;\n", id, id, id);
+            fprintf(f, ", __clair_row_%zu, __clair_col_%zu, %zu) = __clair_value_%zu;\n", id, id, n->line, id);
             indent(f, depth);
             fputs("}\n", f);
             return 1;
@@ -5031,7 +5120,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                     if (!emit_write_target(f, n, 2)) return 0;
                     fputs(", ", f);
                     if (!emit_expr(f, n->children[0])) return 0;
-                    fputs(") = ", f);
+                    fprintf(f, ", %zu) = ", n->line);
                     if (!emit_expr(f, n->children[1])) return 0;
                     fputs(";\n", f);
                     return 1;
@@ -5049,7 +5138,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 indent(f, depth + 1);
                 fprintf(f, "*%s(", list_accessor_name(n->type_name));
                 if (!emit_write_target(f, n, 2)) return 0;
-                fprintf(f, ", __clair_list_index_%zu) = __clair_list_value_%zu;\n", id, id);
+                fprintf(f, ", __clair_list_index_%zu, %zu) = __clair_list_value_%zu;\n", id, n->line, id);
                 indent(f, depth);
                 fputs("}\n", f);
                 return 1;
@@ -5130,6 +5219,19 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
         case AST_PRINT: {
             const AstNode *value = n->children[0];
             if (!value->type_name) return 0;
+
+            /* V0.50 : affichage direct sans conserver la chaine. */
+            if (value->kind == AST_CALL &&
+                value->text &&
+                strcmp(value->text, "certdigits") == 0 &&
+                value->child_count == 2) {
+                fputs("clair_rt_certdigits_print(", f);
+                if (!emit_expr(f, value->children[0])) return 0;
+                fputs(", ", f);
+                if (!emit_expr(f, value->children[1])) return 0;
+                fputs(");\n", f);
+                return 1;
+            }
             if (!strcmp(value->type_name,"bigint") || !strcmp(value->type_name,"bigfloat")) {
                 fprintf(f,"clair_rt_%s_print(",value->type_name);
                 if(!emit_expr(f,value))return 0;
@@ -8085,7 +8187,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs("#include <time.h>\n", f);        /* without seed(): seeded from the clock and /dev/urandom */
     if (node_uses_math(program) || program_uses_big(program)) fputs("#include <math.h>\n", f);
     if (node_uses_type(program, "uint1024")) fputs("#include <float.h>\n", f);
-    if (node_uses_type(program, "bigint") || node_uses_type(program, "bigfloat"))
+    if (node_uses_type(program, "bigint") || node_uses_type(program, "bigfloat") ||
+        node_uses_type(program, "certfloat"))
         fputs((const char *)clair_big_runtime_text, f);   /* the whole runtime: the program needs no other file */
     fputc('\n', f);
     if (program_uses_big(program)) emit_big_runtime(f, program);
@@ -8096,9 +8199,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     if (node_uses_int_mod(program)) {
         fputs(
-            "static int64_t clair_rt_int_mod_checked(int64_t a, int64_t b) {\n"
+            "static int64_t clair_rt_int_mod_checked(int64_t a, int64_t b, size_t line) {\n"
             "    if (b == 0) {\n"
-            "        fputs(\"Clair runtime error: modulo by zero\\n\", stderr);\n"
+            "        fprintf(stderr, \"Clair runtime error: modulo by zero (line %zu)\\n\", line);\n"
             "        exit(EXIT_FAILURE);\n"
             "    }\n"
             "    return b == -1 ? 0 : a % b;  /* INT64_MIN % -1 would trap in C */\n"
@@ -8154,13 +8257,13 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
     if (node_uses_int_division(program)) {
         fputs(
-            "static int64_t clair_rt_int_div_checked(int64_t a, int64_t b) {\n"
+            "static int64_t clair_rt_int_div_checked(int64_t a, int64_t b, size_t line) {\n"
             "    if (b == 0) {\n"
-            "        fputs(\"Clair runtime error: division by zero\\n\", stderr);\n"
+            "        fprintf(stderr, \"Clair runtime error: division by zero (line %zu)\\n\", line);\n"
             "        exit(EXIT_FAILURE);\n"
             "    }\n"
             "    if (a == INT64_MIN && b == -1) {\n"
-            "        fputs(\"Clair runtime error: integer division overflow\\n\", stderr);\n"
+            "        fprintf(stderr, \"Clair runtime error: integer division overflow (line %zu)\\n\", line);\n"
             "        exit(EXIT_FAILURE);\n"
             "    }\n"
             "    return a / b;\n"
@@ -8337,15 +8440,16 @@ int codegen_c_file(const AstNode *program, const char *path) {
 
         if (uses_list_at) {
             fputs(
-                "static _Noreturn void clair_rt_index_error(const void *list, int64_t index, size_t len) {\n"
-                "    if (!list) fputs(\"Clair runtime error: null list\\n\", stderr);\n"
-                "    else fprintf(stderr, \"Clair runtime error: list index %\" PRId64 \" out of bounds for length %zu\\n\", index, len);\n"
+                "static _Noreturn void clair_rt_index_error(const void *list, int64_t index, size_t len, size_t line) {\n"
+                "    if (!list) fputs(\"Clair runtime error: null list\", stderr);\n"
+                "    else fprintf(stderr, \"Clair runtime error: list index %\" PRId64 \" out of bounds for length %zu\", index, len);\n"
+                "    fprintf(stderr, \" (line %zu)\\n\", line);\n"
                 "    exit(EXIT_FAILURE);\n"
                 "}\n\n"
                 "/* xs[-1] is the last element, like Python; anything else out of range stops the program */\n"
-                "static __attribute__((noinline)) int64_t clair_rt_index_wrap(const void *list, int64_t index, size_t len) {\n"
+                "static __attribute__((noinline)) int64_t clair_rt_index_wrap(const void *list, int64_t index, size_t len, size_t line) {\n"
                 "    if (list && index < 0 && (uint64_t)-(index + 1) < len) return index + (int64_t)len;\n"
-                "    clair_rt_index_error(list, index, len);\n"
+                "    clair_rt_index_error(list, index, len, line);\n"
                 "}\n\n",
                 f
             );
@@ -8356,15 +8460,15 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 const char *ctype = element_kinds[e][1], *suffix = element_kinds[e][2];
                 if (unchecked_mode) {
                     fprintf(f,
-                        "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
+                        "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index, size_t line) {\n"
                         "    return (%s *)list->data + (index < 0 ? index + (int64_t)list->len : index);  /* --sans-verif */\n"
                         "}\n\n",
                         ctype, suffix, ctype);
                     continue;
                 }
                 fprintf(f,
-                    "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index) {\n"
-                    "    if (!list || (uint64_t)index >= list->len) index = clair_rt_index_wrap(list, index, list ? list->len : 0);\n"
+                    "static inline %s *clair_rt_list_at_%s_checked(ClairList list, int64_t index, size_t line) {\n"
+                    "    if (!list || (uint64_t)index >= list->len) index = clair_rt_index_wrap(list, index, list ? list->len : 0, line);\n"
                     "    return (%s *)list->data + index;\n"
                     "}\n\n",
                     ctype, suffix, ctype);
@@ -8528,9 +8632,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    clair_rt_matrices = m;\n"
             "    return m;\n"
             "}\n\n"
-            "static _Noreturn void clair_rt_matrix_index_error(ClairMatrix m, int64_t i, int64_t j) {\n"
+            "static _Noreturn void clair_rt_matrix_index_error(ClairMatrix m, int64_t i, int64_t j, size_t line) {\n"
             "    fprintf(stderr, \"Clair runtime error: matrix index [%\" PRId64 \"][%\" PRId64 \"] out of bounds for shape %\" PRId64 \"x%\" PRId64 \"\\n\",\n"
             "            i, j, m->rows, m->cols);\n"
+            "    fprintf(stderr, \"Clair runtime error location: line %zu\\n\", line);\n"
             "    exit(EXIT_FAILURE);\n"
             "}\n\n",
             f
@@ -8542,13 +8647,13 @@ int codegen_c_file(const AstNode *program, const char *path) {
             const size_t k = 0;
             if (!node_uses_matrix_kind(program, mkinds[k][0])) continue;
             fprintf(f,
-                "static inline %s *clair_rt_matrix_at_%s_checked(ClairMatrix m, int64_t i, int64_t j) {\n"
+                "static inline %s *clair_rt_matrix_at_%s_checked(ClairMatrix m, int64_t i, int64_t j, size_t line) {\n"
                 "%s"
                 "    return (%s *)m->data + (i * m->cols + j);\n"
                 "}\n\n",
                 mkinds[k][2], mkinds[k][1],
                 unchecked_mode ? "    /* --sans-verif: no bounds check */\n"
-                               : "    if ((uint64_t)i >= (uint64_t)m->rows || (uint64_t)j >= (uint64_t)m->cols) clair_rt_matrix_index_error(m, i, j);\n",
+                               : "    if ((uint64_t)i >= (uint64_t)m->rows || (uint64_t)j >= (uint64_t)m->cols) clair_rt_matrix_index_error(m, i, j, line);\n",
                 mkinds[k][2]);
         }
     }

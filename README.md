@@ -133,3 +133,8 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Clair V0.17](docs/README_V0.17.md) : boucles rapides, C lisible, rapport du code machine
 - [Clair V0.16](docs/README_V0.16.md) : méthodes, appels en instruction, mutation chaînée
 - [Clair V0.14](docs/README_V0.14.md) : classes (documentation historique)
+
+## Version V0.50
+
+- [Documentation V0.50](docs/README_V0.50.md)
+- [Rapport d'audit V0.50](docs/AUDIT_V0.50.md)

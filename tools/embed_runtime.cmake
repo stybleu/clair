@@ -2,7 +2,9 @@
 # The compiler copies it into the C of every program that uses bigint or bigfloat:
 # the program needs no other file, wherever clair is run from (V0.42).
 set(PARTS clair_bigint.h clair_bigint.c clair_bigfloat.h clair_bigfloat.c
-          clair_bigmath.h clair_bigmath.c clair_big_numbers_rt.h clair_big_numbers_rt.c)
+          clair_bigmath.h clair_bigmath.c
+          clair_certfloat.h clair_certfloat.c
+          clair_big_numbers_rt.h clair_big_numbers_rt.c clair_certfloat_rt.c)
 set(TEXT "/* ---- Clair : grands nombres dynamiques (bigint, bigfloat) ---- */\n")
 foreach(PART ${PARTS})
     file(READ "${SRC}/src/${PART}" BODY)

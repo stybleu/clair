@@ -89,7 +89,7 @@ for name in safe zero overflow floating; do
     compile_cl "$name"
 done
 
-grep -Fq 'clair_rt_int_div_checked(a, b)' \
+grep -Fq 'clair_rt_int_div_checked(a, b, 2)' \
     "$WORK/safe.generated.c" \
     || fail "INTEGER_HELPER_NOT_USED"
 
@@ -150,9 +150,9 @@ check_error() {
 for name in zero overflow; do
 
     if [ "$name" = zero ]; then
-        message="Clair runtime error: division by zero"
+        message="Clair runtime error: division by zero (line 2)"
     else
-        message="Clair runtime error: integer division overflow"
+        message="Clair runtime error: integer division overflow (line 2)"
     fi
 
     check_error \

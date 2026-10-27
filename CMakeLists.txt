@@ -18,7 +18,8 @@ target_compile_options(clair PRIVATE -Wall -Wextra -Wpedantic)
 # so `clair` works from any folder (no src/ needed next to the program).
 set(CLAIR_BIG_PARTS
     src/clair_bigint.h src/clair_bigint.c src/clair_bigfloat.h src/clair_bigfloat.c
-    src/clair_bigmath.h src/clair_bigmath.c src/clair_big_numbers_rt.h src/clair_big_numbers_rt.c)
+    src/clair_bigmath.h src/clair_bigmath.c src/clair_big_numbers_rt.h src/clair_big_numbers_rt.c
+    src/clair_certfloat.h src/clair_certfloat.c src/clair_certfloat_rt.c)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_big_runtime.h
     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}

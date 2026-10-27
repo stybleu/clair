@@ -21,7 +21,9 @@ typedef struct ClairNumNode {
     struct ClairNumNode *next;
     uint64_t serial;
     unsigned char is_float, marked, pinned;
-    union { struct ClairDynInt i; struct ClairDynFloat f; } u;
+    size_t field_refs;
+    struct ClairNumNode **frozen_link;
+    union { struct ClairDynInt i; struct ClairDynFloat f; struct { ClairCertFloat v; } c; } u;
 } ClairNumNode;
 #define CLAIR_NUM_NODE(v) ((ClairNumNode *)((char *)(v) - offsetof(ClairNumNode, u)))
 static ClairNumNode *clair_num_nodes;      /* du plus recent au plus ancien */
@@ -29,6 +31,75 @@ static ClairNumNode *clair_num_pinned;
 static ClairNumRoot *clair_num_roots;
 static ClairNumFrameGuard *clair_num_frame;
 static uint64_t clair_num_serial;
+static ClairNumNode *clair_num_frozen;
+static ClairNumNode *clair_num_released;
+static int clair_num_released_pending;
+
+
+/* Les nombres gardent un compteur des champs les referencant.
+ * Les objets Clair vivent encore dans une arene jusqu'a la sortie. */
+static void clair_num_field_add(const void *value) {
+    if (!value) return;
+    ClairNumNode *n = CLAIR_NUM_NODE(value);
+    if (n->field_refs == (size_t)-1) {
+        fputs("Clair runtime error: field reference overflow\n", stderr);
+        abort();
+    }
+    ++n->field_refs;
+}
+
+static void clair_num_field_remove(const void *value) {
+    if (!value) return;
+    ClairNumNode *n = CLAIR_NUM_NODE(value);
+    if (n->field_refs == 0) {
+        fputs("Clair runtime error: field reference underflow\n", stderr);
+        abort();
+    }
+    --n->field_refs;
+
+    if (!n->field_refs && n->frozen_link) {
+        ClairNumNode **link = n->frozen_link;
+        *link = n->next;
+
+        if (n->next)
+            n->next->frozen_link = link;
+
+        n->frozen_link = NULL;
+        n->marked = 0;
+
+        n->next = clair_num_released;
+        clair_num_released = n;
+        clair_num_released_pending = 1;
+    }
+}
+
+static void *clair_rt_num_track_fields(
+    void *object, size_t count, const size_t *offsets
+) {
+    for (size_t i = 0; i < count; ++i) {
+        const void *value = NULL;
+        memcpy(&value,
+               (const unsigned char *)object + offsets[i],
+               sizeof(value));
+        clair_num_field_add(value);
+    }
+    return object;
+}
+
+static void clair_rt_num_assign_field(
+    void *slot, const void *value
+) {
+    const void *old = NULL;
+    memcpy(&old, slot, sizeof(old));
+
+    /* Incrementer avant de decrementer preserve x = x. */
+    clair_num_field_add(value);
+    clair_num_field_remove(old);
+
+    memcpy(slot, &value, sizeof(value));
+}
+
+
 
 void clair_rt_num_root_enter(ClairNumRoot *root, const void *slot) {
     root->previous = clair_num_roots;
@@ -45,7 +116,8 @@ void clair_rt_num_root_cleanup(ClairNumRoot *root) {
     root->slot = NULL;
 }
 static void clair_num_destroy_node(ClairNumNode *n) {
-    if (n->is_float) clair_bf_clear(&n->u.f.v);
+    if (n->is_float == 2) clair_cf_clear(&n->u.c.v);
+    else if (n->is_float == 1) clair_bf_clear(&n->u.f.v);
     else clair_big_clear(&n->u.i.v);
     free(n);
 }
@@ -55,6 +127,17 @@ static void clair_num_mark(const ClairNumFrameGuard *g, const void *value) {
     if (n->serial > g->serial && !n->pinned) n->marked = 1;
 }
 /* la zone de g : garde les nombres marques, epingle a part, libere le reste */
+static void clair_num_move_frozen(ClairNumNode *n) {
+    n->marked = 0;
+    n->next = clair_num_frozen;
+    n->frozen_link = &clair_num_frozen;
+
+    if (clair_num_frozen)
+        clair_num_frozen->frozen_link = &n->next;
+
+    clair_num_frozen = n;
+}
+
 static void clair_num_sweep(ClairNumFrameGuard *g, int with_roots) {
     if (with_roots) {
         for (ClairNumRoot *root = clair_num_roots; root && root != g->roots; root = root->previous) {
@@ -68,9 +151,51 @@ static void clair_num_sweep(ClairNumFrameGuard *g, int with_roots) {
     while (*p && (*p)->serial > g->serial) {
         ClairNumNode *n = *p;
         if (n->pinned) { *p = n->next; n->next = clair_num_pinned; clair_num_pinned = n; }
-        else if (n->marked) { n->marked = 0; p = &n->next; }
+        else if (n->field_refs) {
+            *p = n->next;
+            clair_num_move_frozen(n);
+        }
+        else if (n->marked) {
+            n->marked = 0;
+            p = &n->next;
+        }
         else { *p = n->next; clair_num_destroy_node(n); }
     }
+    /*
+     * Valeurs dont un champ s'est separe.
+     * Respecter la frontiere de l'appel courant :
+     * ne jamais liberer un temporaire appartenant a l'appelant.
+     */
+    ClairNumNode **q = &clair_num_released;
+
+    while (*q) {
+        ClairNumNode *n = *q;
+
+        if (n->field_refs) {
+            *q = n->next;
+            clair_num_move_frozen(n);
+            continue;
+        }
+
+        if (n->serial <= g->serial || n->pinned) {
+            n->marked = 0;
+            q = &n->next;
+            continue;
+        }
+
+        if (n->marked) {
+            n->marked = 0;
+            q = &n->next;
+            continue;
+        }
+
+        *q = n->next;
+        clair_num_destroy_node(n);
+    }
+
+    clair_num_released_pending =
+        clair_num_released != NULL;
+
     g->clean = clair_num_serial;
 }
 void clair_rt_num_frame_enter(ClairNumFrameGuard *guard) {
@@ -84,7 +209,10 @@ void clair_rt_num_frame_enter(ClairNumFrameGuard *guard) {
 /* sortie de l'appel (return, fin de fonction) : les racines locales sont deja parties */
 void clair_rt_num_frame_cleanup(ClairNumFrameGuard *guard) {
     if (!guard->active) return;
-    if (clair_num_frame == guard && clair_num_serial != guard->clean) clair_num_sweep(guard, 0);
+    if (clair_num_frame == guard &&
+        (clair_num_serial != guard->clean ||
+         clair_num_released_pending))
+        clair_num_sweep(guard, 0);
     clair_num_frame = guard->previous;
     guard->active = 0;
 }
@@ -92,7 +220,10 @@ void clair_rt_num_frame_cleanup(ClairNumFrameGuard *guard) {
  * dans l'appel en cours. Rien a faire si aucun nombre n'a ete cree depuis. */
 void clair_rt_num_collect(void) {
     ClairNumFrameGuard *g = clair_num_frame;
-    if (!g || clair_num_serial == g->clean) return;
+    if (!g ||
+        (clair_num_serial == g->clean &&
+         !clair_num_released_pending))
+        return;
     clair_num_sweep(g, 1);
 }
 void *clair_rt_num_keep(ClairNumFrameGuard *guard, const void *value) {
@@ -106,9 +237,14 @@ void *clair_rt_num_pin(const void *value) {
 static int clair_num_registered;
 
 static void clair_num_destroy_all(void) {
-    ClairNumNode *lists[2] = { clair_num_nodes, clair_num_pinned };
+    ClairNumNode *lists[4] = {
+        clair_num_nodes, clair_num_pinned,
+        clair_num_frozen, clair_num_released
+    };
     clair_num_nodes = clair_num_pinned = NULL;
-    for (int k = 0; k < 2; k++) {
+    clair_num_frozen = clair_num_released = NULL;
+
+    for (int k = 0; k < 4; k++) {
         while (lists[k]) {
             ClairNumNode *n = lists[k];
             lists[k] = n->next;

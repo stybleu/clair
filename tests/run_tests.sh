@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.49 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.50 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -809,7 +809,9 @@ printf '%s\n' 'big_numbers_v040.cl : OK -> entiers et flottants dynamiques'
 ./build/clair tests/grands_nombres_memoire.cl -o build/test_grands_nombres_memoire
 [ "$(./build/test_grands_nombres_memoire)" = "$(cat tests/grands_nombres_memoire.expected)" ]
 grep -Fq 'return clair_rt_num_keep(&__clair_num_frame, ' build/test_grands_nombres_memoire.generated.c
-grep -Fq -e '->solde = clair_rt_num_pin(' build/test_grands_nombres_memoire.generated.c
+grep -Fq 'clair_rt_num_track_fields(' build/test_grands_nombres_memoire.generated.c
+grep -Fq '__builtin_offsetof(ClairClass_Compte, solde)' build/test_grands_nombres_memoire.generated.c
+grep -Fq '__builtin_offsetof(ClairClass_Compte, taux)' build/test_grands_nombres_memoire.generated.c
 printf '%s\n' 'grands_nombres_memoire.cl : OK -> recursion, boucles, break, continue, masquage, alias, champs ; identique a Python'
 ./build/clair tests/grands_nombres_longue_boucle.cl -o build/test_grands_nombres_longue_boucle
 clang -std=c11 -O2 tests/memoire_max.c -o build/memoire_max

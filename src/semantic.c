@@ -279,7 +279,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
-    if (strcmp(type, "bigint") == 0 || strcmp(type, "bigfloat") == 0) return 1;
+    if (strcmp(type, "bigint") == 0 || strcmp(type, "bigfloat") == 0 || strcmp(type, "certfloat") == 0) return 1;
     if (is_big(type) || machine_bits(type) || is_ptr_type(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
@@ -1520,6 +1520,16 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         }
         return set_type(n, list) ? n->type_name : NULL;
     }
+    if (!strcmp(left, "certfloat") || !strcmp(right, "certfloat")) {
+        if (strcmp(left, "certfloat") || strcmp(right, "certfloat") ||
+            (strcmp(n->text, "+") && strcmp(n->text, "-") &&
+             strcmp(n->text, "*") && strcmp(n->text, "/"))) {
+            report("semantic error: certfloat requires two certfloat operands and + - * /\\n");
+            s->had_error = 1;
+            return NULL;
+        }
+        return set_type(n, "certfloat") ? n->type_name : NULL;
+    }
     int dynleft = strcmp(left, "bigint") == 0 || strcmp(left, "bigfloat") == 0;
     int dynright = strcmp(right, "bigint") == 0 || strcmp(right, "bigfloat") == 0;
     if (dynleft || dynright) {
@@ -1981,6 +1991,40 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 free(n->text);
                 n->text = plain;
                 from_math = 1;
+            }
+            if (n->text && (!strcmp(n->text, "certfloat") ||
+                            !strcmp(n->text, "certsqrt") ||
+                            !strcmp(n->text, "certdigits"))) {
+                const char *name = n->text;
+                size_t expected = !strcmp(name, "certsqrt") ? 1 : 2;
+
+                if (n->child_count != expected) {
+                    report("semantic error: %s() expects %zu arguments\\n",
+                           name, expected);
+                    s->had_error = 1;
+                    return NULL;
+                }
+
+                const char *first = expr_type(s, n->children[0]);
+                const char *second = expected == 2
+                    ? expr_type(s, n->children[1]) : NULL;
+
+                const char *wanted = !strcmp(name, "certfloat")
+                    ? "string" : "certfloat";
+
+                if (!first || strcmp(first, wanted) ||
+                    (expected == 2 && (!second || strcmp(second, "int")))) {
+                    report("semantic error: %s() requires (%s%s)\\n",
+                           name, wanted,
+                           expected == 2 ? ", int" : "");
+                    s->had_error = 1;
+                    return NULL;
+                }
+
+                const char *result = !strcmp(name, "certdigits")
+                    ? "string" : "certfloat";
+
+                return set_type(n, result) ? n->type_name : NULL;
             }
             if (n->text && (strcmp(n->text, "bigint") == 0 || strcmp(n->text, "bigfloat") == 0)) {
                 int flt = strcmp(n->text, "bigfloat") == 0;
