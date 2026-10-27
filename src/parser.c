@@ -5,7 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void next(Parser *p) { p->current = lexer_next(&p->lexer); }
+/* V0.49: a node made now belongs to the line of the last token read */
+static void next(Parser *p) {
+    ast_current_line = p->current.line;
+    p->current = lexer_next(&p->lexer);
+}
 
 static int expect(Parser *p, TokenKind kind, const char *what) {
     if (p->current.kind == kind) { next(p); return 1; }
@@ -1761,6 +1765,7 @@ void parser_init(Parser *p, const char *source) {
     p->had_error = 0;
     p->loop_depth = 0;
     p->hidden_count = 0;
+    p->current.line = 1;
     next(p);
 }
 

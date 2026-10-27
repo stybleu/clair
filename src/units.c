@@ -242,6 +242,9 @@ static Var *vars = NULL;
 static size_t var_count = 0, var_capacity = 0;
 static int failed = 0;
 
+static size_t unit_line = 0;             /* V0.49: the line being checked */
+static const char *unit_file = NULL;
+
 static void unit_error(const char *fmt, ...) {
     if (failed) return;                       /* the first error is enough */
     va_list ap;
@@ -251,8 +254,11 @@ static void unit_error(const char *fmt, ...) {
     va_end(ap);
     if (current_fn && current_fn->text) {
         const char *name = current_fn->text, *owner = strstr(name, "__");
-        if (owner) fprintf(stderr, " (in %.*s.%s)", (int)(owner - name), name, owner + 2);
-        else fprintf(stderr, " (in %s)", name);
+        if (owner) fprintf(stderr, " (in %.*s.%s", (int)(owner - name), name, owner + 2);
+        else fprintf(stderr, " (in %s", name);
+        if (unit_line && unit_file) fprintf(stderr, ", %s, line %zu", unit_file, unit_line);
+        else if (unit_line) fprintf(stderr, ", line %zu", unit_line);
+        fputc(')', stderr);
     }
     fputc('\n', stderr);
     failed = 1;
@@ -493,7 +499,20 @@ static Unit builtin_unit(const AstNode *e) {
     return none();
 }
 
+static Unit unit_of_at(const AstNode *e);
+
+/* V0.49: the line of e while it is checked */
 static Unit unit_of(const AstNode *e) {
+    size_t saved_line = unit_line;
+    const char *saved_file = unit_file;
+    if (e && e->line) { unit_line = e->line; unit_file = e->file; }
+    Unit u = unit_of_at(e);
+    unit_line = saved_line;
+    unit_file = saved_file;
+    return u;
+}
+
+static Unit unit_of_at(const AstNode *e) {
     if (!e || failed) return none();
     switch (e->kind) {
         case AST_FLOAT:
@@ -638,7 +657,18 @@ static void expect_unit(Unit want, Unit got, const char *what) {
 
 static void check_block(const AstNode *block);
 
+static void check_stmt_at(const AstNode *n);
+
 static void check_stmt(const AstNode *n) {
+    size_t saved_line = unit_line;
+    const char *saved_file = unit_file;
+    if (n && n->line) { unit_line = n->line; unit_file = n->file; }
+    check_stmt_at(n);
+    unit_line = saved_line;
+    unit_file = saved_file;
+}
+
+static void check_stmt_at(const AstNode *n) {
     if (!n || failed) return;
     switch (n->kind) {
         case AST_BLOCK:

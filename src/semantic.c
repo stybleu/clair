@@ -1,7 +1,31 @@
 #include "semantic.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * V0.49: every message says where: " (line 12)", or " (orbite.cl, line 12)"
+ * in a module.  The line is that of the expression or statement being checked.
+ */
+static size_t sem_line = 0;
+static const char *sem_file = NULL;
+
+static void report(const char *fmt, ...) {
+    char buf[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    size_t len = strlen(buf);
+    int end = len > 0 && buf[len - 1] == '\n';
+    if (end) buf[--len] = '\0';
+    fputs(buf, stderr);
+    if (!end) return;
+    if (sem_line && sem_file) fprintf(stderr, " (%s, line %zu)", sem_file, sem_line);
+    else if (sem_line) fprintf(stderr, " (line %zu)", sem_line);
+    fputc('\n', stderr);
+}
 
 typedef struct {
     char *name;
@@ -38,7 +62,7 @@ static int is_ptr_type(const char *type) { return ptr_element(type) != NULL; }
 /* the low-level operations are only written inside absolue { } (or an absolue def) */
 static int require_absolue(Semantic *s, const char *what) {
     if (s->absolue > 0) return 1;
-    fprintf(stderr, "semantic error: %s is only allowed inside an absolue { } block\n", what);
+    report("semantic error: %s is only allowed inside an absolue { } block\n", what);
     s->had_error = 1;
     return 0;
 }
@@ -108,7 +132,7 @@ static const char *numeric_result(const char *left, const char *right) {
 }
 
 static void mix_error(Semantic *s, const char *what, const char *left, const char *right) {
-    fprintf(stderr, "semantic error: %s cannot mix %s and %s: convert one of them first, e.g. %s(x)\n",
+    report("semantic error: %s cannot mix %s and %s: convert one of them first, e.g. %s(x)\n",
             what, left, right, machine_bits(left) >= machine_bits(right) && !machine_unsigned(left) ? left : "int");
     s->had_error = 1;
 }
@@ -224,7 +248,7 @@ static int assignable(const char *dst, const char *src) {
 }
 
 static void error_type(Semantic *s, const char *message) {
-    fprintf(stderr, "semantic error: %s\n", message);
+    report("semantic error: %s\n", message);
     s->had_error = 1;
 }
 
@@ -277,7 +301,7 @@ static int add_var(Semantic *s, const char *name, const char *type) {
         const VarSymbol *v = &s->vars[i - 1];
         if (v->depth != s->depth) break;
         if (strcmp(v->name, name) == 0) {
-            fprintf(stderr, "semantic error: variable '%s' is already declared in this scope\n", name);
+            report("semantic error: variable '%s' is already declared in this scope\n", name);
             s->had_error = 1;
             return 0;
         }
@@ -318,7 +342,7 @@ static const char *check_list_literal_as(Semantic *s, AstNode *n, const char *li
     for (size_t i = 0; i < n->child_count; i++) {
         const char *item = expr_type_expected(s, n->children[i], element_type);
         if (!item || !assignable(element_type, item)) {
-            fprintf(stderr, "semantic error: %s literal expects %s elements, got %s\n",
+            report("semantic error: %s literal expects %s elements, got %s\n",
                     list_type, element_type, item ? item : "invalid");
             s->had_error = 1;
             return NULL;
@@ -337,7 +361,7 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
 
     const char *element = expr_type(s, n->children[0]);
     if (!element || is_list_type(element) || !list_type_for_element(element)) {
-        fprintf(stderr, "semantic error: unsupported list element type %s\n",
+        report("semantic error: unsupported list element type %s\n",
                 element ? element : "invalid");
         s->had_error = 1;
         return NULL;
@@ -359,7 +383,7 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
         }
 
         if (strcmp(item, element) != 0) {
-            fprintf(stderr, "semantic error: list literal mixes incompatible element types %s and %s\n",
+            report("semantic error: list literal mixes incompatible element types %s and %s\n",
                     element, item);
             s->had_error = 1;
             return NULL;
@@ -379,7 +403,7 @@ static const char *check_dict_literal_as(Semantic *s, AstNode *n, const char *di
     for (size_t i = 0; i < n->child_count; i += 2) {
         const char *key = expr_type(s, n->children[i]);
         if (!key || strcmp(key, "string") != 0) {
-            fprintf(stderr, "semantic error: dictionary literal keys must be string, got %s\n",
+            report("semantic error: dictionary literal keys must be string, got %s\n",
                     key ? key : "invalid");
             s->had_error = 1;
             return NULL;
@@ -387,7 +411,7 @@ static const char *check_dict_literal_as(Semantic *s, AstNode *n, const char *di
 
         const char *value = expr_type_expected(s, n->children[i + 1], value_type);
         if (!value || !assignable(value_type, value)) {
-            fprintf(stderr, "semantic error: %s literal expects %s values, got %s\n",
+            report("semantic error: %s literal expects %s values, got %s\n",
                     dict_type, value_type, value ? value : "invalid");
             s->had_error = 1;
             return NULL;
@@ -410,7 +434,7 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
 
     const char *first_key = expr_type(s, n->children[0]);
     if (!first_key || strcmp(first_key, "string") != 0) {
-        fprintf(stderr, "semantic error: dictionary literal keys must be string, got %s\n",
+        report("semantic error: dictionary literal keys must be string, got %s\n",
                 first_key ? first_key : "invalid");
         s->had_error = 1;
         return NULL;
@@ -419,7 +443,7 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
     const char *value_type = expr_type(s, n->children[1]);
     if (!value_type || is_list_type(value_type) || is_dict_type(value_type) ||
         !dict_type_for_value(value_type)) {
-        fprintf(stderr, "semantic error: unsupported dictionary value type %s\n",
+        report("semantic error: unsupported dictionary value type %s\n",
                 value_type ? value_type : "invalid");
         s->had_error = 1;
         return NULL;
@@ -429,7 +453,7 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
     for (size_t i = 2; i < n->child_count; i += 2) {
         const char *key = expr_type(s, n->children[i]);
         if (!key || strcmp(key, "string") != 0) {
-            fprintf(stderr, "semantic error: dictionary literal keys must be string, got %s\n",
+            report("semantic error: dictionary literal keys must be string, got %s\n",
                     key ? key : "invalid");
             s->had_error = 1;
             return NULL;
@@ -477,14 +501,14 @@ static int check_matrix_builtin(Semantic *s, AstNode *n) {
     }
     if (strcmp(name, "rows") != 0 && strcmp(name, "cols") != 0) return 0;
     if (n->child_count != 1) {
-        fprintf(stderr, "semantic error: %s() expects 1 argument, got %zu\n", name, n->child_count);
+        report("semantic error: %s() expects 1 argument, got %zu\n", name, n->child_count);
         s->had_error = 1;
         return -1;
     }
     const char *t = expr_type(s, n->children[0]);
     if (!t) return -1;
     if (!is_matrix_type(t)) {
-        fprintf(stderr, "semantic error: %s() expects a matrix, got %s\n", name, t);
+        report("semantic error: %s() expects a matrix, got %s\n", name, t);
         s->had_error = 1;
         return -1;
     }
@@ -532,7 +556,7 @@ static int check_random_call(Semantic *s, AstNode *n) {
     while (c < count && strcmp(n->text, calls[c].name) != 0) c++;
     if (c == count) return 0;
     if (n->child_count != calls[c].args) {
-        fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", calls[c].name, calls[c].args,
+        report("semantic error: %s() expects %zu argument(s), got %zu\n", calls[c].name, calls[c].args,
                 n->child_count);
         s->had_error = 1;
         return -1;
@@ -545,7 +569,7 @@ static int check_random_call(Semantic *s, AstNode *n) {
                : strcmp(calls[c].kind, "number") == 0 ? is_numeric(t) && !is_big(t)
                : is_list_type(t);
         if (!ok) {
-            fprintf(stderr, "semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, calls[c].name,
+            report("semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, calls[c].name,
                     strcmp(calls[c].kind, "list") == 0 ? "a list" : strcmp(calls[c].kind, "int") == 0 ? "an int"
                                                                                                     : "a number", t);
             s->had_error = 1;
@@ -589,7 +613,7 @@ static int check_bignum_call(Semantic *s, AstNode *n) {
     int own = !strcmp(name, "isqrt") || !strcmp(name, "gcd") || !strcmp(name, "pi");
     if (n->child_count == 0 || n->child_count > 3) {
         if (!own) return 0;
-        fprintf(stderr, "semantic error: %s() expects %s\n", name, !strcmp(name, "gcd") ? "2 arguments" : "1 argument");
+        report("semantic error: %s() expects %s\n", name, !strcmp(name, "gcd") ? "2 arguments" : "1 argument");
         s->had_error = 1;
         return -1;
     }
@@ -605,7 +629,7 @@ static int check_bignum_call(Semantic *s, AstNode *n) {
     if (!any_dyn && !own) return 0;
     const char *result = NULL;
     size_t argc = n->child_count;
-    #define BN_FAIL(...) do { fprintf(stderr, "semantic error: " __VA_ARGS__); s->had_error = 1; return -1; } while (0)
+    #define BN_FAIL(...) do { report("semantic error: " __VA_ARGS__); s->had_error = 1; return -1; } while (0)
     if (is_unary) {
         if (argc != 1) BN_FAIL("%s() expects 1 argument, got %zu\n", name, argc);
         if (strcmp(t[0], "bigfloat") != 0)
@@ -699,7 +723,7 @@ static int check_format_call(Semantic *s, AstNode *n) {
     if (!is_str && !is_format) return 0;
     size_t want = is_str ? 1 : 2;
     if (n->child_count != want) {
-        fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", n->text, want, n->child_count);
+        report("semantic error: %s() expects %zu argument(s), got %zu\n", n->text, want, n->child_count);
         s->had_error = 1;
         return -1;
     }
@@ -709,7 +733,7 @@ static int check_format_call(Semantic *s, AstNode *n) {
     int text = strcmp(t, "string") == 0 || strcmp(t, "bool") == 0 ||
                strcmp(t, "bigint") == 0 || strcmp(t, "bigfloat") == 0;
     if (!number && !(is_str && text)) {
-        fprintf(stderr, "semantic error: %s() cannot write %s\n", n->text, t);
+        report("semantic error: %s() cannot write %s\n", n->text, t);
         s->had_error = 1;
         return -1;
     }
@@ -717,13 +741,13 @@ static int check_format_call(Semantic *s, AstNode *n) {
         const AstNode *spec = n->children[1];
         const char *why = NULL;
         if (spec->kind != AST_STRING || !spec->text) {
-            fprintf(stderr, "semantic error: argument 2 of format() must be written in the program, e.g. format(x, \".3f\")\n");
+            report("semantic error: argument 2 of format() must be written in the program, e.g. format(x, \".3f\")\n");
             s->had_error = 1;
             return -1;
         }
         if (!set_type((AstNode *)spec, "string")) return -1;
         if (!format_spec_ok(spec->text, t, &why)) {
-            fprintf(stderr, "semantic error: format(x, \"%s\"): %s\n", spec->text, why);
+            report("semantic error: format(x, \"%s\"): %s\n", spec->text, why);
             s->had_error = 1;
             return -1;
         }
@@ -755,15 +779,15 @@ static int check_text_call(Semantic *s, AstNode *n) {
     if (strcmp(name, "save_csv") == 0) min = max = 2;
     if (strcmp(name, "read_lines") == 0) min = 0;      /* read_lines(): the standard input (V0.46) */
     if (n->child_count < min || n->child_count > max) {
-        if (min == max) fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
-        else fprintf(stderr, "semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
+        if (min == max) report("semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
+        else report("semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
         s->had_error = 1;
         return -1;
     }
     const char *t0 = n->child_count ? expr_type(s, n->children[0]) : "string";
     if (!t0) return -1;
     if (strcmp(t0, "string") != 0) {
-        fprintf(stderr, "semantic error: argument 1 of %s() expects a string, got %s\n", name, t0);
+        report("semantic error: argument 1 of %s() expects a string, got %s\n", name, t0);
         s->had_error = 1;
         return -1;
     }
@@ -776,7 +800,7 @@ static int check_text_call(Semantic *s, AstNode *n) {
             else if (text && strcmp(text, "float32") == 0) result = "matrix[float32]";
             else if (text && strcmp(text, "int") == 0) result = "matrix[int]";
             else {
-                fprintf(stderr, "semantic error: argument 2 of load_csv() must be written \"float\", \"float32\" or \"int\"\n");
+                report("semantic error: argument 2 of load_csv() must be written \"float\", \"float32\" or \"int\"\n");
                 s->had_error = 1;
                 return -1;
             }
@@ -786,7 +810,7 @@ static int check_text_call(Semantic *s, AstNode *n) {
         const char *t1 = expr_type(s, n->children[1]);
         if (!t1) return -1;
         if (strcmp(t1, "matrix[float]") != 0 && strcmp(t1, "matrix[float32]") != 0 && strcmp(t1, "matrix[int]") != 0) {
-            fprintf(stderr, "semantic error: argument 2 of save_csv() expects matrix[float], matrix[float32] or "
+            report("semantic error: argument 2 of save_csv() expects matrix[float], matrix[float32] or "
                             "matrix[int], got %s\n", t1);
             s->had_error = 1;
             return -1;
@@ -797,7 +821,7 @@ static int check_text_call(Semantic *s, AstNode *n) {
             const char *t1 = expr_type(s, n->children[1]);
             if (!t1) return -1;
             if (strcmp(t1, "string") != 0) {
-                fprintf(stderr, "semantic error: argument 2 of split() expects a string, got %s\n", t1);
+                report("semantic error: argument 2 of split() expects a string, got %s\n", t1);
                 s->had_error = 1;
                 return -1;
             }
@@ -837,8 +861,8 @@ static int check_io_call(Semantic *s, AstNode *n) {
     const char *name = calls[c].name;
     size_t min = calls[c].min, max = calls[c].max;
     if (n->child_count < min || n->child_count > max) {
-        if (min == max) fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
-        else fprintf(stderr, "semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
+        if (min == max) report("semantic error: %s() expects %zu argument(s), got %zu\n", name, min, n->child_count);
+        else report("semantic error: %s() expects %zu or %zu arguments, got %zu\n", name, min, max, n->child_count);
         s->had_error = 1;
         return -1;
     }
@@ -868,7 +892,7 @@ static int check_io_call(Semantic *s, AstNode *n) {
             want = "a string";
         }
         if (want) {
-            fprintf(stderr, "semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, name, want, t);
+            report("semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, name, want, t);
             s->had_error = 1;
             return -1;
         }
@@ -936,7 +960,7 @@ static const char *check_comprehension(Semantic *s, AstNode *n) {
             const char *t = expr_type(s, iter->children[i]);
             if (!t) return NULL;
             if (!is_index_type(t)) {
-                fprintf(stderr, "semantic error: range() expects int bounds, got %s\n", t);
+                report("semantic error: range() expects int bounds, got %s\n", t);
                 s->had_error = 1;
                 return NULL;
             }
@@ -946,7 +970,7 @@ static const char *check_comprehension(Semantic *s, AstNode *n) {
         if (!t) return NULL;
         element = is_dict_type(t) ? "string" : list_element_type(t);
         if (!element) {
-            fprintf(stderr, "semantic error: [... for %s in ...] needs a list, a dictionary or range(), got %s\n", var, t);
+            report("semantic error: [... for %s in ...] needs a list, a dictionary or range(), got %s\n", var, t);
             s->had_error = 1;
             return NULL;
         }
@@ -957,14 +981,14 @@ static const char *check_comprehension(Semantic *s, AstNode *n) {
     leave_scope(s);
     if (!et || !ct) return NULL;
     if (strcmp(ct, "bool") != 0) {
-        fprintf(stderr, "semantic error: the condition of [... if ...] must be a bool, got %s\n", ct);
+        report("semantic error: the condition of [... if ...] must be a bool, got %s\n", ct);
         s->had_error = 1;
         return NULL;
     }
     char list_type[64];
     snprintf(list_type, sizeof(list_type), "list[%s]", et);
     if (!is_list_type(list_type)) {
-        fprintf(stderr, "semantic error: [... for ...] makes a list of numbers, bool or strings, got %s\n", et);
+        report("semantic error: [... for ...] makes a list of numbers, bool or strings, got %s\n", et);
         s->had_error = 1;
         return NULL;
     }
@@ -1067,7 +1091,7 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
     if (strcmp(name, "alloc") == 0) max = 2;
     if (strcmp(name, "copy") == 0 || strcmp(name, "fill") == 0) min = max = 3;
     if (n->child_count < min || n->child_count > max) {
-        fprintf(stderr, "semantic error: %s() expects %zu%s argument(s), got %zu\n", name, min, max > min ? " or 2" : "",
+        report("semantic error: %s() expects %zu%s argument(s), got %zu\n", name, min, max > min ? " or 2" : "",
                 n->child_count);
         s->had_error = 1;
         return -1;
@@ -1079,7 +1103,7 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
         const char *element = list_element_type(t0);
         if (!element && is_matrix_type(t0)) element = matrix_element_type(t0);
         if (!element || strcmp(element, "bool") == 0 || strcmp(element, "string") == 0) {
-            fprintf(stderr, "semantic error: address() expects a list or a matrix of numbers, got %s\n", t0);
+            report("semantic error: address() expects a list or a matrix of numbers, got %s\n", t0);
             s->had_error = 1;
             return -1;
         }
@@ -1096,7 +1120,7 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
             const char *t = expr_type(s, n->children[i]);
             if (!t) return -1;
             if (!is_index_type(t)) {
-                fprintf(stderr, "semantic error: argument %zu of alloc() expects an int, got %s\n", i + 1, t);
+                report("semantic error: argument %zu of alloc() expects an int, got %s\n", i + 1, t);
                 s->had_error = 1;
                 return -1;
             }
@@ -1104,7 +1128,7 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
     } else {
         if (!t0) return -1;
         if (!is_ptr_type(t0)) {
-            fprintf(stderr, "semantic error: argument 1 of %s() expects a ptr, got %s\n", name, t0);
+            report("semantic error: argument 1 of %s() expects a ptr, got %s\n", name, t0);
             s->had_error = 1;
             return -1;
         }
@@ -1113,7 +1137,7 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
             const char *t1 = expr_type(s, n->children[1]), *t2 = t1 ? expr_type(s, n->children[2]) : NULL;
             if (!t1 || !t2) return -1;
             if (strcmp(t0, t1) != 0 || !is_index_type(t2)) {
-                fprintf(stderr, "semantic error: copy() expects copy(%s, %s, int), got copy(%s, %s, %s)\n", t0, t0, t0, t1, t2);
+                report("semantic error: copy() expects copy(%s, %s, int), got copy(%s, %s, %s)\n", t0, t0, t0, t1, t2);
                 s->had_error = 1;
                 return -1;
             }
@@ -1124,7 +1148,7 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
             const char *t2 = t1 ? expr_type(s, n->children[2]) : NULL;
             if (!t1 || !t2) return -1;
             if (!assignable(element, t1) || !is_index_type(t2)) {
-                fprintf(stderr, "semantic error: fill() expects fill(%s, %s, int), got fill(%s, %s, %s)\n", t0, element, t0, t1, t2);
+                report("semantic error: fill() expects fill(%s, %s, int), got fill(%s, %s, %s)\n", t0, element, t0, t1, t2);
                 s->had_error = 1;
                 return -1;
             }
@@ -1154,7 +1178,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     /* int128(x) ... int1024(x): from int or another big integer, checked when narrowing */
     if (is_big(name)) {
         if (n->child_count != 1) {
-            fprintf(stderr, "semantic error: %s() expects 1 argument(s), got %zu\n", name, n->child_count);
+            report("semantic error: %s() expects 1 argument(s), got %zu\n", name, n->child_count);
             s->had_error = 1;
             return -1;
         }
@@ -1162,7 +1186,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
         const char *t = is_int_literal(arg) ? type_int_literal(s, arg, name) : expr_type(s, arg);
         if (!t) return -1;
         if (!int_bits(t)) {
-            fprintf(stderr, "semantic error: argument 1 of %s() expects an integer, got %s\n", name, t);
+            report("semantic error: argument 1 of %s() expects an integer, got %s\n", name, t);
             s->had_error = 1;
             return -1;
         }
@@ -1192,7 +1216,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
     if (!kind) return 0;
 
     if (n->child_count != want) {
-        fprintf(stderr, "semantic error: %s() expects %zu argument(s), got %zu\n", name, want, n->child_count);
+        report("semantic error: %s() expects %zu argument(s), got %zu\n", name, want, n->child_count);
         s->had_error = 1;
         return -1;
     }
@@ -1229,7 +1253,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
         int ok = is_numeric(args[i]) || ((kind == 5 || kind == 8) && strcmp(args[i], "bool") == 0) ||
                  ((kind == 5 || kind == 6 || kind == 7) && strcmp(args[i], "string") == 0);   /* int("42"), float("2.5") */
         if (!ok) {
-            fprintf(stderr, "semantic error: argument %zu of %s() expects int or float, got %s\n",
+            report("semantic error: argument %zu of %s() expects int or float, got %s\n",
                     i + 1, name, args[i]);
             s->had_error = 1;
             return -1;
@@ -1270,7 +1294,7 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
         if (!result) return -1;
     } else if (any_big && kind == 2) {          /* pow(x, n): exact, n an int, 0 or more */
         if (!is_big(args[0]) || strcmp(args[1], "int") != 0) {
-            fprintf(stderr, "semantic error: pow() of a big integer expects pow(big integer, int), got pow(%s, %s)\n",
+            report("semantic error: pow() of a big integer expects pow(big integer, int), got pow(%s, %s)\n",
                     args[0], args[1]);
             s->had_error = 1;
             return -1;
@@ -1314,12 +1338,12 @@ static const char *type_int_literal(Semantic *s, AstNode *n, const char *type) {
     uint64_t words[16];
     if (!bits || !clair_decimal_to_words(text, words, bits / 64, is_ubig(type))) {
         if (strcmp(type, "int") == 0) {
-            fprintf(stderr, "semantic error: integer %s is too large for int "
+            report("semantic error: integer %s is too large for int "
                             "(64 bits): use int128, int256, int512 or int1024\n", text);
         } else if (negative && is_ubig(type)) {
-            fprintf(stderr, "semantic error: %s cannot hold the negative integer %s\n", type, text);
+            report("semantic error: %s cannot hold the negative integer %s\n", type, text);
         } else {
-            fprintf(stderr, "semantic error: integer %s is too large for %s\n", text, type);
+            report("semantic error: integer %s is too large for %s\n", text, type);
         }
         s->had_error = 1;
         free(text);
@@ -1364,13 +1388,13 @@ static const char *machine_literal(Semantic *s, AstNode *n, const char *type) {
         else if (machine_unsigned(type)) ok = !neg && (bits == 64 || mag < ((uint64_t)1 << bits));
         else ok = neg ? mag <= ((uint64_t)1 << (bits - 1)) : mag < ((uint64_t)1 << (bits - 1));
         if (neg && machine_unsigned(type)) {
-            fprintf(stderr, "semantic error: %s cannot hold the negative integer %s\n", type, text);
+            report("semantic error: %s cannot hold the negative integer %s\n", type, text);
             s->had_error = 1;
             return NULL;
         }
     }
     if (!ok) {
-        fprintf(stderr, "semantic error: integer %s does not fit in %s\n", text, type);
+        report("semantic error: integer %s does not fit in %s\n", text, type);
         s->had_error = 1;
         return NULL;
     }
@@ -1412,12 +1436,12 @@ static int wrap_convert(AstNode *n, const char *type) {
  */
 static const char *big_common_type(Semantic *s, AstNode *n, const char *what, const char *left, const char *right) {
     if (is_float_type(left) || is_float_type(right)) {
-        fprintf(stderr, "semantic error: %s cannot mix %s and %s: convert with float(x)\n", what, left, right);
+        report("semantic error: %s cannot mix %s and %s: convert with float(x)\n", what, left, right);
         s->had_error = 1;
         return NULL;
     }
     if (!int_bits(left) || !int_bits(right)) {
-        fprintf(stderr, "semantic error: %s expects numbers, got %s and %s\n", what, left, right);
+        report("semantic error: %s expects numbers, got %s and %s\n", what, left, right);
         s->had_error = 1;
         return NULL;
     }
@@ -1426,7 +1450,7 @@ static const char *big_common_type(Semantic *s, AstNode *n, const char *what, co
         const char *other = is_ubig(left) ? right : left;
         if (strcmp(other, "int") != 0) {
             int bits = int_bits(type);
-            fprintf(stderr, "semantic error: %s cannot mix %s and %s: convert one of them with "
+            report("semantic error: %s cannot mix %s and %s: convert one of them with "
                             "int%d(x) or uint%d(x)\n", what, left, right, bits, bits);
             s->had_error = 1;
             return NULL;
@@ -1454,7 +1478,7 @@ static const char *big_binary_type(Semantic *s, AstNode *n, const char *left, co
         strcmp(op, "<=") == 0 || strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) {
         return set_type(n, "bool") ? n->type_name : NULL;
     }
-    fprintf(stderr, "semantic error: operator '%s' is not supported for %s\n", op, type);
+    report("semantic error: operator '%s' is not supported for %s\n", op, type);
     s->had_error = 1;
     return NULL;
 }
@@ -1489,7 +1513,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
     if (strcmp(n->text, "*") == 0 && (is_list_type(left) || is_list_type(right))) {
         const char *list = is_list_type(left) ? left : right, *count = is_list_type(left) ? right : left;
         if (!is_index_type(count)) {
-            fprintf(stderr, "semantic error: a list can only be repeated by an int (xs * n), got %s * %s\n",
+            report("semantic error: a list can only be repeated by an int (xs * n), got %s * %s\n",
                     left, right);
             s->had_error = 1;
             return NULL;
@@ -1515,7 +1539,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             if (is_index_type(other) || is_float_type(other) || !strcmp(other, "bigint")) {
                 if (!strcmp(op, "%")) arithmetic = 0;
                 if (!comparison && !arithmetic) {
-                    fprintf(stderr, "semantic error: operator '%s' is not defined for bigfloat\n", op);
+                    report("semantic error: operator '%s' is not defined for bigfloat\n", op);
                     s->had_error = 1; return NULL;
                 }
                 set_type(n, comparison ? "bool" : "bigfloat");
@@ -1523,7 +1547,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             }
         }
         if ((strcmp(left,right) && !with_int) || (!comparison && !arithmetic)) {
-            fprintf(stderr, "semantic error: unsupported or mixed big-number operands: %s %s %s\n",
+            report("semantic error: unsupported or mixed big-number operands: %s %s %s\n",
                     left,op,right);
             s->had_error=1; return NULL;
         }
@@ -1540,7 +1564,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             return set_type(n, right) ? n->type_name : NULL;
         if ((strcmp(op, "==") == 0 || strcmp(op, "!=") == 0) && strcmp(left, right) == 0)
             return set_type(n, "bool") ? n->type_name : NULL;
-        fprintf(stderr, "semantic error: operator '%s' cannot use %s and %s (a ptr moves with p + k, p - k)\n",
+        report("semantic error: operator '%s' cannot use %s and %s (a ptr moves with p + k, p - k)\n",
                 op, left, right);
         s->had_error = 1;
         return NULL;
@@ -1556,7 +1580,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             else if (is_numeric(left) && is_numeric(element) && numeric_result(left, element) &&
                      strcmp(numeric_result(left, element), element) == 0) ok = 1;   /* 2 in list[float] */
             if (!ok && !s->had_error) {
-                fprintf(stderr, "semantic error: '%s' cannot look for %s in %s: convert it first, e.g. %s(x)\n",
+                report("semantic error: '%s' cannot look for %s in %s: convert it first, e.g. %s(x)\n",
                         n->text, left, right, element);
                 s->had_error = 1;
                 return NULL;
@@ -1564,13 +1588,13 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         } else if (strcmp(right, "string") == 0 || is_dict_type(right)) {
             ok = strcmp(left, "string") == 0;
             if (!ok) {
-                fprintf(stderr, "semantic error: '%s' %s expects a string on the left, got %s\n", n->text,
+                report("semantic error: '%s' %s expects a string on the left, got %s\n", n->text,
                         is_dict_type(right) ? "with a dictionary" : "in a string", left);
                 s->had_error = 1;
                 return NULL;
             }
         } else {
-            fprintf(stderr, "semantic error: '%s' needs a list, a string or a dictionary on the right, got %s\n",
+            report("semantic error: '%s' needs a list, a string or a dictionary on the right, got %s\n",
                     n->text, right);
             s->had_error = 1;
             return NULL;
@@ -1591,7 +1615,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         char what[32];
         snprintf(what, sizeof(what), "operator '%s'", n->text);
         if (!machine_bits(left) || !machine_bits(right)) {
-            fprintf(stderr, "semantic error: %s works on integers (int, u8 ... u64, i8 ... i32), got %s and %s\n",
+            report("semantic error: %s works on integers (int, u8 ... u64, i8 ... i32), got %s and %s\n",
                     what, left, right);
             s->had_error = 1;
             return NULL;
@@ -1716,7 +1740,7 @@ static const char *binary_type(Semantic *s, AstNode *n) {
 
 static const char *check_matrix_make(Semantic *s, AstNode *n, const char *matrix_type) {
     if (n->child_count != 2) {
-        fprintf(stderr, "semantic error: matrix() expects 2 arguments (rows, cols), got %zu\n", n->child_count);
+        report("semantic error: matrix() expects 2 arguments (rows, cols), got %zu\n", n->child_count);
         s->had_error = 1;
         return NULL;
     }
@@ -1724,7 +1748,7 @@ static const char *check_matrix_make(Semantic *s, AstNode *n, const char *matrix
         const char *t = expr_type(s, n->children[i]);
         if (!t) return NULL;
         if (!is_index_type(t)) {
-            fprintf(stderr, "semantic error: matrix() %s must be int, got %s\n", i == 0 ? "rows" : "cols", t);
+            report("semantic error: matrix() %s must be int, got %s\n", i == 0 ? "rows" : "cols", t);
             s->had_error = 1;
             return NULL;
         }
@@ -1744,7 +1768,7 @@ static const char *check_slice(Semantic *s, AstNode *n) {
     const char *base = expr_type(s, n->children[0]);
     if (!base) return NULL;
     if (!is_list_type(base) && strcmp(base, "string") != 0) {
-        fprintf(stderr, "semantic error: slices [a:b] work on lists and strings, got %s\n", base);
+        report("semantic error: slices [a:b] work on lists and strings, got %s\n", base);
         s->had_error = 1;
         return NULL;
     }
@@ -1752,7 +1776,7 @@ static const char *check_slice(Semantic *s, AstNode *n) {
         const char *t = expr_type(s, n->children[i]);
         if (!t) return NULL;
         if (!is_index_type(t)) {
-            fprintf(stderr, "semantic error: slice bounds must be int, got %s\n", t);
+            report("semantic error: slice bounds must be int, got %s\n", t);
             s->had_error = 1;
             return NULL;
         }
@@ -1805,7 +1829,7 @@ static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char 
         const char *ct = lt ? expr_type(s, n->children[1 - li]) : NULL;
         if (!lt || !ct) return NULL;
         if (!is_index_type(ct)) {
-            fprintf(stderr, "semantic error: a list can only be repeated by an int (xs * n), got %s\n", ct);
+            report("semantic error: a list can only be repeated by an int (xs * n), got %s\n", ct);
             s->had_error = 1;
             return NULL;
         }
@@ -1824,7 +1848,20 @@ static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char 
     return expr_type(s, n);
 }
 
+static const char *expr_type_at(Semantic *s, AstNode *n);
+
+/* V0.49: the line of n while it is checked, the line of its parent again afterwards */
 static const char *expr_type(Semantic *s, AstNode *n) {
+    size_t saved_line = sem_line;
+    const char *saved_file = sem_file;
+    if (n && n->line) { sem_line = n->line; sem_file = n->file; }
+    const char *t = expr_type_at(s, n);
+    sem_line = saved_line;
+    sem_file = saved_file;
+    return t;
+}
+
+static const char *expr_type_at(Semantic *s, AstNode *n) {
     if (!n) return NULL;
 
     switch (n->kind) {
@@ -1853,7 +1890,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             if (base && is_ptr_type(base)) {           /* p[i]: no check at all */
                 if (!require_absolue(s, "reading p[i] through a ptr")) return NULL;
                 if (!index || !is_index_type(index)) {
-                    fprintf(stderr, "semantic error: ptr index must be int, got %s\n", index ? index : "invalid");
+                    report("semantic error: ptr index must be int, got %s\n", index ? index : "invalid");
                     s->had_error = 1;
                     return NULL;
                 }
@@ -1863,7 +1900,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             if (base && is_list_type(base)) {
                 if (!index || !is_index_type(index)) {
-                    fprintf(stderr, "semantic error: list index must be int, got %s\n",
+                    report("semantic error: list index must be int, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
                     return NULL;
@@ -1874,7 +1911,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             if (base && (is_matrix_type(base) || is_matrix_row_type(base))) {
                 if (!index || !is_index_type(index)) {
-                    fprintf(stderr, "semantic error: matrix index must be int, got %s\n",
+                    report("semantic error: matrix index must be int, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
                     return NULL;
@@ -1891,7 +1928,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             if (base && is_dict_type(base)) {
                 if (!index || strcmp(index, "string") != 0) {
-                    fprintf(stderr, "semantic error: dictionary key must be string, got %s\n",
+                    report("semantic error: dictionary key must be string, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
                     return NULL;
@@ -1900,7 +1937,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 return n->type_name;
             }
 
-            fprintf(stderr, "semantic error: indexing expects a list or dictionary, got %s\n",
+            report("semantic error: indexing expects a list or dictionary, got %s\n",
                     base ? base : "invalid");
             s->had_error = 1;
             return NULL;
@@ -1910,14 +1947,14 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             const char *base = expr_type(s, n->children[0]);
             const AstNode *cls = base ? find_class(s, base) : NULL;
             if (!cls) {
-                fprintf(stderr, "semantic error: member access expects a class object, got %s\n",
+                report("semantic error: member access expects a class object, got %s\n",
                         base ? base : "invalid");
                 s->had_error = 1;
                 return NULL;
             }
             const AstNode *field = find_field(cls, n->text);
             if (!field) {
-                fprintf(stderr, "semantic error: class '%s' has no field '%s'\n", base, n->text);
+                report("semantic error: class '%s' has no field '%s'\n", base, n->text);
                 s->had_error = 1;
                 return NULL;
             }
@@ -1927,7 +1964,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
         case AST_IDENTIFIER: {
             const char *type = find_var(s, n->text);
             if (!type) {
-                fprintf(stderr, "semantic error: undefined variable '%s'\n", n->text);
+                report("semantic error: undefined variable '%s'\n", n->text);
                 s->had_error = 1;
                 return NULL;
             }
@@ -1949,7 +1986,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 int flt = strcmp(n->text, "bigfloat") == 0;
                 size_t count = flt ? 2 : 1;
                 if (n->child_count != count) {
-                    fprintf(stderr, "semantic error: %s() expects %zu arguments\n", n->text, count);
+                    report("semantic error: %s() expects %zu arguments\n", n->text, count);
                     s->had_error = 1; return NULL;
                 }
                 const char *arg = expr_type(s, n->children[0]);
@@ -1965,14 +2002,14 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 int flt_from_number = flt && arg && (is_index_type(arg) || is_float_type(arg) ||
                                                      strcmp(arg, "bigint") == 0 || strcmp(arg, "bigfloat") == 0);
                 if (!arg || (strcmp(arg, "string") != 0 && !flt_from_number)) {
-                    fprintf(stderr, "semantic error: %s() expects a decimal string%s\n", n->text,
+                    report("semantic error: %s() expects a decimal string%s\n", n->text,
                             flt ? ", an int, a float or a bigint" : ", an int or a bigfloat");
                     s->had_error = 1; return NULL;
                 }
                 if (flt) {
                     const char *p = expr_type(s, n->children[1]);
                     if (!p || strcmp(p, "int") != 0) {
-                        fprintf(stderr, "semantic error: bigfloat() precision must be int\n");
+                        report("semantic error: bigfloat() precision must be int\n");
                         s->had_error = 1; return NULL;
                     }
                 }
@@ -1984,7 +2021,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             if (n->text && n->text[0] == '@') return n->type_name;  /* builtin already checked */
             if (n->text && strcmp(n->text, "input_int") == 0) {
                 if (n->child_count != 0) {
-                    fprintf(stderr, "semantic error: input_int() expects 0 arguments, got %zu\n", n->child_count);
+                    report("semantic error: input_int() expects 0 arguments, got %zu\n", n->child_count);
                     s->had_error = 1;
                     return NULL;
                 }
@@ -1994,7 +2031,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             if (n->text && strcmp(n->text, "len") == 0) {
                 if (n->child_count != 1) {
-                    fprintf(stderr, "semantic error: len() expects 1 argument, got %zu\n", n->child_count);
+                    report("semantic error: len() expects 1 argument, got %zu\n", n->child_count);
                     s->had_error = 1;
                     return NULL;
                 }
@@ -2004,7 +2041,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                     return NULL;
                 }
                 if (!arg || (strcmp(arg, "string") != 0 && !is_list_type(arg) && !is_dict_type(arg))) {
-                    fprintf(stderr, "semantic error: len() expects string, list or dictionary, got %s\n", arg ? arg : "invalid");
+                    report("semantic error: len() expects string, list or dictionary, got %s\n", arg ? arg : "invalid");
                     s->had_error = 1;
                     return NULL;
                 }
@@ -2015,7 +2052,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             const AstNode *cls = find_class(s, n->text);
             if (cls) {
                 if (n->child_count != cls->child_count) {
-                    fprintf(stderr, "semantic error: class '%s' constructor expects %zu argument(s), got %zu\n",
+                    report("semantic error: class '%s' constructor expects %zu argument(s), got %zu\n",
                             n->text, cls->child_count, n->child_count);
                     s->had_error = 1;
                     return NULL;
@@ -2050,29 +2087,27 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_format_call(s, n);
                 if (builtin == 1) return n->type_name;
                 if (builtin == -1) return NULL;
-                fprintf(stderr, "semantic error: undefined function or class '%s'", n->text);
                 /* V0.47: f of an imported module is written orbite.f(...) */
-                for (size_t i = 0; i < s->program->child_count; i++) {
+                const char *hint = NULL;
+                for (size_t i = 0; i < s->program->child_count && !hint; i++) {
                     const AstNode *other = s->program->children[i];
                     const char *dot = other->kind == AST_FUNCTION && other->text ? strchr(other->text, '.') : NULL;
-                    if (dot && strcmp(dot + 1, n->text) == 0) {
-                        fprintf(stderr, " (did you mean %s(...)?)", other->text);
-                        break;
-                    }
+                    if (dot && strcmp(dot + 1, n->text) == 0) hint = other->text;
                 }
-                fputc('\n', stderr);
+                if (hint) report("semantic error: undefined function or class '%s' (did you mean %s(...)?)\n", n->text, hint);
+                else report("semantic error: undefined function or class '%s'\n", n->text);
                 s->had_error = 1;
                 return NULL;
             }
             size_t param_count = fn->child_count ? fn->child_count - 1 : 0;
             const AstNode *fn_body = fn->child_count ? fn->children[fn->child_count - 1] : NULL;
             if (fn_body && fn_body->text && strcmp(fn_body->text, "absolue") == 0 && s->absolue == 0) {
-                fprintf(stderr, "semantic error: %s() is an absolue def: call it inside an absolue { } block\n", n->text);
+                report("semantic error: %s() is an absolue def: call it inside an absolue { } block\n", n->text);
                 s->had_error = 1;
                 return NULL;
             }
             if (n->child_count != param_count) {
-                fprintf(stderr, "semantic error: function '%s' expects %zu argument(s), got %zu\n",
+                report("semantic error: function '%s' expects %zu argument(s), got %zu\n",
                         n->text, param_count, n->child_count);
                 s->had_error = 1;
                 return NULL;
@@ -2081,7 +2116,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 const char *expected = fn->children[i]->type_name;
                 const char *actual = expr_type_expected(s, n->children[i], expected);
                 if (!actual || !assignable(expected, actual)) {
-                    fprintf(stderr, "semantic error: argument %zu of '%s' expects %s, got %s\n",
+                    report("semantic error: argument %zu of '%s' expects %s, got %s\n",
                             i + 1, n->text, expected ? expected : "?", actual ? actual : "invalid");
                     s->had_error = 1;
                     return NULL;
@@ -2104,7 +2139,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                     error_type(s, "append() needs a list variable or field (v.append(x), obj.items.append(x))");
                     return NULL;
                 }
-                fprintf(stderr, "semantic error: method call '%s' expects a class object, got %s\n",
+                report("semantic error: method call '%s' expects a class object, got %s\n",
                         n->text, receiver ? receiver : "invalid");
                 s->had_error = 1;
                 return NULL;
@@ -2118,10 +2153,10 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             const AstNode *fn = find_function(s, mangled);
             if (!fn) {
                 if (find_field(cls, n->text)) {
-                    fprintf(stderr, "semantic error: '%s.%s' is a field, not a method\n",
+                    report("semantic error: '%s.%s' is a field, not a method\n",
                             cls->text, n->text);
                 } else {
-                    fprintf(stderr, "semantic error: class '%s' has no method '%s'\n",
+                    report("semantic error: class '%s' has no method '%s'\n",
                             cls->text, n->text);
                 }
                 s->had_error = 1;
@@ -2131,7 +2166,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
 
             size_t param_count = fn->child_count ? fn->child_count - 1 : 0; /* includes self */
             if (n->child_count != param_count) {
-                fprintf(stderr, "semantic error: method '%s.%s' expects %zu argument(s), got %zu\n",
+                report("semantic error: method '%s.%s' expects %zu argument(s), got %zu\n",
                         cls->text, n->text, param_count - 1, n->child_count - 1);
                 s->had_error = 1;
                 free(mangled);
@@ -2141,7 +2176,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
                 const char *expected = fn->children[i]->type_name;
                 const char *actual = expr_type_expected(s, n->children[i], expected);
                 if (!actual || !assignable(expected, actual)) {
-                    fprintf(stderr, "semantic error: argument %zu of '%s.%s' expects %s, got %s\n",
+                    report("semantic error: argument %zu of '%s.%s' expects %s, got %s\n",
                             i, cls->text, n->text, expected ? expected : "?",
                             actual ? actual : "invalid");
                     s->had_error = 1;
@@ -2171,7 +2206,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
             }
             if (strcmp(n->text, "-") == 0) {
                 if (is_ubig(operand)) {
-                    fprintf(stderr, "semantic error: unary '-' is not allowed on %s (never negative): "
+                    report("semantic error: unary '-' is not allowed on %s (never negative): "
                                     "convert with int%d(x)\n", operand, 2 * big_bits(operand) > 1024 ? 1024 : 2 * big_bits(operand));
                     s->had_error = 1;
                     return NULL;
@@ -2225,13 +2260,25 @@ static const char *write_target_type(Semantic *s, AstNode *n, size_t plain_child
     }
     const char *base = find_var(s, n->text);
     if (!base) {
-        fprintf(stderr, "semantic error: %s undefined variable '%s'\n", what, n->text);
+        report("semantic error: %s undefined variable '%s'\n", what, n->text);
         s->had_error = 1;
     }
     return base;
 }
 
+static int check_stmt_at(Semantic *s, AstNode *n);
+
 static int check_stmt(Semantic *s, AstNode *n) {
+    size_t saved_line = sem_line;
+    const char *saved_file = sem_file;
+    if (n && n->line) { sem_line = n->line; sem_file = n->file; }
+    int ok = check_stmt_at(s, n);
+    sem_line = saved_line;
+    sem_file = saved_file;
+    return ok;
+}
+
+static int check_stmt_at(Semantic *s, AstNode *n) {
     switch (n->kind) {
         case AST_LET: {
             if (is_ptr_type(n->type_name) && !require_absolue(s, "a ptr variable")) return 0;
@@ -2242,7 +2289,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
                     error_type(s, "m[i] alone is a matrix row: write m[i][j]");
                     return 0;
                 }
-                fprintf(stderr, "semantic error: cannot initialize %s '%s' with %s\n",
+                report("semantic error: cannot initialize %s '%s' with %s\n",
                         n->type_name, n->text, actual);
                 s->had_error = 1;
                 return 0;
@@ -2252,20 +2299,20 @@ static int check_stmt(Semantic *s, AstNode *n) {
         case AST_ASSIGN: {
             const char *expected = find_var(s, n->text);
             if (!expected) {
-                fprintf(stderr, "semantic error: assignment to undefined variable '%s'\n", n->text);
+                report("semantic error: assignment to undefined variable '%s'\n", n->text);
                 s->had_error = 1;
                 return 0;
             }
             if (is_ptr_type(expected) && !require_absolue(s, "changing a ptr variable")) return 0;
             if (s->absolue > 0 && block_takes_address(s->absolue_block, n->text)) {
-                fprintf(stderr, "semantic error: %s = ... in this absolue block would free the data that "
+                report("semantic error: %s = ... in this absolue block would free the data that "
                                 "address(%s) points to\n", n->text, n->text);
                 s->had_error = 1;
                 return 0;
             }
             const char *actual = expr_type_expected(s, n->children[0], expected);
             if (!actual || !assignable(expected, actual)) {
-                fprintf(stderr, "semantic error: cannot assign %s to %s variable '%s'\n",
+                report("semantic error: cannot assign %s to %s variable '%s'\n",
                         actual ? actual : "invalid", expected, n->text);
                 s->had_error = 1;
                 return 0;
@@ -2277,20 +2324,20 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *base = expr_type(s, n->children[0]);
             const AstNode *cls = base ? find_class(s, base) : NULL;
             if (!cls) {
-                fprintf(stderr, "semantic error: member assignment expects a class object, got %s\n",
+                report("semantic error: member assignment expects a class object, got %s\n",
                         base ? base : "invalid");
                 s->had_error = 1;
                 return 0;
             }
             const AstNode *field = find_field(cls, n->text);
             if (!field) {
-                fprintf(stderr, "semantic error: class '%s' has no field '%s'\n", base, n->text);
+                report("semantic error: class '%s' has no field '%s'\n", base, n->text);
                 s->had_error = 1;
                 return 0;
             }
             const char *actual = expr_type_expected(s, n->children[1], field->type_name);
             if (!actual || !assignable(field->type_name, actual)) {
-                fprintf(stderr, "semantic error: field '%s.%s' expects %s, got %s\n",
+                report("semantic error: field '%s.%s' expects %s, got %s\n",
                         base, n->text, field->type_name,
                         actual ? actual : "invalid");
                 s->had_error = 1;
@@ -2308,14 +2355,14 @@ static int check_stmt(Semantic *s, AstNode *n) {
             if (is_ptr_type(base)) {
                 if (!require_absolue(s, "writing p[i] through a ptr")) return 0;
                 if (!index || !is_index_type(index)) {
-                    fprintf(stderr, "semantic error: ptr index must be int, got %s\n", index ? index : "invalid");
+                    report("semantic error: ptr index must be int, got %s\n", index ? index : "invalid");
                     s->had_error = 1;
                     return 0;
                 }
                 const char *element = ptr_element(base);
                 const char *value = expr_type_expected(s, n->children[1], element);
                 if (!value || !assignable(element, value)) {
-                    fprintf(stderr, "semantic error: %s item assignment expects %s, got %s\n", base, element,
+                    report("semantic error: %s item assignment expects %s, got %s\n", base, element,
                             value ? value : "invalid");
                     s->had_error = 1;
                     return 0;
@@ -2326,7 +2373,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
 
             if (is_list_type(base)) {
                 if (!index || !is_index_type(index)) {
-                    fprintf(stderr, "semantic error: list index must be int, got %s\n",
+                    report("semantic error: list index must be int, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
                     return 0;
@@ -2334,7 +2381,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 const char *element = list_element_type(base);
                 const char *value = expr_type_expected(s, n->children[1], element);
                 if (!value || !assignable(element, value)) {
-                    fprintf(stderr, "semantic error: %s item assignment expects %s, got %s\n",
+                    report("semantic error: %s item assignment expects %s, got %s\n",
                             base, element, value ? value : "invalid");
                     s->had_error = 1;
                     return 0;
@@ -2345,7 +2392,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
 
             if (is_dict_type(base)) {
                 if (!index || strcmp(index, "string") != 0) {
-                    fprintf(stderr, "semantic error: dictionary key must be string, got %s\n",
+                    report("semantic error: dictionary key must be string, got %s\n",
                             index ? index : "invalid");
                     s->had_error = 1;
                     return 0;
@@ -2353,7 +2400,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 const char *value_type = dict_value_type(base);
                 const char *value = expr_type_expected(s, n->children[1], value_type);
                 if (!value || !assignable(value_type, value)) {
-                    fprintf(stderr, "semantic error: %s item assignment expects %s, got %s\n",
+                    report("semantic error: %s item assignment expects %s, got %s\n",
                             base, value_type, value ? value : "invalid");
                     s->had_error = 1;
                     return 0;
@@ -2362,7 +2409,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
                 return 1;
             }
 
-            fprintf(stderr, "semantic error: indexed assignment expects a list or dictionary, got %s\n", base);
+            report("semantic error: indexed assignment expects a list or dictionary, got %s\n", base);
             s->had_error = 1;
             return 0;
         }
@@ -2371,7 +2418,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *base = write_target_type(s, n, 3, "assignment to");
             if (!base) return 0;
             if (!is_matrix_type(base)) {
-                fprintf(stderr, "semantic error: '%s[i][j] = ...' needs a matrix, got %s\n",
+                report("semantic error: '%s[i][j] = ...' needs a matrix, got %s\n",
                         n->text ? n->text : "field", base);
                 s->had_error = 1;
                 return 0;
@@ -2379,7 +2426,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             for (size_t i = 0; i < 2; i++) {
                 const char *idx = expr_type(s, n->children[i]);
                 if (!idx || !is_index_type(idx)) {
-                    fprintf(stderr, "semantic error: matrix index must be int, got %s\n", idx ? idx : "invalid");
+                    report("semantic error: matrix index must be int, got %s\n", idx ? idx : "invalid");
                     s->had_error = 1;
                     return 0;
                 }
@@ -2387,7 +2434,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *element = matrix_element_type(base);
             const char *value = expr_type_expected(s, n->children[2], element);
             if (!value || !assignable(element, value)) {
-                fprintf(stderr, "semantic error: %s element assignment expects %s, got %s\n",
+                report("semantic error: %s element assignment expects %s, got %s\n",
                         base, element, value ? value : "invalid");
                 s->had_error = 1;
                 return 0;
@@ -2399,20 +2446,20 @@ static int check_stmt(Semantic *s, AstNode *n) {
             const char *base = write_target_type(s, n, 1, "append on");
             if (!base) return 0;
             if (s->absolue > 0 && n->text && block_takes_address(s->absolue_block, n->text)) {
-                fprintf(stderr, "semantic error: %s.append() in this absolue block could move the data that "
+                report("semantic error: %s.append() in this absolue block could move the data that "
                                 "address(%s) points to\n", n->text, n->text);
                 s->had_error = 1;
                 return 0;
             }
             if (!is_list_type(base)) {
-                fprintf(stderr, "semantic error: append() expects a list, got %s\n", base);
+                report("semantic error: append() expects a list, got %s\n", base);
                 s->had_error = 1;
                 return 0;
             }
             const char *element = list_element_type(base);
             const char *value = expr_type_expected(s, n->children[0], element);
             if (!value || !assignable(element, value)) {
-                fprintf(stderr, "semantic error: %s.append() expects %s, got %s\n",
+                report("semantic error: %s.append() expects %s, got %s\n",
                         base, element, value ? value : "invalid");
                 s->had_error = 1;
                 return 0;
@@ -2423,7 +2470,7 @@ static int check_stmt(Semantic *s, AstNode *n) {
         case AST_RETURN: {
             const char *actual = expr_type_expected(s, n->children[0], s->return_type);
             if (!actual || !assignable(s->return_type, actual)) {
-                fprintf(stderr, "semantic error: return expects %s, got %s\n",
+                report("semantic error: return expects %s, got %s\n",
                         s->return_type ? s->return_type : "?", actual ? actual : "invalid");
                 s->had_error = 1;
                 return 0;
@@ -2528,6 +2575,8 @@ static int check_block(Semantic *s, AstNode *block, int create_scope) {
 }
 
 static int check_class_decl(Semantic *s, AstNode *cls) {
+    sem_line = cls->line;          /* V0.49 */
+    sem_file = cls->file;
     if (!cls || cls->kind != AST_CLASS || !cls->text) return 0;
 
     for (size_t i = 0; i < cls->child_count; i++) {
@@ -2535,13 +2584,13 @@ static int check_class_decl(Semantic *s, AstNode *cls) {
         if (!field || field->kind != AST_FIELD || !field->text || !field->type_name) return 0;
 
         if (!is_known_type(s, field->type_name)) {
-            fprintf(stderr, "semantic error: unknown type '%s' for field '%s.%s'\n",
+            report("semantic error: unknown type '%s' for field '%s.%s'\n",
                     field->type_name, cls->text, field->text);
             s->had_error = 1;
             return 0;
         }
         if (is_ptr_type(field->type_name)) {
-            fprintf(stderr, "semantic error: field '%s.%s' cannot be a ptr: a ptr only lives inside absolue code\n",
+            report("semantic error: field '%s.%s' cannot be a ptr: a ptr only lives inside absolue code\n",
                     cls->text, field->text);
             s->had_error = 1;
             return 0;
@@ -2549,7 +2598,7 @@ static int check_class_decl(Semantic *s, AstNode *cls) {
 
         for (size_t j = 0; j < i; j++) {
             if (strcmp(field->text, cls->children[j]->text) == 0) {
-                fprintf(stderr, "semantic error: duplicate field '%s.%s'\n", cls->text, field->text);
+                report("semantic error: duplicate field '%s.%s'\n", cls->text, field->text);
                 s->had_error = 1;
                 return 0;
             }
@@ -2559,9 +2608,11 @@ static int check_class_decl(Semantic *s, AstNode *cls) {
 }
 
 static int check_function_signature(Semantic *s, AstNode *fn) {
+    sem_line = fn->line;          /* V0.49 */
+    sem_file = fn->file;
     if (!fn || fn->kind != AST_FUNCTION || !fn->type_name) return 0;
     if (!is_known_type(s, fn->type_name)) {
-        fprintf(stderr, "semantic error: unknown return type '%s' for function '%s'\n",
+        report("semantic error: unknown return type '%s' for function '%s'\n",
                 fn->type_name, fn->text);
         s->had_error = 1;
         return 0;
@@ -2571,7 +2622,7 @@ static int check_function_signature(Semantic *s, AstNode *fn) {
     for (size_t i = 0; i < param_count; i++) {
         AstNode *param = fn->children[i];
         if (!param->type_name || !is_known_type(s, param->type_name)) {
-            fprintf(stderr, "semantic error: unknown type '%s' for parameter '%s' of '%s'\n",
+            report("semantic error: unknown type '%s' for parameter '%s' of '%s'\n",
                     param->type_name ? param->type_name : "?", param->text, fn->text);
             s->had_error = 1;
             return 0;
@@ -2581,6 +2632,8 @@ static int check_function_signature(Semantic *s, AstNode *fn) {
 }
 
 static int check_function(Semantic *s, AstNode *fn) {
+    sem_line = fn->line;          /* V0.49 */
+    sem_file = fn->file;
     s->return_type = fn->type_name;
     enter_scope(s);
 
@@ -2590,7 +2643,7 @@ static int check_function(Semantic *s, AstNode *fn) {
     int takes_ptr = is_ptr_type(fn->type_name);
     for (size_t i = 0; i < param_count; i++) takes_ptr |= is_ptr_type(fn->children[i]->type_name);
     if (takes_ptr && !absolue) {
-        fprintf(stderr, "semantic error: %s() takes or returns a ptr: write absolue def %s(...)\n", fn->text, fn->text);
+        report("semantic error: %s() takes or returns a ptr: write absolue def %s(...)\n", fn->text, fn->text);
         s->had_error = 1;
         leave_scope(s);
         s->return_type = NULL;
@@ -2617,6 +2670,8 @@ int semantic_check(AstNode *program) {
 
     Semantic s = {0};
     s.program = program;
+    sem_line = 0;
+    sem_file = NULL;
 
     /* Classes and functions share one top-level namespace because ClassName(...)
        is constructor syntax, just like a call. */
@@ -2629,7 +2684,9 @@ int semantic_check(AstNode *program) {
         for (size_t j = 0; j < i; j++) {
             AstNode *prev = program->children[j];
             if (prev->text && strcmp(decl->text, prev->text) == 0) {
-                fprintf(stderr, "semantic error: duplicate top-level name '%s'\n", decl->text);
+                sem_line = decl->line;
+                sem_file = decl->file;
+                report("semantic error: duplicate top-level name '%s'\n", decl->text);
                 s.had_error = 1;
                 goto done;
             }

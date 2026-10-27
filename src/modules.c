@@ -143,12 +143,29 @@ static char *join(const char *a, const char *sep, const char *b) {
     return d;
 }
 
+static size_t error_line = 0;            /* V0.49: the line of what is being resolved */
+
 static void import_error(const char *where, const char *fmt, const char *a, const char *b) {
     fputs("import error: ", stderr);
     fprintf(stderr, fmt, a, b);
-    if (where) fprintf(stderr, " (in %s)", where);
+    if (where && error_line) fprintf(stderr, " (in %s, line %zu)", where, error_line);
+    else if (where) fprintf(stderr, " (in %s)", where);
     fputc('\n', stderr);
     failed = 1;
+}
+
+/* V0.49: the names of the module files, kept for the lines of the error messages */
+static char *file_names[64];
+static size_t file_name_count = 0;
+
+static const char *keep_file_name(const char *name) {
+    for (size_t i = 0; i < file_name_count; i++) if (strcmp(file_names[i], name) == 0) return file_names[i];
+    if (file_name_count >= 64) return NULL;
+    char *d = malloc(strlen(name) + 1);
+    if (!d) return NULL;
+    strcpy(d, name);
+    file_names[file_name_count++] = d;
+    return d;
 }
 
 static char *read_source(const char *path) {
@@ -237,8 +254,13 @@ static Module *load_module(const char *name, const char *from) {
         return NULL;
     }
     Parser parser;
+    char file_name[256];
+    snprintf(file_name, sizeof(file_name), "%s.cl", name);
+    ast_current_file = keep_file_name(file_name);       /* V0.49: its nodes know their file */
     parser_init(&parser, source);
     AstNode *program = parser_parse_program(&parser);
+    ast_current_file = NULL;
+    ast_current_line = 0;
     free(source);
     if (!program || parser.had_error) {
         fprintf(stderr, "import error: the error above is in %s\n", path);
@@ -365,7 +387,18 @@ static int member_ok(Scope *s, const char *module, const char *member, int call)
     return 1;
 }
 
+static void rewrite_at(Scope *s, AstNode *n);
+
+/* V0.49: an error inside n gives its line */
 static void rewrite(Scope *s, AstNode *n) {
+    if (!n || failed) return;
+    size_t saved = error_line;
+    if (n->line) error_line = n->line;
+    rewrite_at(s, n);
+    error_line = saved;
+}
+
+static void rewrite_at(Scope *s, AstNode *n) {
     if (!n || failed) return;
     const AstNode *fn = s->fn;
     switch (n->kind) {
@@ -438,6 +471,7 @@ static int add_import(Scope *s, const AstNode *imp) {
         return 0;
     }
     if (!builtin && !load_module(module, s->file)) return 0;
+    error_line = imp->line;            /* the module read may have had its own imports */
     module = builtin ? module : find_module(module)->name;     /* lives as long as the module table */
     if (imp->type_name && strcmp(imp->type_name, "from") == 0) {
         for (size_t i = 0; i < imp->child_count; i++) {
@@ -488,7 +522,11 @@ static int process_file(AstNode *program, const char *module, const char *file) 
     }
     int ok = 1;
     for (size_t i = 0; i < program->child_count && ok; i++) {
-        if (program->children[i]->kind == AST_IMPORT) ok = add_import(s, program->children[i]);
+        if (program->children[i]->kind == AST_IMPORT) {
+            error_line = program->children[i]->line;
+            ok = add_import(s, program->children[i]);
+            error_line = 0;
+        }
     }
     /* every function and method of the file (not a module's own main) sees through the imports */
     for (size_t i = 0; ok && !failed && i < program->child_count; i++) {

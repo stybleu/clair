@@ -104,8 +104,10 @@ int main(int argc, char **argv) {
     }
 
     Parser parser;
+    ast_current_file = NULL;
     parser_init(&parser, source);
     AstNode *program = parser_parse_program(&parser);
+    ast_current_line = 0;                 /* V0.49: nodes made by the compiler have no line */
     if (!program || parser.had_error) {
         ast_free(program);
         free(source);

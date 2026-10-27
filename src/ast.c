@@ -3,10 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+size_t ast_current_line = 0;
+const char *ast_current_file = NULL;
+
 AstNode *ast_new(AstKind kind, const char *text, size_t text_len) {
     AstNode *n = calloc(1, sizeof(*n));
     if (!n) return NULL;
     n->kind = kind;
+    n->line = ast_current_line;
+    n->file = ast_current_file;
     if (text) {
         n->text = malloc(text_len + 1);
         if (!n->text) { free(n); return NULL; }
@@ -46,6 +51,8 @@ AstNode *ast_clone(const AstNode *node) {
     if (!node) return NULL;
     AstNode *copy = ast_new(node->kind, node->text, node->text ? strlen(node->text) : 0);
     if (!copy) return NULL;
+    copy->line = node->line;
+    copy->file = node->file;
     if (node->type_name && !ast_set_type(copy, node->type_name, strlen(node->type_name))) {
         ast_free(copy);
         return NULL;

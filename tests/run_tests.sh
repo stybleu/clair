@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.48 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.49 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -924,7 +924,7 @@ printf '%s\n' 'importe.cl : OK -> import math as m, phys, astro, modules qui s i
 printf '%s\n' 'orbite.cl : OK -> un module lance seul garde son main'
 mkdir -p build/modules
 expect_compile_error modules/sans_module "import error: no module named 'absent' (no file tests/modules/absent.cl)"
-expect_compile_error modules/math_inconnu "import error: module 'math' has no 'sqr'"
+expect_compile_error modules/math_inconnu "import error: module 'math' has no 'sqr' (in main() of math_inconnu.cl, line 3)"
 expect_compile_error modules/constante_appelee 'import error: phys.G is a constant, not a function'
 expect_compile_error modules/fonction_sans_prefixe "undefined function or class 'periode' (did you mean orbite.periode(...)?)"
 expect_compile_error modules/nom_absent "import error: cannot import 'vitesse' from 'orbite'"
@@ -935,14 +935,20 @@ expect_compile_error modules/constante_changee 'import error: phys.c: the values
 [ "$(./build/test_unites)" = "$(cat tests/unites.expected)" ]
 grep -Fq 'double dv1 = ' build/test_unites.generated.c
 printf '%s\n' 'unites.cl : OK -> transfert de Hohmann Terre-Mars, km convertis, N, J, W, deg, listes ; identique a Python'
-expect_compile_error invalid_unite_addition 'unit error: cannot add m and s (in main)'
-expect_compile_error invalid_unite_nombre 'unit error: 1.5 has no unit next to m: write 1.5[m] (in main)'
-expect_compile_error invalid_unite_sinus 'unit error: sin() needs a number without unit, it receives m (in main)'
-expect_compile_error invalid_unite_argument 'unit error: argument 1 of aire (r) is in m, it receives s (in main)'
-expect_compile_error invalid_unite_km 'unit error: cannot add km and m (in main)'
-expect_compile_error invalid_unite_retour 'unit error: the value returned is in m/s, it receives m*s (in vitesse)'
-expect_compile_error invalid_unite_constante 'unit error: x is in m, it receives m^3/(kg*s^2) (in main)'
+expect_compile_error invalid_unite_addition 'unit error: cannot add m and s (in main, line 4)'
+expect_compile_error invalid_unite_nombre 'unit error: 1.5 has no unit next to m: write 1.5[m] (in main, line 3)'
+expect_compile_error invalid_unite_sinus 'unit error: sin() needs a number without unit, it receives m (in main, line 4)'
+expect_compile_error invalid_unite_argument 'unit error: argument 1 of aire (r) is in m, it receives s (in main, line 6)'
+expect_compile_error invalid_unite_km 'unit error: cannot add km and m (in main, line 4)'
+expect_compile_error invalid_unite_retour 'unit error: the value returned is in m/s, it receives m*s (in vitesse, line 2)'
+expect_compile_error invalid_unite_constante 'unit error: x is in m, it receives m^3/(kg*s^2) (in main, line 3)'
 expect_compile_error invalid_unite_ecrite 'parse error at 2:17: empty unit'
+
+# V0.49 : chaque erreur dit sa ligne, et son fichier dans un module
+expect_compile_error ligne_erreur "semantic error: undefined variable 'y' (line 5)"
+expect_compile_error modules/erreur_module "semantic error: undefined variable 'z' (outil_casse.cl, line 5)"
+expect_compile_error modules/unite_module 'unit error: cannot add s and m (in orbite_unites.periode, orbite_unites.cl, line 9)'
+expect_compile_error modules/nom_absent "import error: cannot import 'vitesse' from 'orbite' (in nom_absent.cl, line 1)"
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='
