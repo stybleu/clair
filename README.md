@@ -24,6 +24,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Listes et dictionnaires typés
 - Matrices `matrix[float]`, `matrix[int]`, `matrix[u8]`... : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
+- Boucles sans fuite : les textes et les objets fabriqués pendant un tour de boucle sont rendus à la fin du tour quand rien ne les garde (lire un gros fichier ligne par ligne, compter des mots) ; les dictionnaires copient leurs clés
 - Fonctions sans fuite : une liste faite par une fonction et utilisée tout de suite (`somme(paire(i))`, `paire(i)[1]`, `for v in carres(n)`, `x in voisins(k)`) est rendue à la mémoire dès la fin de l'instruction
 - Classes rapides : une classe dont les champs ne changent jamais devient une structure du C, copiée comme un nombre ; un objet qui ne sort pas de sa fonction est rangé sur la pile ; aucune mémoire prise dans les boucles
 - Écriture directe dans les champs : `self.w[i][j] = x`, `self.items.append(x)`
@@ -101,6 +102,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.54](docs/README_V0.54.md) : une boucle ne garde plus ses textes : la mémoire d'un tour est rendue à la fin du tour ; les dictionnaires copient leurs clés
 - [Clair V0.53](docs/README_V0.53.md) : mesures avec incertitude (`9.81 ± 0.02`, `measure[m]`), propagée dans tout le calcul ; les constantes de `phys` avec leur incertitude CODATA 2022
 - [Clair V0.52](docs/README_V0.52.md) : les listes faites par les fonctions et utilisées tout de suite sont rendues à la mémoire : une boucle ne grandit plus
 - [Clair V0.51](docs/README_V0.51.md) : classes valeur (structures du C) et objets sur la pile : aussi rapide que le C, plus de mémoire prise dans les boucles

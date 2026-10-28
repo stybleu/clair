@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.53 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.54 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -1007,6 +1007,24 @@ expect_compile_error invalid_mesure_unite 'unit error: the value is in m, its un
 expect_compile_error invalid_mesure_float "semantic error: cannot initialize float 'w' with measure: value(m) gives its value (line 3)"
 expect_compile_error invalid_mesure_fonction 'semantic error: min() is not defined for a measure: use value(m) to work on its value (line 3)'
 expect_runtime_error mesure_negative_runtime '1.00 ± 0.10' 'Clair runtime error: the uncertainty after ± must be a number, 0 or more, got -0.1 (line 5)'
+
+# V0.54 : les textes et les objets d'un tour de boucle sont rendus a la fin du tour
+./build/clair tests/textes_boucles.cl -o build/test_textes_boucles
+[ "$(./build/test_textes_boucles)" = "$(cat tests/textes_boucles.expected)" ]
+G=build/test_textes_boucles.generated.c
+[ "$(grep -c 'ClairArenaMark clair_mark_' $G)" = 5 ]
+[ "$(grep -A1 'for (int64_t i = 0; i < 4; i++) {' $G | grep -c clair_mark)" = 0 ]
+grep -Fq 'clair_rt_arena_reset(clair_mark_2);' $G
+printf '%s\n' 'textes_boucles.cl : OK -> gardes (variable, liste, dictionnaire, champ, fonction), rendus, while, break, continue, return ; identique a Python'
+./build/clair tests/textes_memoire.cl -o build/test_textes_memoire
+out_tm="$(./build/memoire_max ./build/test_textes_memoire 2> build/textes_memoire.kio)"
+[ "$out_tm" = "$(cat tests/textes_memoire.expected)" ]
+kio_tm="$(cat build/textes_memoire.kio)"
+if [ "$kio_tm" -gt 30000 ]; then
+    printf '%s\n' "textes_memoire.cl : ECHEC -> $kio_tm Kio de memoire (moins de 30000 attendus)" >&2
+    exit 1
+fi
+printf '%s\n' "textes_memoire.cl : OK -> un million de tours avec textes, objets et mots comptes, $kio_tm Kio au plus"
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

@@ -3602,6 +3602,171 @@ static void compute_stack_objects(const AstNode *program) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* V0.54: the memory of a loop iteration given back at its end.        */
+/*                                                                    */
+/*   for ligne in read_lines(f) {                                      */
+/*       let mots: list[string] = split(ligne, " ")                    */
+/*       let nom: string = mots[0] + " " + str(len(mots))               */
+/*       ...                                                           */
+/*   }                                                                 */
+/*                                                                    */
+/* Texts and objects live in the arena (a bump allocator).  When      */
+/* nothing made during an iteration can be kept after it (stored in a */
+/* variable, list, dictionary value or field from outside the loop,   */
+/* or by a function that keeps what it receives), the arena goes back */
+/* to where it was at the start of the iteration: a loop no longer    */
+/* grows.  A dictionary copies its keys (V0.54), so d[mot] += 1 keeps */
+/* nothing from the iteration.                                        */
+/* ------------------------------------------------------------------ */
+
+static const AstNode *region_fn = NULL;          /* the function being written */
+static unsigned char *region_flags = NULL;       /* per program child: 1 keeps, 2 makes arena memory */
+static size_t region_flag_count = 0;
+
+/* can a value of this type hold memory of the arena (a text, an object)? */
+static int arena_type(const char *t, int depth) {
+    if (!t) return 0;
+    if (depth > 16) return 1;
+    if (!strcmp(t, "string") || !strcmp(t, "list[string]") || !strcmp(t, "dict[string,string]")) return 1;
+    const AstNode *cls = codegen_program ? class_named(codegen_program, t) : NULL;
+    if (!cls) return 0;
+    if (!is_value_class(t)) return 1;                 /* an object: itself in the arena */
+    for (size_t i = 0; i < cls->child_count; i++)
+        if (cls->children[i]->kind == AST_FIELD && arena_type(cls->children[i]->type_name, depth + 1)) return 1;
+    return 0;
+}
+
+static size_t region_index(const char *name) {
+    for (size_t i = 0; codegen_program && i < codegen_program->child_count; i++) {
+        const AstNode *fn = codegen_program->children[i];
+        if (fn->kind == AST_FUNCTION && fn->text && strcmp(fn->text, name) == 0) return i;
+    }
+    return (size_t)-1;
+}
+
+/* the declaration of `name` in fn (a let or a parameter) */
+static const AstNode *region_decl(const AstNode *n, const char *name) {
+    if (!n) return NULL;
+    if ((n->kind == AST_LET || n->kind == AST_PARAM) && n->text && strcmp(n->text, name) == 0) return n;
+    for (size_t i = 0; i < n->child_count; i++) {
+        const AstNode *d = region_decl(n->children[i], name);
+        if (d) return d;
+    }
+    return NULL;
+}
+
+/* every declaration of `name` in fn is inside scope */
+static int declared_inside(const AstNode *fn, const AstNode *scope, const char *name) {
+    int inside = count_declarations(scope, name);
+    return inside > 0 && inside == count_declarations(fn, name);
+}
+
+/* name = value with a value that is not a new list, somewhere in n */
+static int assigned_old(const AstNode *n, const char *name) {
+    if (!n) return 0;
+    if (n->kind == AST_ASSIGN && n->text && strcmp(n->text, name) == 0 && n->child_count &&
+        !fresh_expr(n->children[0])) return 1;
+    for (size_t i = 0; i < n->child_count; i++) if (assigned_old(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* a list made inside scope (a new list), that no other name shares */
+static int local_new_list(const AstNode *fn, const AstNode *scope, const char *name) {
+    if (!declared_inside(fn, scope, name)) return 0;
+    const AstNode *d = region_decl(scope, name);
+    return d && d->kind == AST_LET && d->child_count == 1 && fresh_expr(d->children[0]) && !assigned_old(fn, name);
+}
+
+/*
+ * Can something made in n outlive the scope?  loop: the scope is a loop body, and
+ * a variable from outside it that receives a text or an object keeps it.
+ */
+static int region_keeps(const AstNode *n, const AstNode *fn, const AstNode *scope, int loop) {
+    if (!n) return 0;
+    switch (n->kind) {
+        case AST_ASSIGN:
+            if (loop && n->text && n->child_count && arena_type(n->children[0]->type_name, 0) &&
+                !declared_inside(fn, scope, n->text)) return 1;
+            break;
+        case AST_LIST_APPEND:
+        case AST_INDEX_ASSIGN: {
+            size_t value = n->kind == AST_INDEX_ASSIGN ? 1 : 0;
+            if (n->child_count <= value) return 1;
+            if (arena_type(n->children[value]->type_name, 0)) {
+                if (!n->text || n->child_count > value + 1) return 1;        /* obj.items.append(s) */
+                const AstNode *d = region_decl(fn, n->text);
+                if (!d || is_dict_type(d->type_name)) return 1;              /* d[k] = text */
+                if (!local_new_list(fn, scope, n->text)) return 1;
+            }
+            break;
+        }
+        case AST_MEMBER_ASSIGN:
+            if (n->child_count == 2 && arena_type(n->children[1]->type_name, 0)) return 1;
+            break;
+        case AST_CALL:
+            if (n->text && n->text[0] != '@') {
+                size_t k = region_index(n->text);              /* not in the program: len(), input_int()... */
+                if (k < region_flag_count && (region_flags[k] & 1)) return 1;
+            }
+            break;
+        default:
+            break;
+    }
+    for (size_t i = 0; i < n->child_count; i++) if (region_keeps(n->children[i], fn, scope, loop)) return 1;
+    return 0;
+}
+
+/* does n make texts or objects (directly or through a function)? */
+static int region_makes(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_CONSTRUCT && !(n->text && is_value_class(n->text))) return 1;   /* a value class is no object */
+    if (n->kind == AST_LET && is_stack_object(n) && n->child_count == 1) {         /* on the C stack (V0.51) */
+        const AstNode *ctor = n->children[0];
+        for (size_t i = 0; i < ctor->child_count; i++) if (region_makes(ctor->children[i])) return 1;
+        return 0;
+    }
+    if (n->type_name && strcmp(n->type_name, "string") == 0 &&
+        (n->kind == AST_BINARY || n->kind == AST_CALL || n->kind == AST_INDEX)) return 1;
+    if (n->kind == AST_CALL && n->text && n->text[0] == '@' &&
+        (!strcmp(n->text, "@split") || !strcmp(n->text, "@read_lines"))) return 1;
+    if (n->kind == AST_CALL && n->text && n->text[0] != '@') {
+        size_t k = region_index(n->text);
+        if (k < region_flag_count && (region_flags[k] & 2)) return 1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) if (region_makes(n->children[i])) return 1;
+    return 0;
+}
+
+static void compute_regions(const AstNode *program) {
+    free(region_flags);
+    region_flag_count = program->child_count;
+    region_flags = calloc(region_flag_count ? region_flag_count : 1, 1);
+    if (!region_flags) { region_flag_count = 0; return; }
+    for (int changed = 1; changed;) {                  /* both grow until nothing moves */
+        changed = 0;
+        for (size_t i = 0; i < program->child_count; i++) {
+            const AstNode *fn = program->children[i];
+            if (fn->kind != AST_FUNCTION) continue;
+            const AstNode *body = function_body(fn);
+            if (!(region_flags[i] & 1) && region_keeps(body, fn, body, 0)) { region_flags[i] |= 1; changed = 1; }
+            if (!(region_flags[i] & 2) && region_makes(body)) { region_flags[i] |= 2; changed = 1; }
+        }
+    }
+}
+
+/* the loop n (for, for in, while) gives its iterations' memory back */
+static int loop_region(const AstNode *n) {
+    if (!region_fn || !n->child_count) return 0;
+    const AstNode *body = n->children[n->child_count - 1];
+    if (!body || body->kind != AST_BLOCK) return 0;
+    if (n->kind == AST_WHILE) {
+        if (!region_makes(n->children[0]) && !region_makes(body)) return 0;
+        return !region_keeps(n->children[0], region_fn, body, 1) && !region_keeps(body, region_fn, body, 1);
+    }
+    return region_makes(body) && !region_keeps(body, region_fn, body, 1);
+}
+
 static void emit_c_string(FILE *f, const char *s) {
     fputc('"', f);
     for (; *s; s++) {
@@ -4898,6 +5063,13 @@ static OwnedVar owned_live[OWN_MAX];
 static size_t owned_live_count = 0;
 static size_t loop_marks[1024];          /* owned_live_count when each enclosing loop started */
 static size_t loop_mark_count = 0;
+/* V0.54: the arena mark of each enclosing loop (clair_mark_N), -1 when it keeps its memory */
+static long loop_regions[1024];
+static int region_arena = 0;                 /* the program has an arena */
+static size_t region_serial = 0;
+static const AstNode *region_body = NULL;    /* the body of the loop being written, its mark... */
+static long region_body_id = -1;
+static int region_body_declares = 0;         /* ...declared at the start of the body (for), or before the loop (while) */
 static const char *current_return_type;
 
 static void emit_free_since(FILE *f, size_t mark, int depth) {
@@ -4914,6 +5086,10 @@ static void emit_free_since(FILE *f, size_t mark, int depth) {
 static int emit_jump(FILE *f, const char *jump, size_t mark, int depth) {
     if (clair_num_frame_open) {          /* a loop that always ends with continue still collects */
         fputs("clair_rt_num_collect();\n", f);
+        indent(f, depth);
+    }
+    if (loop_mark_count && loop_regions[loop_mark_count - 1] >= 0) {   /* V0.54 */
+        fprintf(f, "clair_rt_arena_reset(clair_mark_%ld);\n", loop_regions[loop_mark_count - 1]);
         indent(f, depth);
     }
     if (owned_live_count <= mark) {
@@ -5149,6 +5325,14 @@ static void clair_num_emit_root(FILE *f, const char *name, int depth) {
 
 static int emit_block(FILE *f, const AstNode *block, int depth) {
     if (!block || block->kind != AST_BLOCK) return 0;
+    long region = -1;
+    if (block == region_body) {                    /* V0.54: the body of a loop that gives its memory back */
+        region = region_body_id;
+        if (region_body_declares) {
+            indent(f, depth);
+            fprintf(f, "ClairArenaMark clair_mark_%ld = clair_rt_arena_mark();\n", region);
+        }
+    }
     size_t mark = owned_live_count;
     for (size_t i = 0; i < block->child_count; i++) {
         if (!emit_stmt(f, block->children[i], depth)) return 0;
@@ -5163,6 +5347,10 @@ static int emit_block(FILE *f, const AstNode *block, int depth) {
             fputs("clair_rt_num_collect();\n", f);
         }
         emit_free_since(f, mark, depth);
+        if (region >= 0) {
+            indent(f, depth);
+            fprintf(f, "clair_rt_arena_reset(clair_mark_%ld);\n", region);
+        }
     }
     owned_live_count = mark;
     return 1;
@@ -5173,8 +5361,24 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth);
 /* loops remember which owned variables are outside them, for break and continue */
 static int emit_stmt(FILE *f, const AstNode *n, int depth) {
     int loop = n->kind == AST_FOR || n->kind == AST_WHILE || n->kind == AST_FOR_EACH;
+    const AstNode *saved_body = region_body;
+    long saved_id = region_body_id;
+    int saved_declares = region_body_declares;
+    long region = -1;
     if (loop) {
         if (loop_mark_count >= sizeof(loop_marks) / sizeof(loop_marks[0])) return 0;
+        if (region_arena && loop_region(n)) {
+            /* V0.54: what an iteration makes is given back at its end */
+            region = (long)region_serial++;
+            if (n->kind == AST_WHILE) {             /* the condition too: the mark before the loop */
+                indent(f, depth);
+                fprintf(f, "ClairArenaMark clair_mark_%ld = clair_rt_arena_mark();\n", region);
+            }
+            region_body = n->children[n->child_count - 1];
+            region_body_id = region;
+            region_body_declares = n->kind != AST_WHILE;
+        }
+        loop_regions[loop_mark_count] = region;
         loop_marks[loop_mark_count++] = owned_live_count;
     }
     /* V0.52: the new lists this instruction uses up (not those of the blocks inside) */
@@ -5205,6 +5409,13 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
         }
     }
     int ok = emit_stmt_inner(f, n, depth);
+    if (ok && region >= 0 && n->kind == AST_WHILE) {    /* the last condition, false, may have made texts */
+        indent(f, depth);
+        fprintf(f, "clair_rt_arena_reset(clair_mark_%ld);\n", region);
+    }
+    region_body = saved_body;
+    region_body_id = saved_id;
+    region_body_declares = saved_declares;
     if (ok && count > first && n->kind != AST_IF && n->kind != AST_RETURN && n->kind != AST_FOR_EACH)
         emit_tmp_frees(f, first, count, depth, 0);
     tmp_first = saved_first;
@@ -6821,6 +7032,7 @@ static int emit_dict_runtime(FILE *f) {
         "static void clair_rt_cleanup_dicts(void) {\n"
         "    for (size_t i = 0; i < clair_rt_dict_count; i++) {\n"
         "        if (clair_rt_dicts[i]) {\n"
+        "            for (size_t k = 0; k < clair_rt_dicts[i]->len; k++) free((char *)clair_rt_dicts[i]->keys[k]);\n"
         "            free(clair_rt_dicts[i]->keys);\n"
         "            free(clair_rt_dicts[i]->values);\n"
         "            free(clair_rt_dicts[i]);\n"
@@ -6890,7 +7102,11 @@ static int emit_dict_runtime(FILE *f) {
         "        dict->capacity = new_capacity;\n"
         "    }\n"
         "    size_t index = dict->len++;\n"
-        "    dict->keys[index] = key;\n"
+        "    size_t key_size = strlen(key) + 1;               /* V0.54: its own copy of the key */\n"
+        "    char *copy = malloc(key_size);\n"
+        "    if (!copy) clair_rt_dict_runtime_error(\"out of memory while copying a dictionary key\");\n"
+        "    memcpy(copy, key, key_size);\n"
+        "    dict->keys[index] = copy;\n"
         "    return (unsigned char *)dict->values + (index * dict->elem_size);\n"
         "}\n\n"
         "static ClairDict clair_rt_dict_make(const char *const *keys, const void *values, size_t len, size_t elem_size) {\n"
@@ -8825,6 +9041,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
     compute_pure_functions(program);
     compute_ownership(program);
     compute_stack_objects(program);
+    compute_regions(program);                       /* V0.54 */
 
     fputs(unchecked_mode ? "/* Generated by the Clair compiler (--sans-verif: no bounds checks). */\n"
                          : "/* Generated by the Clair compiler. */\n", f);
@@ -9204,7 +9421,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
     int uses_text_pieces = (io_uses(program) & 8) || node_uses_call_named(program, "@read_lines") || node_uses_call_named(program, "@split") ||
                            node_uses_call_named(program, "@strip");
     uses_text_pieces = uses_text_pieces || node_uses_call_named(program, "@str") || node_uses_call_named(program, "@format");
-    if (uses_objects || uses_concat || uses_matrix || uses_string_slice || uses_text_pieces) {
+    region_arena = uses_objects || uses_concat || uses_matrix || uses_string_slice || uses_text_pieces;
+    if (region_arena) {
         /*
          * Bump-pointer arena shared by objects and concatenated strings.
          * One allocation is a pointer increment instead of malloc() plus a
@@ -9213,9 +9431,29 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs(
             "/* 32-byte header keeps every allocation 16-byte aligned */\n"
             "typedef struct ClairArenaChunk { struct ClairArenaChunk *next; size_t used; size_t size; size_t pad; } ClairArenaChunk;\n"
-            "static ClairArenaChunk *clair_rt_arena = NULL;\n\n"
+            "static ClairArenaChunk *clair_rt_arena = NULL;\n"
+            "static ClairArenaChunk *clair_rt_arena_spare = NULL;   /* V0.54: a chunk kept for the next iteration */\n\n"
+            "/* with AddressSanitizer, memory given back by an iteration may not be read any more */\n"
+            "#if defined(__SANITIZE_ADDRESS__)\n"
+            "#define CLAIR_ASAN 1\n"
+            "#elif defined(__has_feature)\n"
+            "#if __has_feature(address_sanitizer)\n"
+            "#define CLAIR_ASAN 1\n"
+            "#endif\n"
+            "#endif\n"
+            "#ifdef CLAIR_ASAN\n"
+            "void __asan_poison_memory_region(void const volatile *addr, size_t size);\n"
+            "void __asan_unpoison_memory_region(void const volatile *addr, size_t size);\n"
+            "#define CLAIR_POISON(p, n) __asan_poison_memory_region((p), (n))\n"
+            "#define CLAIR_UNPOISON(p, n) __asan_unpoison_memory_region((p), (n))\n"
+            "#else\n"
+            "#define CLAIR_POISON(p, n) ((void)0)\n"
+            "#define CLAIR_UNPOISON(p, n) ((void)0)\n"
+            "#endif\n\n"
             "static void clair_rt_arena_cleanup(void) {\n"
             "    while (clair_rt_arena) { ClairArenaChunk *next = clair_rt_arena->next; free(clair_rt_arena); clair_rt_arena = next; }\n"
+            "    free(clair_rt_arena_spare);\n"
+            "    clair_rt_arena_spare = NULL;\n"
             "}\n\n"
             "static __attribute__((noinline)) void *clair_rt_arena_grow(size_t size) {\n"
             "    static int registered = 0;\n"
@@ -9226,13 +9464,19 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    size_t chunk = (size_t)1 << 20;\n"
             "    if (size > SIZE_MAX - sizeof(ClairArenaChunk) - 16) { fputs(\"Clair runtime error: allocation overflow\\n\", stderr); exit(EXIT_FAILURE); }\n"
             "    if (size + 16 > chunk) chunk = size + 16;\n"
-            "    ClairArenaChunk *c = malloc(sizeof(ClairArenaChunk) + chunk);\n"
-            "    if (!c) { fputs(\"Clair runtime error: out of memory\\n\", stderr); exit(EXIT_FAILURE); }\n"
+            "    ClairArenaChunk *c;\n"
+            "    if (clair_rt_arena_spare && chunk <= clair_rt_arena_spare->size) {\n"
+            "        c = clair_rt_arena_spare;                   /* V0.54: given back by an iteration */\n"
+            "        clair_rt_arena_spare = NULL;\n"
+            "    } else {\n"
+            "        c = malloc(sizeof(ClairArenaChunk) + chunk);\n"
+            "        if (!c) { fputs(\"Clair runtime error: out of memory\\n\", stderr); exit(EXIT_FAILURE); }\n"
+            "        c->size = chunk;\n"
+            "    }\n"
             "    c->next = clair_rt_arena;\n"
-            "    c->used = 0;\n"
-            "    c->size = chunk;\n"
             "    clair_rt_arena = c;\n"
             "    c->used = size;\n"
+            "    CLAIR_UNPOISON(c + 1, size);\n"
             "    return (unsigned char *)(c + 1);\n"
             "}\n\n"
             "static inline void *clair_rt_arena_alloc(size_t size) {\n"
@@ -9241,9 +9485,35 @@ int codegen_c_file(const AstNode *program, const char *path) {
             "    if (__builtin_expect(c != NULL && c->size - c->used >= size, 1)) {\n"
             "        void *p = (unsigned char *)(c + 1) + c->used;\n"
             "        c->used += size;\n"
+            "        CLAIR_UNPOISON(p, size);\n"
             "        return p;\n"
             "    }\n"
             "    return clair_rt_arena_grow(size);\n"
+            "}\n\n"
+            "/* V0.54: where the arena is, and going back there at the end of a loop iteration */\n"
+            "typedef struct { ClairArenaChunk *chunk; size_t used; } ClairArenaMark;\n\n"
+            "static inline ClairArenaMark clair_rt_arena_mark(void) {\n"
+            "    ClairArenaMark m = { clair_rt_arena, clair_rt_arena ? clair_rt_arena->used : 0 };\n"
+            "    return m;\n"
+            "}\n\n"
+            "static __attribute__((noinline)) void clair_rt_arena_back(ClairArenaMark m) {\n"
+            "    while (clair_rt_arena && clair_rt_arena != m.chunk) {\n"
+            "        ClairArenaChunk *c = clair_rt_arena;\n"
+            "        clair_rt_arena = c->next;\n"
+            "        if (!clair_rt_arena_spare && c->size == ((size_t)1 << 20)) {\n"
+            "            CLAIR_POISON(c + 1, c->size);\n"
+            "            clair_rt_arena_spare = c;\n"
+            "        } else {\n"
+            "            free(c);\n"
+            "        }\n"
+            "    }\n"
+            "    if (clair_rt_arena) {\n"
+            "        CLAIR_POISON((unsigned char *)(clair_rt_arena + 1) + m.used, clair_rt_arena->used - m.used);\n"
+            "        clair_rt_arena->used = m.used;\n"
+            "    }\n"
+            "}\n\n"
+            "static inline void clair_rt_arena_reset(ClairArenaMark m) {\n"
+            "    if (clair_rt_arena != m.chunk || (m.chunk && m.chunk->used != m.used)) clair_rt_arena_back(m);\n"
             "}\n\n",
             f
         );
@@ -9884,6 +10154,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
             current_return_type = fn->type_name;
             owned_live_count = 0;
             loop_mark_count = 0;
+            region_fn = fn;                                  /* V0.54 */
             ok = emit_block(fn_out, function_body(fn), 1);
             clair_num_frame_open = 0;
             fputs("}\n\n", fn_out);
