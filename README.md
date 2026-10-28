@@ -23,6 +23,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Listes et dictionnaires typés
 - Matrices `matrix[float]`, `matrix[int]`, `matrix[u8]`... : `m[i][j]`, `rows(m)`, `cols(m)`, un seul bloc mémoire comme en C
 - Classes et objets, avec méthodes (`self`)
+- Classes rapides : une classe dont les champs ne changent jamais devient une structure du C, copiée comme un nombre ; un objet qui ne sort pas de sa fonction est rangé sur la pile ; aucune mémoire prise dans les boucles
 - Écriture directe dans les champs : `self.w[i][j] = x`, `self.items.append(x)`
 - Exemple complet : réseau de neurones entraîné sur XOR (`tests/xor_training.cl`)
 - Appels de fonctions et de méthodes en instruction, mutation chaînée (`team.leader.age = 40`)
@@ -98,6 +99,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.51](docs/README_V0.51.md) : classes valeur (structures du C) et objets sur la pile : aussi rapide que le C, plus de mémoire prise dans les boucles
 - [Clair V0.50](docs/README_V0.50.md) : calculs certifiés avec certfloat, certsqrt(), certdigits() et mémoire améliorée
 - [Clair V0.49](docs/README_V0.49.md) : chaque erreur de compilation dit sa ligne, et son fichier dans un module
 - [Clair V0.48](docs/README_V0.48.md) : unités vérifiées à la compilation (`float[m/s]`, `9.81[m/s^2]`, `N`, `J`, `W`...), sans coût à l'exécution

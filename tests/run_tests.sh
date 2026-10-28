@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.50 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.51 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -919,7 +919,7 @@ printf '%s\n' 'jeu revcomp (fasta 1000) : OK -> sortie de l algorithme officiel'
 cmp -s build/importe.out tests/modules/importe.expected
 grep -Fq 'clair_fn_orbite__mod__periode(' build/test_importe.generated.c
 grep -Fq '6.67430e-11' build/test_importe.generated.c
-! grep -q 'orbite seul' build/importe.out
+if grep -q 'orbite seul' build/importe.out; then printf '%s\n' 'importe.cl : ECHEC -> le main du module a tourne' >&2; exit 1; fi
 printf '%s\n' 'importe.cl : OK -> import math as m, phys, astro, modules qui s importent l un l autre, classe d un module, alias ; identique a Python'
 ./build/clair tests/modules/orbite.cl -o build/test_orbite_seul
 [ "$(./build/test_orbite_seul | head -n 1)" = 'orbite seul' ]
@@ -951,6 +951,28 @@ expect_compile_error ligne_erreur "semantic error: undefined variable 'y' (line 
 expect_compile_error modules/erreur_module "semantic error: undefined variable 'z' (outil_casse.cl, line 5)"
 expect_compile_error modules/unite_module 'unit error: cannot add s and m (in orbite_unites.periode, orbite_unites.cl, line 9)'
 expect_compile_error modules/nom_absent "import error: cannot import 'vitesse' from 'orbite' (in nom_absent.cl, line 1)"
+
+# V0.51 : les classes dont les champs ne changent jamais sont des valeurs (structures du C) ;
+# les objets qui ne sortent pas de leur fonction sont rangés sur la pile
+./build/clair tests/classes_valeur.cl -o build/test_classes_valeur
+[ "$(./build/test_classes_valeur)" = "$(cat tests/classes_valeur.expected)" ]
+G=build/test_classes_valeur.generated.c
+grep -Fq 'ClairClass_Vec p = ((ClairClass_Vec){1.0, 2.0});' $G
+grep -Fq 'static ClairClass_Vec clair_fn_Vec__plus(ClairClass_Vec self, ClairClass_Vec o) {' $G
+grep -Fq 'ClairClass_Segment seg = ((ClairClass_Segment){((ClairClass_Vec){0.0, 0.0}), ((ClairClass_Vec){4.0, 2.0}), "AB"});' $G
+grep -Fq 'ClairClass_Compteur clair_obj_c = {0, 5};' $G
+grep -Fq 'ClairClass_Compteur clair_obj_t = {i, 1};' $G
+grep -Fq 'ClairClass_Gros clair_obj_gros = {1, 2, 3, 4, 5, 6, 7, 8, 9};' $G
+grep -Fq 'ClairClass_Compteur * d = ((ClairClass_Compteur *)clair_rt_object_make(' $G
+grep -Fq 'ClairClass_Compteur * e = ((ClairClass_Compteur *)clair_rt_object_make(' $G
+grep -Fq 'ClairClass_Compteur * f = ((ClairClass_Compteur *)clair_rt_object_make(' $G
+grep -Fq 'ClairClass_Compte * compte = ((ClairClass_Compte *)clair_rt_num_track_fields(' $G
+printf '%s\n' 'classes_valeur.cl : OK -> classes valeur, objets sur la pile, alias, champ, valeur rendue, bigint ; identique a Python'
+./build/clair tools/jeux/vecteurs.cl -o build/jeu_vecteurs
+[ "$(./build/jeu_vecteurs <<< 1000 | md5sum | cut -c1-32)" = '63bfc5b0334eb19debb6db1b63688bd8' ] ||
+    { printf '%s\n' 'tools/jeux/vecteurs.cl : ECHEC -> sortie differente du C pour 1000' >&2; exit 1; }
+if grep -q 'clair_rt_object_make(&(ClairClass_Vec)' build/jeu_vecteurs.generated.c; then printf '%s\n' 'jeu vecteurs : ECHEC -> des Vec en memoire' >&2; exit 1; fi
+printf '%s\n' 'jeu vecteurs (1000) : OK -> meme sortie que le C, aucun objet Vec en memoire'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

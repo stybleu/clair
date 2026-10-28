@@ -7,3 +7,4 @@ nqueen     14       PLB2
 plbmatmul  800      PLB2
 fasta      2500000  Computer Language Benchmarks Game
 revcomp    fasta:2500000  Computer Language Benchmarks Game (entree : la sortie de fasta)
+vecteurs   10000000 Clair V0.51 (classe Vec : des valeurs, comme les structures du C)

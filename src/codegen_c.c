@@ -110,6 +110,23 @@ static char big_tag(const char *type) {
 /* ptr[float32] -> "float *": the row of element_kinds, or -1 */
 static int ptr_kind(const char *type) { return element_kind_of(type, "ptr["); }
 
+/* ------------------------------------------------------------------ */
+/* Value classes: an object whose fields are never reassigned cannot   */
+/* show that it is shared (Clair has no identity test), so it is a C   */
+/* struct copied like a number, not a pointer to the arena.  No        */
+/* allocation, and Clang keeps its fields in registers.                */
+/* ------------------------------------------------------------------ */
+
+#define VALUE_CLASS_MAX 256
+#define VALUE_CLASS_BYTES 64          /* larger objects stay pointers: passing them costs a copy */
+static const char *value_classes[VALUE_CLASS_MAX];
+static size_t value_class_count = 0;
+
+static int is_value_class(const char *type) {
+    for (size_t i = 0; type && i < value_class_count; i++) if (strcmp(value_classes[i], type) == 0) return 1;
+    return 0;
+}
+
 static const char *c_type_name(const char *clair_type) {
     static char class_type[512];
     static char ptr_types[ELEMENT_KIND_COUNT][32];
@@ -145,7 +162,8 @@ static const char *c_type_name(const char *clair_type) {
     if (is_dict_type(clair_type)) return "ClairDict";
     if (is_matrix_type(clair_type)) return "ClairMatrix";
 
-    int written = snprintf(class_type, sizeof(class_type), "ClairClass_%s *", clair_type);
+    int written = snprintf(class_type, sizeof(class_type), is_value_class(clair_type) ? "ClairClass_%s" : "ClairClass_%s *",
+                           clair_type);
     if (written < 0 || (size_t)written >= sizeof(class_type)) return NULL;
     return class_type;
 }
@@ -813,7 +831,8 @@ static int fast_base_of(FastPlan *plan, const AstNode *e, const char *v, const A
     for (size_t i = depth; i > 0; i--) {
         size_t sl = strlen(suffix), cl = strlen(cexpr);
         snprintf(suffix + sl, sizeof(suffix) - sl, "__%s", chain[i - 1]->text);
-        snprintf(cexpr + cl, sizeof(cexpr) - cl, "->%s", chain[i - 1]->text);
+        snprintf(cexpr + cl, sizeof(cexpr) - cl, "%s%s",
+                 is_value_class(chain[i - 1]->children[0]->type_name) ? "." : "->", chain[i - 1]->text);
     }
     char *ns = str_dup(suffix), *ne = str_dup(cexpr);
     if (!ns || !ne) { free(ns); free(ne); return 0; }
@@ -3309,6 +3328,170 @@ static void compute_ownership(const AstNode *program) {
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* V0.51: objects that never leave their function live on its stack. */
+/*                                                                    */
+/*   let a: Corps = Corps(0.0, 1.0)     a.x = ..., a.avance(dt)       */
+/*                                                                    */
+/* When `a` is only read, written field by field, or passed to        */
+/* parameters that do not keep it, and is never replaced, the object  */
+/* is a local C struct: no allocation, nothing left behind in a loop, */
+/* and Clang knows two such objects never overlap.                    */
+/* ------------------------------------------------------------------ */
+
+#define STACK_OBJ_MAX 4096
+static const AstNode *stack_objs[STACK_OBJ_MAX];
+static size_t stack_obj_count = 0;
+static const char *obj_escape_fn[SAFE_FN_MAX];
+static uint64_t obj_escape_bits[SAFE_FN_MAX];
+static size_t obj_escape_count = 0;
+
+static const AstNode *class_named(const AstNode *program, const char *name);
+
+/* a class with a bigint, bigfloat or certfloat field: the collector counts the
+ * fields of its objects, so it stays a plain object in the arena (V0.50) */
+static int class_has_num_fields(const AstNode *cls) {
+    for (size_t j = 0; cls && j < cls->child_count; j++) {
+        const char *t = cls->children[j]->type_name;
+        if (t && (!strcmp(t, "bigint") || !strcmp(t, "bigfloat") || !strcmp(t, "certfloat"))) return 1;
+    }
+    return 0;
+}
+
+static int is_ref_class(const char *t) {
+    return t && codegen_program && class_named(codegen_program, t) && !is_value_class(t);
+}
+
+static int obj_param_escapes(const char *fn_name, size_t k) {
+    if (k >= 64) return 1;
+    for (size_t i = 0; i < obj_escape_count; i++) {
+        if (strcmp(obj_escape_fn[i], fn_name) == 0) return (int)((obj_escape_bits[i] >> k) & 1);
+    }
+    return 1;
+}
+
+static int obj_expr_ok(const AstNode *n, const char *name, int visible, const AstNode *parent, size_t idx) {
+    if (!n || !visible) return 1;
+    if (n->kind == AST_IDENTIFIER && n->text && strcmp(n->text, name) == 0) {
+        if (!parent) return 0;
+        if ((parent->kind == AST_MEMBER || parent->kind == AST_MEMBER_ASSIGN) && idx == 0) return 1;  /* a.x, a.x = v */
+        if (parent->kind == AST_CALL && parent->text && parent->text[0] != '@' &&
+            find_program_function(parent->text) && !obj_param_escapes(parent->text, idx)) return 1;    /* f(a), a.m() */
+        return 0;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (!obj_expr_ok(n->children[i], name, visible, n, i)) return 0;
+    }
+    return 1;
+}
+
+static int obj_block_ok(const AstNode *block, const AstNode *decl, const char *name, int visible);
+
+static int obj_stmt_ok(const AstNode *n, const AstNode *decl, const char *name, int visible) {
+    if (!n) return 1;
+    switch (n->kind) {
+        case AST_BLOCK:
+            return obj_block_ok(n, decl, name, visible);
+        case AST_IF:
+            if (n->child_count < 2 || !obj_expr_ok(n->children[0], name, visible, n, 0)) return 0;
+            for (size_t i = 1; i < n->child_count; i++) {
+                if (!obj_stmt_ok(n->children[i], decl, name, visible)) return 0;
+            }
+            return 1;
+        case AST_WHILE:
+            if (n->child_count != 2 || !obj_expr_ok(n->children[0], name, visible, n, 0)) return 0;
+            return obj_stmt_ok(n->children[1], decl, name, visible);
+        case AST_FOR:
+        case AST_FOR_EACH:
+            if (!n->text || n->child_count < 2) return 0;
+            for (size_t i = 0; i + 1 < n->child_count; i++) {
+                if (!obj_expr_ok(n->children[i], name, visible, n, i)) return 0;
+            }
+            return obj_stmt_ok(n->children[n->child_count - 1], decl, name, strcmp(n->text, name) == 0 ? 0 : visible);
+        case AST_ASSIGN:
+            if (visible && n->text && strcmp(n->text, name) == 0) return 0;   /* replaced: it may then be shared */
+            break;
+        case AST_LET:
+            return 0;                                                       /* handled by the block walker */
+        default:
+            break;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (!obj_expr_ok(n->children[i], name, visible, n, i)) return 0;
+    }
+    return 1;
+}
+
+static int obj_block_ok(const AstNode *block, const AstNode *decl, const char *name, int visible) {
+    if (!block || block->kind != AST_BLOCK) return 0;
+    for (size_t i = 0; i < block->child_count; i++) {
+        const AstNode *st = block->children[i];
+        if (st->kind == AST_LET) {
+            for (size_t k = 0; k < st->child_count; k++) {
+                if (!obj_expr_ok(st->children[k], name, visible, st, k)) return 0;   /* let b = a: an alias */
+            }
+            if (st == decl) visible = 1;
+            else if (st->text && strcmp(st->text, name) == 0) visible = 0;
+            continue;
+        }
+        if (!obj_stmt_ok(st, decl, name, visible)) return 0;
+    }
+    return 1;
+}
+
+static int obj_param_kept(const AstNode *fn, size_t k) {
+    const AstNode *param = fn->children[k];
+    if (!param->text || !is_ref_class(param->type_name)) return 0;
+    const AstNode *body = function_body(fn);
+    if (!body || name_changes_in(body, param->text)) return 1;
+    return !obj_block_ok(body, NULL, param->text, 1);
+}
+
+static int is_stack_object(const AstNode *let) {
+    for (size_t i = 0; i < stack_obj_count; i++) if (stack_objs[i] == let) return 1;
+    return 0;
+}
+
+static void compute_stack_objects(const AstNode *program) {
+    stack_obj_count = obj_escape_count = 0;
+    for (size_t i = 0; i < program->child_count && obj_escape_count < SAFE_FN_MAX; i++) {
+        const AstNode *fn = program->children[i];
+        if (fn->kind != AST_FUNCTION || !fn->text) continue;
+        obj_escape_fn[obj_escape_count] = fn->text;
+        obj_escape_bits[obj_escape_count++] = 0;
+    }
+    if (obj_escape_count >= SAFE_FN_MAX) return;     /* too many functions: keep every object in the arena */
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (size_t i = 0; i < obj_escape_count; i++) {
+            const AstNode *fn = find_program_function(obj_escape_fn[i]);
+            size_t params = function_param_count(fn);
+            for (size_t k = 0; k < params && k < 64; k++) {
+                if ((obj_escape_bits[i] >> k) & 1) continue;
+                if (obj_param_kept(fn, k)) {
+                    obj_escape_bits[i] |= UINT64_C(1) << k;
+                    changed = 1;
+                }
+            }
+        }
+    }
+    const AstNode *lets[OWN_MAX];
+    size_t let_count = 0;
+    collect_lets(program, lets, &let_count, OWN_MAX);
+    for (size_t i = 0; i < let_count && stack_obj_count < STACK_OBJ_MAX; i++) {
+        const AstNode *let = lets[i];
+        if (!let->text || !is_ref_class(let->type_name) || let->child_count != 1) continue;
+        if (class_has_num_fields(class_named(program, let->type_name))) continue;
+        if (let->children[0]->kind != AST_CONSTRUCT || !let->children[0]->text ||
+            strcmp(let->children[0]->text, let->type_name) != 0) continue;
+        const AstNode *fn = stack_list_find_function(let);
+        const AstNode *body = fn ? function_body(fn) : NULL;
+        if (!body || !obj_block_ok(body, let, let->text, 0)) continue;
+        stack_objs[stack_obj_count++] = let;
+    }
+}
+
 static void emit_c_string(FILE *f, const char *s) {
     fputc('"', f);
     for (; *s; s++) {
@@ -3669,6 +3852,17 @@ static int emit_expr(FILE *f, const AstNode *n) {
 
         case AST_CONSTRUCT: {
             if (!n->text || !n->type_name) return 0;
+            if (is_value_class(n->text)) {
+                /* V0.51: a value class is a struct, nothing to allocate */
+                fprintf(f, "((ClairClass_%s){", n->text);
+                if (n->child_count == 0) fputs("0", f);
+                for (size_t i = 0; i < n->child_count; i++) {
+                    if (i != 0) fputs(", ", f);
+                    if (!emit_pinned(f, n->children[i])) return 0;
+                }
+                fputs("})", f);
+                return 1;
+            }
             const AstNode *cls = clair_num_lookup_class(n->text);
             if (!cls) return 0;
             size_t fields = 0;
@@ -3711,7 +3905,7 @@ static int emit_expr(FILE *f, const AstNode *n) {
         case AST_MEMBER:
             if (n->child_count != 1 || !n->text) return 0;
             if (!emit_operand(f, n->children[0], PREC_POSTFIX, 0)) return 0;
-            fprintf(f, "->%s", n->text);
+            fprintf(f, "%s%s", is_value_class(n->children[0]->type_name) ? "." : "->", n->text);
             return 1;
 
         case AST_CALL:
@@ -4825,6 +5019,21 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             if (!n->type_name) return 0;
             const char *type = c_type_name(n->type_name);
             if (!type) return 0;
+
+            if (is_stack_object(n)) {
+                /* V0.51: the object stays in this function: a local struct, its address in the variable */
+                const AstNode *ctor = n->children[0];
+                fprintf(f, "ClairClass_%s clair_obj_%s = {", ctor->text, n->text);
+                if (ctor->child_count == 0) fputs("0", f);
+                for (size_t i = 0; i < ctor->child_count; i++) {
+                    if (i != 0) fputs(", ", f);
+                    if (!emit_pinned(f, ctor->children[i])) return 0;
+                }
+                fputs("};\n", f);
+                indent(f, depth);
+                fprintf(f, "ClairClass_%s *%s = &clair_obj_%s;\n", ctor->text, n->text, n->text);
+                return 1;
+            }
 
             if (stack_list_decl_is_safe(n)) {
                 const AstNode *list = n->children[0];
@@ -6362,6 +6571,86 @@ static int emit_dict_runtime(FILE *f) {
 }
 
 
+static const AstNode *class_named(const AstNode *program, const char *name) {
+    for (size_t i = 0; name && i < program->child_count; i++) {
+        const AstNode *c = program->children[i];
+        if (c->kind == AST_CLASS && c->text && strcmp(c->text, name) == 0) return c;
+    }
+    return NULL;
+}
+
+/* classes whose fields are reassigned somewhere (obj.f = v, self.f = v) */
+static void mark_reassigned(const AstNode *n, const AstNode *program, int *cand) {
+    if (!n) return;
+    if (n->kind == AST_MEMBER_ASSIGN && n->child_count > 0 && n->children[0]->type_name) {
+        for (size_t i = 0; i < program->child_count; i++) {
+            const AstNode *c = program->children[i];
+            if (c->kind == AST_CLASS && strcmp(c->text, n->children[0]->type_name) == 0) cand[i] = 0;
+        }
+    }
+    for (size_t i = 0; i < n->child_count; i++) mark_reassigned(n->children[i], program, cand);
+}
+
+/* bytes of a field in the struct (a value class inside: its own size), 0 when unknown */
+static size_t value_field_bytes(const AstNode *program, const int *cand, const char *t, int depth) {
+    if (!t || depth > 32) return 0;
+    if (!strcmp(t, "float32")) return 4;
+    if (!strcmp(t, "bool")) return 1;
+    if (machine_type_bits(t)) return (size_t)machine_type_bits(t) / 8;
+    if (big_bits(t)) return (size_t)big_bits(t) / 8;
+    const AstNode *cls = class_named(program, t);
+    if (cls) {
+        size_t idx = 0;
+        while (program->children[idx] != cls) idx++;
+        if (!cand[idx]) return 8;
+        size_t sum = 0;
+        for (size_t j = 0; j < cls->child_count; j++) {
+            size_t b = value_field_bytes(program, cand, cls->children[j]->type_name, depth + 1);
+            if (!b) return 0;
+            sum += b < 8 ? 8 : b;                 /* padding: count every field as at least 8 bytes */
+        }
+        return sum ? sum : 8;
+    }
+    return 8;                                      /* int, float, string, list, matrix, dict, bigint... */
+}
+
+/* does class idx hold itself by value, directly or through other value classes? */
+static int value_cycle(const AstNode *program, const int *cand, size_t idx, size_t at, int depth) {
+    if (depth > 64) return 1;
+    const AstNode *cls = program->children[at];
+    for (size_t j = 0; j < cls->child_count; j++) {
+        const AstNode *fc = class_named(program, cls->children[j]->type_name);
+        if (!fc) continue;
+        size_t k = 0;
+        while (program->children[k] != fc) k++;
+        if (!cand[k]) continue;
+        if (k == idx || value_cycle(program, cand, idx, k, depth + 1)) return 1;
+    }
+    return 0;
+}
+
+static void compute_value_classes(const AstNode *program) {
+    value_class_count = 0;
+    size_t count = program->child_count;
+    int *cand = calloc(count ? count : 1, sizeof(int));
+    if (!cand) return;
+    for (size_t i = 0; i < count; i++)
+        cand[i] = program->children[i]->kind == AST_CLASS && !class_has_num_fields(program->children[i]);
+    mark_reassigned(program, program, cand);
+    for (int changed = 1; changed; ) {
+        changed = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (!cand[i]) continue;
+            if (value_cycle(program, cand, i, i, 0)) { cand[i] = 0; changed = 1; continue; }
+            size_t bytes = value_field_bytes(program, cand, program->children[i]->text, 0);
+            if (!bytes || bytes > VALUE_CLASS_BYTES) { cand[i] = 0; changed = 1; }
+        }
+    }
+    for (size_t i = 0; i < count && value_class_count < VALUE_CLASS_MAX; i++)
+        if (cand[i]) value_classes[value_class_count++] = program->children[i]->text;
+    free(cand);
+}
+
 static int emit_class_declarations(FILE *f, const AstNode *program) {
     /* Forward declarations allow classes to reference other class objects. */
     for (size_t i = 0; i < program->child_count; i++) {
@@ -6372,9 +6661,26 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
     }
 
     int had_class = 0;
+    size_t count = program->child_count;
+    unsigned char *done = calloc(count ? count : 1, 1);
+    if (!done) return 0;
+    for (size_t emitted = 0, round = 0; round <= count; round++) {
     for (size_t i = 0; i < program->child_count; i++) {
         const AstNode *cls = program->children[i];
-        if (cls->kind != AST_CLASS) continue;
+        if (cls->kind != AST_CLASS || done[i]) continue;
+        /* V0.51: a value class held by value must be complete before */
+        int ready = 1;
+        for (size_t j = 0; j < cls->child_count && ready; j++) {
+            const char *ft = cls->children[j]->type_name;
+            if (!is_value_class(ft)) continue;
+            for (size_t k = 0; k < count; k++) {
+                const AstNode *other = program->children[k];
+                if (other->kind == AST_CLASS && !strcmp(other->text, ft) && !done[k]) ready = 0;
+            }
+        }
+        if (!ready) continue;
+        done[i] = 1;
+        emitted++;
         had_class = 1;
 
         fprintf(f, "struct ClairClass_%s {\n", cls->text);
@@ -6390,6 +6696,9 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
         }
         fputs("};\n\n", f);
     }
+    (void)emitted;
+    }
+    free(done);
 
     if (had_class) fputc('\n', f);
     return 1;
@@ -8148,6 +8457,7 @@ static void emit_io_runtime(FILE *f, const AstNode *program) {
 
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
+    compute_value_classes(program);
     int has_dynamic = 0, has_dynamic_fields = 0;
     clair_num_scan_ast(program, &has_dynamic, &has_dynamic_fields);
     clair_num_gc_enabled = has_dynamic;      /* champs compris (V0.42) */
@@ -8161,6 +8471,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
     compute_safe_functions(program);
     compute_pure_functions(program);
     compute_ownership(program);
+    compute_stack_objects(program);
 
     fputs(unchecked_mode ? "/* Generated by the Clair compiler (--sans-verif: no bounds checks). */\n"
                          : "/* Generated by the Clair compiler. */\n", f);
