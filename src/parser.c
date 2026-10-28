@@ -493,6 +493,19 @@ static AstNode *parse_additive(Parser *p) {
     return left;
 }
 
+/* V0.53: value ± uncertainty, below + and - (x + 1.0 ± 0.1 is (x + 1.0) ± 0.1), written once */
+static AstNode *parse_plusminus(Parser *p) {
+    AstNode *left = parse_additive(p);
+    if (!left || p->current.kind != TOKEN_PLUSMINUS) return left;
+    Token op = p->current;
+    next(p);
+    AstNode *right = parse_additive(p);
+    if (!right) { ast_free(left); return NULL; }
+    op.start = "\xc2\xb1";                  /* +/- is written ± in the tree */
+    op.length = 2;
+    return make_binary(op, left, right);
+}
+
 static int is_comparison(TokenKind kind) {
     return kind == TOKEN_EQUAL_EQUAL || kind == TOKEN_BANG_EQUAL ||
            kind == TOKEN_LESS || kind == TOKEN_LESS_EQUAL ||
@@ -510,12 +523,12 @@ static AstNode *parse_binary_level(Parser *p, int level) {
     static const TokenKind ops[4][2] = {
         { TOKEN_SHL, TOKEN_SHR }, { TOKEN_AMP, TOKEN_AMP }, { TOKEN_CARET, TOKEN_CARET }, { TOKEN_PIPE, TOKEN_PIPE },
     };
-    AstNode *left = level == 0 ? parse_additive(p) : parse_binary_level(p, level - 1);
+    AstNode *left = level == 0 ? parse_plusminus(p) : parse_binary_level(p, level - 1);
     if (!left) return NULL;
     while (p->current.kind == ops[level][0] || p->current.kind == ops[level][1]) {
         Token op = p->current;
         next(p);
-        AstNode *right = level == 0 ? parse_additive(p) : parse_binary_level(p, level - 1);
+        AstNode *right = level == 0 ? parse_plusminus(p) : parse_binary_level(p, level - 1);
         if (!right) { ast_free(left); return NULL; }
         left = make_binary(op, left, right);
         if (!left) return NULL;
@@ -1090,9 +1103,10 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         t.kind == TOKEN_IDENTIFIER) {
         next(p);
         if (p->current.kind == TOKEN_LBRACKET) {
-            /* V0.48: float[m/s] */
-            if (t.kind != TOKEN_FLOAT && !is_float32_token(t)) {
-                fprintf(stderr, "parse error at %zu:%zu: a unit goes with float or float32, not %.*s\n",
+            /* V0.48: float[m/s] ; V0.53: measure[m/s] */
+            int measure = t.kind == TOKEN_IDENTIFIER && t.length == 7 && strncmp(t.start, "measure", 7) == 0;
+            if (t.kind != TOKEN_FLOAT && !is_float32_token(t) && !measure) {
+                fprintf(stderr, "parse error at %zu:%zu: a unit goes with float, float32 or measure, not %.*s\n",
                         p->current.line, p->current.column, (int)t.length, t.start);
                 p->had_error = 1;
                 return 0;

@@ -83,6 +83,27 @@ static const ModConst astro_consts[] = {
     { NULL, NULL, NULL }
 };
 
+/*
+ * V0.53: the constants of phys that are not exact, as measures.  Their uncertainty
+ * comes from six independent sources (see clair_measure_rt.c): 1 alpha, 2 R_inf,
+ * 3 4 5 the relative atomic masses of the electron, proton and neutron, 6 G.
+ * "2:1 1:-2" means value ~ R_inf^1 alpha^-2 (sources in increasing order).
+ * The others (c, h, e, k_B, N_A... since 2019, g0, atm, and those of astro) are exact.
+ */
+static const struct { const char *name; const char *src; } phys_measures[] = {
+    { "alpha", "1:1" }, { "mu0", "1:1" }, { "eps0", "1:-1" }, { "a0", "1:1 2:-1" }, { "R_inf", "2:1" },
+    { "m_e", "1:-2 2:1" }, { "m_u", "1:-2 2:1 3:-1" }, { "m_p", "1:-2 2:1 3:-1 4:1" },
+    { "m_n", "1:-2 2:1 3:-1 5:1" }, { "G", "6:1" }, { "l_P", "6:0.5" }, { "m_P", "6:-0.5" },
+    { "t_P", "6:0.5" }, { "T_P", "6:-0.5" }, { NULL, NULL }
+};
+
+static const char *builtin_measure(const char *module, const char *name) {
+    if (strcmp(module, "phys") != 0) return NULL;
+    for (size_t i = 0; phys_measures[i].name; i++)
+        if (strcmp(phys_measures[i].name, name) == 0) return phys_measures[i].src;
+    return NULL;
+}
+
 static const ModConst *builtin_consts(const char *module) {
     if (strcmp(module, "math") == 0) return math_consts;
     if (strcmp(module, "phys") == 0) return phys_consts;
@@ -330,6 +351,7 @@ static void make_number(AstNode *n, const char *module, const char *member) {
     free(n->type_name);
     n->type_name = NULL;
     const char *unit = builtin_unit(module, member);      /* before set_text: member may be n->text */
+    n->measure_src = builtin_measure(module, member);
     set_text(n, builtin_const(module, member));
     free(n->unit);
     n->unit = NULL;

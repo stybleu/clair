@@ -51,6 +51,7 @@ typedef enum {
     TOKEN_GREATER,
     TOKEN_GREATER_EQUAL,
     TOKEN_PLUS,
+    TOKEN_PLUSMINUS,        /* V0.53: ± or +/- (value ± uncertainty) */
     TOKEN_MINUS,
     TOKEN_STAR,
     TOKEN_SLASH,

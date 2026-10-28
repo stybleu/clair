@@ -116,6 +116,8 @@ static int is_float_type(const char *type) {
     return type && (strcmp(type, "float") == 0 || strcmp(type, "float32") == 0);
 }
 
+static int is_measure(const char *t);                 /* V0.53 */
+
 /*
  * Type of a calculation between two numbers: float (64 bits) wins, then
  * float32, then int.  float32 with an int stays float32 (like NumPy).
@@ -280,6 +282,7 @@ static const AstNode *find_field(const AstNode *cls, const char *name) {
 static int is_known_type(const Semantic *s, const char *type) {
     if (!type) return 0;
     if (strcmp(type, "bigint") == 0 || strcmp(type, "bigfloat") == 0 || strcmp(type, "certfloat") == 0) return 1;
+    if (strcmp(type, "measure") == 0) return 1;                           /* V0.53 */
     if (is_big(type) || machine_bits(type) || is_ptr_type(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
         strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
@@ -729,7 +732,7 @@ static int check_format_call(Semantic *s, AstNode *n) {
     }
     const char *t = expr_type(s, n->children[0]);
     if (!t) return -1;
-    int number = is_numeric(t);
+    int number = is_numeric(t) || is_measure(t);                          /* V0.53: str(m), format(m, ".3f") */
     int text = strcmp(t, "string") == 0 || strcmp(t, "bool") == 0 ||
                strcmp(t, "bigint") == 0 || strcmp(t, "bigfloat") == 0;
     if (!number && !(is_str && text)) {
@@ -746,7 +749,7 @@ static int check_format_call(Semantic *s, AstNode *n) {
             return -1;
         }
         if (!set_type((AstNode *)spec, "string")) return -1;
-        if (!format_spec_ok(spec->text, t, &why)) {
+        if (!format_spec_ok(spec->text, is_measure(t) ? "float" : t, &why)) {
             report("semantic error: format(x, \"%s\"): %s\n", spec->text, why);
             s->had_error = 1;
             return -1;
@@ -1163,6 +1166,121 @@ static int check_absolue_call(Semantic *s, AstNode *n) {
     return set_type(n, result) ? 1 : -1;
 }
 
+/* ------------------------------------------------------------------ */
+/* V0.53: measures, 9.81 ± 0.02                                        */
+/* ------------------------------------------------------------------ */
+
+static int is_measure(const char *t) { return t && strcmp(t, "measure") == 0; }
+
+/* the functions of numbers that also work on a measure (the uncertainty follows) */
+static int measure_math(const char *name, size_t argc) {
+    static const char *const unary[] = {
+        "sqrt", "cbrt", "exp", "exp2", "expm1", "log", "log10", "log2", "log1p", "sin", "cos", "tan",
+        "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "abs", "degrees", "radians", NULL
+    };
+    static const char *const binary[] = { "pow", "atan2", "hypot", NULL };
+    const char *const *list = argc == 1 ? unary : argc == 2 ? binary : NULL;
+    for (size_t i = 0; list && list[i]; i++) if (strcmp(list[i], name) == 0) return 1;
+    return 0;
+}
+
+/*
+ * A float computed only from numbers and constants of phys known to ± (phys.G * 2.0,
+ * sqrt(phys.G)): where a measure is expected, it is computed as a measure, so that
+ * the constants bring their uncertainty.  A float variable has none.
+ */
+static int carries_uncertainty(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_FLOAT) return n->measure_src != NULL;
+    if (!n->type_name || strcmp(n->type_name, "float") != 0) return 0;
+    if (n->kind == AST_BINARY && n->text && n->child_count == 2 && n->text[0] && !n->text[1] &&
+        strchr("+-*/", n->text[0]))
+        return carries_uncertainty(n->children[0]) || carries_uncertainty(n->children[1]);
+    if (n->kind == AST_UNARY && n->text && strcmp(n->text, "-") == 0 && n->child_count == 1)
+        return carries_uncertainty(n->children[0]);
+    if (n->kind == AST_CALL && n->text && n->text[0] == '@' && measure_math(n->text + 1, n->child_count)) {
+        for (size_t i = 0; i < n->child_count; i++) if (carries_uncertainty(n->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* n (a number) becomes @to_measure(n): exactly that value, no uncertainty */
+static int wrap_measure(AstNode *n) {
+    AstNode *inner = malloc(sizeof(*inner));
+    char *name = malloc(sizeof("@to_measure"));
+    if (!inner || !name) { free(inner); free(name); return 0; }
+    *inner = *n;
+    memset(n, 0, sizeof(*n));
+    n->kind = AST_CALL;
+    n->line = inner->line;
+    n->file = inner->file;
+    strcpy(name, "@to_measure");
+    n->text = name;
+    if (!ast_add_child(n, inner)) return 0;
+    return set_type(n, "measure");
+}
+
+static int retype_measure(AstNode *n);
+
+/* a number used where a measure is expected */
+static int to_measure(AstNode *n) {
+    if (is_measure(n->type_name)) return 1;
+    if (carries_uncertainty(n)) return retype_measure(n);
+    return wrap_measure(n);
+}
+
+static int retype_measure(AstNode *n) {
+    if (n->kind != AST_FLOAT) {
+        for (size_t i = 0; i < n->child_count; i++) {
+            if (!to_measure(n->children[i])) return 0;
+        }
+    }
+    return set_type(n, "measure");
+}
+
+/* measure(v, u), measure(x), value(m), uncertainty(m) */
+static int check_measure_call(Semantic *s, AstNode *n) {
+    const char *name = n->text;
+    int is_new = strcmp(name, "measure") == 0, is_value = strcmp(name, "value") == 0;
+    int is_unc = strcmp(name, "uncertainty") == 0;
+    if (!is_new && !is_value && !is_unc) return 0;
+    size_t want = is_new && n->child_count == 2 ? 2 : 1;
+    if (n->child_count != want) {
+        report("semantic error: %s() expects %s, got %zu argument(s)\n", name,
+               is_new ? "measure(value, uncertainty) or measure(x)" : "1 argument (a measure)", n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *a = expr_type(s, n->children[0]);
+    const char *b = want == 2 ? expr_type(s, n->children[1]) : NULL;
+    if (!a || (want == 2 && !b)) return -1;
+    if (is_new && want == 2) {
+        if (!is_numeric(a) || !is_numeric(b)) {
+            report("semantic error: measure(value, uncertainty) expects two numbers, got %s and %s\n", a, b);
+            s->had_error = 1;
+            return -1;
+        }
+    } else if (is_new) {
+        if (!is_measure(a) && !is_numeric(a)) {
+            report("semantic error: measure(x) expects a number or a measure, got %s\n", a);
+            s->had_error = 1;
+            return -1;
+        }
+        if (!to_measure(n->children[0])) return -1;
+    } else if (!is_measure(a)) {
+        report("semantic error: %s() expects a measure (value ± uncertainty), got %s\n", name, a);
+        s->had_error = 1;
+        return -1;
+    }
+    char *renamed = malloc(strlen(name) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, name);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, is_new ? "measure" : "float") ? 1 : -1;
+}
+
 static int check_builtin_call(Semantic *s, AstNode *n) {
     static const char *const float_unary[] = {
         "sqrt", "exp", "log", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
@@ -1234,9 +1352,11 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
                                           : expr_type(s, n->children[lit]);
         if (!args[lit]) return -1;
     }
+    int any_measure = 0;
     for (size_t i = 0; i < want; i++) {
         if (!args[i]) args[i] = expr_type(s, n->children[i]);
         if (!args[i]) return -1;
+        if (is_measure(args[i])) { any_measure = 1; continue; }             /* V0.53 */
         if (big_math && is_big(args[i])) {
             any_big = 1;
             continue;
@@ -1260,6 +1380,30 @@ static int check_builtin_call(Semantic *s, AstNode *n) {
         }
     }
 
+    if (any_measure) {
+        /* V0.53: sqrt(m), pow(m, 2), atan2(y, x)... of measures: a measure */
+        if (!measure_math(name, want)) {
+            report("semantic error: %s() is not defined for a measure: use value(m) to work on its value\n", name);
+            s->had_error = 1;
+            return -1;
+        }
+        for (size_t i = 0; i < want; i++) {
+            if (is_measure(args[i])) continue;
+            if (!is_numeric(args[i])) {
+                report("semantic error: argument %zu of %s() expects a number or a measure, got %s\n", i + 1, name, args[i]);
+                s->had_error = 1;
+                return -1;
+            }
+            if (!to_measure(n->children[i])) return -1;
+        }
+        char *renamed = malloc(strlen(name) + 2);
+        if (!renamed) return -1;
+        renamed[0] = '@';
+        strcpy(renamed + 1, name);
+        free(n->text);
+        n->text = renamed;
+        return set_type(n, "measure") ? 1 : -1;
+    }
     if ((kind == 2 || kind == 4) && !any_big) {
         /* pow(x, 2.0) or max(x, 0.0) with x a float32: the number written is a float32 */
         for (size_t i = 0; i < 2; i++) {
@@ -1519,6 +1663,28 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             return NULL;
         }
         return set_type(n, list) ? n->type_name : NULL;
+    }
+    /* V0.53: value ± uncertainty, and the operators of measures */
+    if (strcmp(n->text, "\xc2\xb1") == 0) {
+        if (!is_numeric(left) || !is_numeric(right)) {
+            report("semantic error: ± writes a measure from two numbers (value ± uncertainty), got %s ± %s\n", left, right);
+            s->had_error = 1;
+            return NULL;
+        }
+        return set_type(n, "measure") ? n->type_name : NULL;
+    }
+    if (is_measure(left) || is_measure(right)) {
+        const char *op = n->text, *other = is_measure(left) ? right : left;
+        int cmp = !strcmp(op, "==") || !strcmp(op, "!=") || !strcmp(op, "<") || !strcmp(op, "<=") ||
+                  !strcmp(op, ">") || !strcmp(op, ">=");
+        int arith = !strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "*") || !strcmp(op, "/");
+        if ((!is_measure(other) && !is_numeric(other)) || (!cmp && !arith)) {
+            report("semantic error: operator '%s' is not defined for %s and %s\n", op, left, right);
+            s->had_error = 1;
+            return NULL;
+        }
+        if (!to_measure(lhs) || !to_measure(rhs)) return NULL;
+        return set_type(n, cmp ? "bool" : "measure") ? n->type_name : NULL;
     }
     if (!strcmp(left, "certfloat") || !strcmp(right, "certfloat")) {
         if (strcmp(left, "certfloat") || strcmp(right, "certfloat") ||
@@ -1826,6 +1992,8 @@ static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expec
         !type_int_literal(s, n->children[0], expected)) return NULL;
     const char *actual = expr_type_expected_plain(s, n, expected);
     if (actual && implicit_big(actual, expected)) return wrap_convert(n, expected) ? n->type_name : NULL;
+    /* V0.53: a number where a measure is expected (let g: measure = 9.81, return 0.0) */
+    if (actual && is_measure(expected) && is_numeric(actual)) return to_measure(n) ? n->type_name : NULL;
     return actual;
 }
 
@@ -2123,6 +2291,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             if (!fn) {
                 int builtin = check_bignum_call(s, n);
                 if (builtin == 0) builtin = check_matrix_builtin(s, n);
+                if (builtin == 0) builtin = check_measure_call(s, n);
                 if (builtin == 0) builtin = check_builtin_call(s, n);
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
@@ -2244,6 +2413,10 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             if (is_int_literal(n)) return type_int_literal(s, n, "int");   /* -9223372036854775808 fits */
             const char *operand = expr_type(s, n->children[0]);
             if (!operand) return NULL;
+            if (is_measure(operand)) {                                       /* V0.53: -m */
+                if (strcmp(n->text, "-") != 0) { error_type(s, "a measure only takes the unary operator '-'"); return NULL; }
+                return set_type(n, "measure") ? n->type_name : NULL;
+            }
             if (!strcmp(operand,"bigint") || !strcmp(operand,"bigfloat")) {
                 if (strcmp(n->text,"-")) {error_type(s,"unary operator not supported for big numbers");return NULL;}
                 set_type(n,operand);return n->type_name;
@@ -2333,8 +2506,9 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
                     error_type(s, "m[i] alone is a matrix row: write m[i][j]");
                     return 0;
                 }
-                report("semantic error: cannot initialize %s '%s' with %s\n",
-                        n->type_name, n->text, actual);
+                report("semantic error: cannot initialize %s '%s' with %s%s\n",
+                        n->type_name, n->text, actual,
+                        is_measure(actual) && is_numeric(n->type_name) ? ": value(m) gives its value" : "");
                 s->had_error = 1;
                 return 0;
             }
@@ -2356,8 +2530,9 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             }
             const char *actual = expr_type_expected(s, n->children[0], expected);
             if (!actual || !assignable(expected, actual)) {
-                report("semantic error: cannot assign %s to %s variable '%s'\n",
-                        actual ? actual : "invalid", expected, n->text);
+                report("semantic error: cannot assign %s to %s variable '%s'%s\n",
+                        actual ? actual : "invalid", expected, n->text,
+                        is_measure(actual) && is_numeric(expected) ? ": value(m) gives its value" : "");
                 s->had_error = 1;
                 return 0;
             }
@@ -2524,7 +2699,7 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
         case AST_PRINT: {
             const char *type = expr_type(s, n->children[0]);
             if (!type) return 0;
-            if (!machine_bits(type) && !is_float_type(type) &&
+            if (!machine_bits(type) && !is_float_type(type) && !is_measure(type) &&
                 strcmp(type, "bool") != 0 && strcmp(type, "string") != 0 && !is_big(type) &&
                 strcmp(type, "bigint") != 0 && strcmp(type, "bigfloat") != 0) {
                 error_type(s, "print() received an unsupported type");

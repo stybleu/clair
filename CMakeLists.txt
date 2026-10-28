@@ -28,4 +28,15 @@ add_custom_command(
     DEPENDS ${CLAIR_BIG_PARTS} tools/embed_runtime.cmake
     COMMENT "Embedding the big-number runtime")
 target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_big_runtime.h)
+
+# V0.53: the measure runtime (value ± uncertainty), copied into the programs that use measures
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_measure_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_measure.h\;clair_measure_rt.c" -DNAME=clair_measure_runtime_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_measure_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_measure.h src/clair_measure_rt.c tools/embed_file.cmake
+    COMMENT "Embedding the measure runtime")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_measure_runtime.h)
 target_include_directories(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

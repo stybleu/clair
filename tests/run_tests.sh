@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.52 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.53 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -993,6 +993,20 @@ if [ "$kio_fm" -gt 30000 ]; then
     exit 1
 fi
 printf '%s\n' "fonctions_memoire.cl : OK -> 6 millions de listes faites par des fonctions, $kio_fm Kio au plus"
+
+# V0.53 : des mesures avec leur incertitude (9.81 ± 0.02), les constantes de phys avec la leur
+./build/clair tests/mesures.cl -o build/test_mesures
+[ "$(./build/test_mesures)" = "$(cat tests/mesures.expected)" ]
+G=build/test_mesures.generated.c
+grep -Fq 'ClairMeasure g = clair_m_new((double)(9.81), (double)(0.02), 21);' $G
+grep -Fq 'clair_m_div(clair_m_exact((double)(3.98600435507e14)), clair_m_phys(6.67430e-11, 1, (const int[]){6}, (const double[]){1}))' $G
+grep -Fq 'clair_m_phys(9.1093837139e-31, 2, (const int[]){1, 2}, (const double[]){-2, 1})' $G
+grep -Fq 'double gf = 6.67430e-11;' $G
+printf '%s\n' 'mesures.cl : OK -> chute, pendule, x - x = 0, G et m_e de CODATA 2022, masse de la Terre, eps0 mu0 c^2 = 1 exactement, 100 mesures'
+expect_compile_error invalid_mesure_unite 'unit error: the value is in m, its uncertainty in s (in main, line 2)'
+expect_compile_error invalid_mesure_float "semantic error: cannot initialize float 'w' with measure: value(m) gives its value (line 3)"
+expect_compile_error invalid_mesure_fonction 'semantic error: min() is not defined for a measure: use value(m) to work on its value (line 3)'
+expect_runtime_error mesure_negative_runtime '1.00 ± 0.10' 'Clair runtime error: the uncertainty after ± must be a number, 0 or more, got -0.1 (line 5)'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

@@ -54,6 +54,7 @@ typedef struct AstNode {
     char *unit;          /* V0.48: the unit written (float[m/s], 9.81[m/s^2]), canonical ("m^1 s^-1"), or NULL */
     size_t line;         /* V0.49: the line of the program where the node was read (0: made by the compiler) */
     const char *file;    /* V0.49: NULL for the program, "orbite.cl" for a module */
+    const char *measure_src;   /* V0.53: a constant of phys known to ±: its sources, "2:1 1:-2" (static text) */
 } AstNode;
 
 /* V0.49: given to every new node; the parser keeps them up to date */

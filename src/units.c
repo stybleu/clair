@@ -273,13 +273,29 @@ static const char *show(const Dim *d) {
 }
 
 static int is_float_type(const char *t) {
-    return t && (strcmp(t, "float") == 0 || strcmp(t, "float32") == 0 ||
+    return t && (strcmp(t, "float") == 0 || strcmp(t, "float32") == 0 || strcmp(t, "measure") == 0 ||
                  strcmp(t, "list[float]") == 0 || strcmp(t, "list[float32]") == 0);
 }
+
 
 static Unit none(void) { Unit u; memset(&u, 0, sizeof(u)); u.kind = U_NONE; return u; }
 static Unit known(const Dim *d) { Unit u; memset(&u, 0, sizeof(u)); u.kind = U_KNOWN; u.d = *d; return u; }
 static Unit dimensionless(void) { Unit u; memset(&u, 0, sizeof(u)); u.kind = U_KNOWN; return u; }
+
+/* V0.53: value ± uncertainty: the same unit; a number written without unit takes the other one */
+static Unit plus_minus(Unit v, Unit u) {
+    if (failed || v.kind == U_NONE || u.kind == U_NONE) return none();
+    if (v.kind == U_KNOWN && u.kind == U_KNOWN) {
+        if (!dim_eq(&v.d, &u.d)) { unit_error("the value is in %s, its uncertainty in %s", show(&v.d), show(&u.d)); return none(); }
+        return v;
+    }
+    if (v.kind == U_KNOWN) return v;
+    if (u.kind == U_KNOWN) return u;
+    Unit b = none();
+    b.kind = U_BARE;
+    b.node = v.node;
+    return b;
+}
 
 static int decl_unit(const AstNode *decl, Dim *d) {
     if (!decl || !decl->unit) return 0;
@@ -416,6 +432,14 @@ static Unit builtin_unit(const AstNode *e) {
     static const char *const pair[] = { "min", "max", "hypot", "fmod", NULL };
     const char *name = e->text + 1;
     size_t argc = e->child_count;
+    /* V0.53: a number as a measure, value(m), uncertainty(m): the same unit; measure(v, u) like v ± u */
+    if ((strcmp(name, "to_measure") == 0 || strcmp(name, "value") == 0 || strcmp(name, "uncertainty") == 0 ||
+         strcmp(name, "measure") == 0) && argc == 1)
+        return unit_of(e->children[0]);
+    if (strcmp(name, "measure") == 0 && argc == 2) {
+        Unit v = unit_of(e->children[0]), u = unit_of(e->children[1]);
+        return plus_minus(v, u);
+    }
     if (strncmp(name, "bn_", 3) == 0 || strcmp(name, "convert") == 0 || strncmp(name, "slice", 5) == 0) {
         Unit first = argc ? unit_of(e->children[0]) : none();
         for (size_t i = 1; i < argc; i++) unit_of(e->children[i]);
@@ -560,6 +584,7 @@ static Unit unit_of_at(const AstNode *e) {
             }
             Unit l = unit_of(e->children[0]), r = unit_of(e->children[1]);
             if (failed) return none();
+            if (strcmp(op, "\xc2\xb1") == 0) return plus_minus(l, r);        /* V0.53 */
             int cmp = !strcmp(op, "<") || !strcmp(op, "<=") || !strcmp(op, ">") || !strcmp(op, ">=") ||
                       !strcmp(op, "==") || !strcmp(op, "!=");
             if (cmp) {

@@ -13,6 +13,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Entrée et sortie comme en Python : `input()`, `read_lines()`, `read_text()`, `read_bytes()` (l'entrée ou un fichier), `write(s)` sans aller à la ligne, `write(octets)`, `write_file` ; octets `list[u8]` avec `encode`, `decode`, `ord`, `chr`
 - Listes toutes faites : `[0] * n`, `[1, 2] * 3`, comme en Python
 - Unités vérifiées à la compilation : `float[m]`, `float[m/s^2]`, `9.81[m/s^2]` ; `m + s` est refusé avant de lancer le programme, et le C reste le même (aucun coût) ; les constantes de `phys` et `astro` ont leur unité
+- Mesures avec incertitude : `9.81 ± 0.02` (ou `+/-`), `measure[m/s^2]` ; Clair propage l'incertitude dans tout le calcul (corrélations comprises : `x - x` vaut `0 ± 0`), et les constantes de `phys` gardent leur incertitude de CODATA 2022
 - Chaque erreur de compilation dit sa ligne (et son fichier dans un module) : `semantic error: undefined variable 'y' (line 5)`
 - `import math as m`, `from astro import GM_mars`, `import orbite` (un fichier `orbite.cl`) comme en Python ; modules `math`, `phys` (constantes CODATA 2022) et `astro` (UAI, éphéméride DE440) rangés dans le compilateur, sans coût à l'exécution
 - Nombres aléatoires `seed`, `random`, `randint`, `uniform`, `gauss`, `shuffle`, `choice` : mêmes tirages que Python pour la même graine
@@ -100,6 +101,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
 
+- [Clair V0.53](docs/README_V0.53.md) : mesures avec incertitude (`9.81 ± 0.02`, `measure[m]`), propagée dans tout le calcul ; les constantes de `phys` avec leur incertitude CODATA 2022
 - [Clair V0.52](docs/README_V0.52.md) : les listes faites par les fonctions et utilisées tout de suite sont rendues à la mémoire : une boucle ne grandit plus
 - [Clair V0.51](docs/README_V0.51.md) : classes valeur (structures du C) et objets sur la pile : aussi rapide que le C, plus de mémoire prise dans les boucles
 - [Clair V0.50](docs/README_V0.50.md) : calculs certifiés avec certfloat, certsqrt(), certdigits() et mémoire améliorée

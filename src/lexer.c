@@ -131,6 +131,11 @@ Token lexer_next(Lexer *l) {
         return make_token(TOKEN_STRING, content, len, line, column);
     }
 
+    if ((unsigned char)c == 0xC2 && (unsigned char)peek(l) == 0xB1) {   /* V0.53: ± in UTF-8 */
+        advance(l);
+        return make_token(TOKEN_PLUSMINUS, l->source + start_pos, 2, line, column);
+    }
+
     switch (c) {
         case '(': return make_token(TOKEN_LPAREN, l->source + start_pos, 1, line, column);
         case ')': return make_token(TOKEN_RPAREN, l->source + start_pos, 1, line, column);
@@ -142,6 +147,11 @@ Token lexer_next(Lexer *l) {
         case ',': return make_token(TOKEN_COMMA, l->source + start_pos, 1, line, column);
         case '.': return make_token(TOKEN_DOT, l->source + start_pos, 1, line, column);
         case '+':
+            if (peek(l) == '/' && peek_next(l) == '-') {   /* V0.53: 9.81 +/- 0.02 */
+                advance(l);
+                advance(l);
+                return make_token(TOKEN_PLUSMINUS, l->source + start_pos, 3, line, column);
+            }
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_PLUS_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_PLUS, l->source + start_pos, 1, line, column);
         case '*':
@@ -207,7 +217,7 @@ const char *token_kind_name(TokenKind kind) {
         case TOKEN_COLON: return ":"; case TOKEN_COMMA: return ","; case TOKEN_DOT: return "."; case TOKEN_ARROW: return "->"; case TOKEN_EQUAL: return "=";
         case TOKEN_EQUAL_EQUAL: return "=="; case TOKEN_BANG_EQUAL: return "!="; case TOKEN_LESS: return "<";
         case TOKEN_LESS_EQUAL: return "<="; case TOKEN_GREATER: return ">"; case TOKEN_GREATER_EQUAL: return ">=";
-        case TOKEN_PLUS: return "+"; case TOKEN_MINUS: return "-"; case TOKEN_STAR: return "*"; case TOKEN_SLASH: return "/"; case TOKEN_PERCENT: return "%";
+        case TOKEN_PLUS: return "+"; case TOKEN_PLUSMINUS: return "±"; case TOKEN_MINUS: return "-"; case TOKEN_STAR: return "*"; case TOKEN_SLASH: return "/"; case TOKEN_PERCENT: return "%";
         case TOKEN_PLUS_EQUAL: return "+="; case TOKEN_MINUS_EQUAL: return "-="; case TOKEN_STAR_EQUAL: return "*=";
         case TOKEN_SLASH_EQUAL: return "/="; case TOKEN_PERCENT_EQUAL: return "%=";
         case TOKEN_AMP: return "&"; case TOKEN_PIPE: return "|"; case TOKEN_CARET: return "^"; case TOKEN_TILDE: return "~";
