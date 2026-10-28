@@ -3103,6 +3103,10 @@ static int fresh_expr(const AstNode *e) {
     if (e->kind == AST_CALL && e->text && e->text[0] != '@' && is_fresh_fn(e->text)) return 1;
     if (e->kind == AST_CALL && e->text && (strcmp(e->text, "@read_bytes") == 0 || strcmp(e->text, "@encode") == 0))
         return 1;
+    /* V0.52: the pieces of a text, its lines, a CSV file: new each time */
+    if (e->kind == AST_CALL && e->text && (strcmp(e->text, "@split") == 0 || strcmp(e->text, "@read_lines") == 0 ||
+                                           strcmp(e->text, "@load_csv") == 0) && is_owned_type(e->type_name))
+        return 1;
     if (is_list_repeat(e)) return 1;
     return 0;
 }
@@ -3119,6 +3123,8 @@ static int own_expr_ok(const AstNode *n, const char *name, int visible, const As
         if (parent->kind == AST_INDEX && idx == 0) return 1;                     /* v[i] */
         if (parent->kind == AST_FOR_EACH && idx == 0) return 1;                  /* for x in v */
         if (parent->kind == AST_RETURN && ctx->allow_return) return 1;           /* return v */
+        if (parent->kind == AST_BINARY && idx == 1 && parent->text &&
+            (strcmp(parent->text, "in") == 0 || strcmp(parent->text, "not in") == 0)) return 1;   /* x in v */
         if (parent->kind == AST_CALL && parent->text) {
             const char *callee = parent->text;
             if (strcmp(callee, "len") == 0 || strcmp(callee, "@rows") == 0 || strcmp(callee, "@cols") == 0) return 1;
@@ -3222,7 +3228,12 @@ static int count_declarations(const AstNode *n, const char *name) {
     return c;
 }
 
-/* every `return` returns the same local, declared once with a new list nobody else keeps */
+/*
+ * Every `return` gives a new list nobody else keeps: a new list written there
+ * (V0.52: return [a, b], return xs[1:], return [x * k for x in xs], return f(x)
+ * when f makes a new one), or always the same local, declared once with a new
+ * list, that is only read before.
+ */
 static int returns_fresh(const AstNode *fn) {
     if (!is_owned_type(fn->type_name)) return 0;
     const AstNode *body = function_body(fn);
@@ -3232,11 +3243,17 @@ static int returns_fresh(const AstNode *fn) {
     const AstNode *stack[512];
     size_t top = 0;
     const char *returned = NULL;
+    int returns = 0;
     if (body) stack[top++] = body;
     while (top > 0) {
         const AstNode *n = stack[--top];
         if (n->kind == AST_RETURN) {
-            if (n->child_count != 1 || !is_ident(n->children[0], NULL)) return 0;
+            if (n->child_count != 1) return 0;
+            returns++;
+            if (!is_ident(n->children[0], NULL)) {
+                if (!fresh_expr(n->children[0])) return 0;
+                continue;
+            }
             if (returned && strcmp(returned, n->children[0]->text) != 0) return 0;
             returned = n->children[0]->text;
         }
@@ -3245,7 +3262,9 @@ static int returns_fresh(const AstNode *fn) {
             stack[top++] = n->children[i];
         }
     }
-    if (!returned || count_declarations(fn, returned) != 1) return 0;
+    if (!returns) return 0;
+    if (!returned) return 1;
+    if (count_declarations(fn, returned) != 1) return 0;
     for (size_t i = 0; i < let_count; i++) {
         const AstNode *let = lets[i];
         if (strcmp(let->text, returned) != 0) continue;
@@ -3328,6 +3347,95 @@ static void compute_ownership(const AstNode *program) {
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* V0.52: the new lists an instruction makes and uses up at once.      */
+/*                                                                    */
+/*   t += somme(echelle(xs, 0.5))     n += len(split(ligne, " "))      */
+/*   if x in voisins(k) { ... }       for v in paire(i) { ... }        */
+/*                                                                    */
+/* A new list (fresh_expr) given to a parameter that does not keep it, */
+/* indexed, measured, searched with `in` or thrown away is put in a C  */
+/* variable where it is made (the calls keep their order), and freed   */
+/* as soon as the instruction is over.  Before, it stayed until the    */
+/* end of the program: a loop calling such a function kept growing.    */
+/* ------------------------------------------------------------------ */
+
+#define CLAIR_TMP_MAX 256
+static const AstNode *tmp_nodes[CLAIR_TMP_MAX];
+static size_t tmp_ids[CLAIR_TMP_MAX];
+static size_t tmp_count = 0;        /* temporaries of the instructions being written */
+static size_t tmp_first = 0;        /* the first one of the current instruction */
+static size_t tmp_serial = 0;
+
+/* the value of the child idx of parent is read there and kept nowhere */
+static int tmp_used_up(const AstNode *parent, size_t idx) {
+    if (!parent) return 0;
+    switch (parent->kind) {
+        case AST_EXPR_STMT:
+            return 1;
+        case AST_INDEX:
+            return idx == 0 && !is_owned_type(parent->type_name) && !is_dict_type(parent->type_name);
+        case AST_BINARY:
+            return idx == 1 && parent->text &&
+                   (strcmp(parent->text, "in") == 0 || strcmp(parent->text, "not in") == 0);
+        case AST_CALL: {
+            const char *c = parent->text;
+            if (!c) return 0;
+            if (strcmp(c, "len") == 0 || strcmp(c, "@rows") == 0 || strcmp(c, "@cols") == 0) return 1;
+            if (strncmp(c, "@slice", 6) == 0) return idx == 0;           /* xs[a:b] copies */
+            if (strcmp(c, "@choice") == 0 || strcmp(c, "@write") == 0 || strcmp(c, "@write_file") == 0 ||
+                strcmp(c, "@decode") == 0) return 1;
+            return c[0] != '@' && find_program_function(c) && !param_escapes(c, idx);
+        }
+        default:
+            return 0;
+    }
+}
+
+static void collect_tmps(const AstNode *n, const AstNode *parent, size_t idx) {
+    if (!n || n->kind == AST_BLOCK || tmp_count >= CLAIR_TMP_MAX) return;
+    if (n->type_name && is_owned_type(n->type_name) && fresh_expr(n) && tmp_used_up(parent, idx) &&
+        c_type_name(n->type_name)) {
+        tmp_nodes[tmp_count] = n;
+        tmp_ids[tmp_count++] = tmp_serial++;
+    }
+    for (size_t i = 0; i < n->child_count; i++) collect_tmps(n->children[i], n, i);
+}
+
+/* does the program free such a list somewhere (then clair_rt_list_free is written) */
+static int tmp_lists_used = 0;
+
+static void find_tmp_lists(const AstNode *n, const AstNode *parent, size_t idx) {
+    if (!n || tmp_lists_used) return;
+    if (n->type_name && is_list_type(n->type_name) && fresh_expr(n) &&
+        (tmp_used_up(parent, idx) || (parent && parent->kind == AST_FOR_EACH && idx == 0))) {
+        tmp_lists_used = 1;
+        return;
+    }
+    for (size_t i = 0; i < n->child_count; i++) find_tmp_lists(n->children[i], n, i);
+}
+
+/* the C variables, before the instruction */
+static void emit_tmp_decls(FILE *f, size_t first, size_t count, int depth) {
+    for (size_t i = first; i < count; i++) {
+        indent(f, depth);
+        fprintf(f, "%s clair_tmp_%zu = NULL;\n", c_type_name(tmp_nodes[i]->type_name), tmp_ids[i]);
+    }
+}
+
+/* freed after the instruction: as instructions, or inside an expression (", ...") */
+static void emit_tmp_frees(FILE *f, size_t first, size_t count, int depth, int in_expr) {
+    for (size_t i = first; i < count; i++) {
+        const char *fn = is_matrix_type(tmp_nodes[i]->type_name) ? "clair_rt_matrix_free" : "clair_rt_list_free";
+        if (in_expr) {
+            fprintf(f, ", (clair_tmp_%zu ? %s(clair_tmp_%zu) : (void)0)", tmp_ids[i], fn, tmp_ids[i]);
+        } else {
+            indent(f, depth);
+            fprintf(f, "if (clair_tmp_%zu) %s(clair_tmp_%zu);\n", tmp_ids[i], fn, tmp_ids[i]);
+        }
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* V0.51: objects that never leave their function live on its stack. */
@@ -3687,7 +3795,23 @@ static int emit_machine_binary(FILE *f, const AstNode *n, int form) {
     return 1;
 }
 
+static int emit_expr_node(FILE *f, const AstNode *n);
+
+/* V0.52: a temporary of the instruction is kept in its C variable where it is made */
 static int emit_expr(FILE *f, const AstNode *n) {
+    for (size_t i = tmp_count; i > 0; i--) {
+        if (tmp_nodes[i - 1] != n) continue;
+        tmp_nodes[i - 1] = NULL;                 /* written once, the call inside is the plain one */
+        fprintf(f, "(clair_tmp_%zu = ", tmp_ids[i - 1]);
+        int ok = emit_expr_node(f, n);
+        fputc(')', f);
+        tmp_nodes[i - 1] = n;
+        return ok;
+    }
+    return emit_expr_node(f, n);
+}
+
+static int emit_expr_node(FILE *f, const AstNode *n) {
     switch (n->kind) {
         case AST_INTEGER:
             if (big_bits(n->type_name)) return emit_big_literal(f, n);
@@ -4917,7 +5041,38 @@ static int emit_stmt(FILE *f, const AstNode *n, int depth) {
         if (loop_mark_count >= sizeof(loop_marks) / sizeof(loop_marks[0])) return 0;
         loop_marks[loop_mark_count++] = owned_live_count;
     }
+    /* V0.52: the new lists this instruction uses up (not those of the blocks inside) */
+    size_t saved_first = tmp_first, saved_count = tmp_count;
+    tmp_first = tmp_count;
+    switch (n->kind) {
+        case AST_WHILE: case AST_FOR: case AST_BLOCK: case AST_BREAK: case AST_CONTINUE:
+            break;
+        case AST_IF:
+            if (n->child_count >= 2 && !(n->children[1]->text && strcmp(n->children[1]->text, "absolue") == 0))
+                collect_tmps(n->children[0], n, 0);
+            break;
+        case AST_FOR_EACH:                       /* inside the list it walks; the list itself: see AST_FOR_EACH */
+            if (n->child_count == 2)
+                for (size_t i = 0; i < n->children[0]->child_count; i++)
+                    collect_tmps(n->children[0]->children[i], n->children[0], i);
+            break;
+        default:
+            for (size_t i = 0; i < n->child_count; i++) collect_tmps(n->children[i], n, i);
+            break;
+    }
+    size_t first = tmp_first, count = tmp_count;
+    if (count > first) {
+        emit_tmp_decls(f, first, count, depth);
+        if (n->kind == AST_IF) {
+            indent(f, depth);
+            fprintf(f, "int clair_cond_%zu;\n", tmp_ids[first]);
+        }
+    }
     int ok = emit_stmt_inner(f, n, depth);
+    if (ok && count > first && n->kind != AST_IF && n->kind != AST_RETURN && n->kind != AST_FOR_EACH)
+        emit_tmp_frees(f, first, count, depth, 0);
+    tmp_first = saved_first;
+    tmp_count = saved_count;
     if (loop) loop_mark_count--;
     return ok;
 }
@@ -5398,8 +5553,9 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
         }
 
         case AST_RETURN:
-            if (owned_live_count > 0) {
+            if (owned_live_count > 0 || tmp_count > tmp_first) {
                 /* the value first (it may read an owned list), then the frees */
+                size_t first = tmp_first, count = tmp_count;
                 const char *type = c_type_name(current_return_type);
                 if (!type) return 0;
                 fputs("{\n", f);
@@ -5407,6 +5563,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 fprintf(f, "%s clair_result = ", type);
                 if (!emit_return_value(f, n->children[0])) return 0;
                 fputs(";\n", f);
+                emit_tmp_frees(f, first, count, depth + 1, 0);
                 emit_free_since(f, 0, depth + 1);
                 indent(f, depth + 1);
                 fputs("return clair_result;\n", f);
@@ -6270,6 +6427,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
              * v takes xs[0], xs[1], ... while the index is below len(xs).
              */
             if (!n->text || n->child_count != 2 || !n->type_name) return 0;
+            size_t tfirst = tmp_first, tcount = tmp_count;    /* V0.52: new lists inside the walked one */
             if (is_dict_type(n->type_name)) {
                 /*
                  * for k in d: the keys in the order they were added; adding a key
@@ -6281,6 +6439,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 fprintf(f, "ClairDict clair_dict_%s = ", k);
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(";\n", f);
+                emit_tmp_frees(f, tfirst, tcount, depth + 1, 0);
                 indent(f, depth + 1);
                 fprintf(f, "size_t clair_count_%s = clair_dict_%s->len;\n", k, k);
                 indent(f, depth + 1);
@@ -6302,6 +6461,18 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             const AstNode *list = n->children[0], *body = n->children[1];
             const char *v = n->text;
             const char *gap = elem[strlen(elem) - 1] == '*' ? "" : " ";   /* "double v" / "const char *v" */
+
+            /*
+             * V0.52: a new list nobody else knows (for v in paire(i)) is freed
+             * after the loop, or by a return inside it (not by break / continue).
+             */
+            char *own_iter = NULL;
+            if (!is_access_path(list) && fresh_expr(list) && is_list_type(list->type_name) &&
+                owned_live_count < OWN_MAX) {
+                own_iter = str_fmt("clair_list_%s", v);
+                for (size_t i = 0; own_iter && i < owned_live_count; i++)
+                    if (strcmp(owned_live[i].name, own_iter) == 0) { free(own_iter); own_iter = NULL; }
+            }
 
             if (!tree_may_grow_lists(body)) {
                 /*
@@ -6329,6 +6500,11 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (is_access_path(list)) { if (!emit_operand(f, list, PREC_POSTFIX, 0)) return 0; }
                 else fprintf(f, "clair_list_%s", v);
                 fputs("->len;\n", f);
+                emit_tmp_frees(f, tfirst, tcount, depth + 1, 0);
+                if (own_iter) {
+                    owned_live[owned_live_count++] = (OwnedVar){ own_iter, 0 };
+                    loop_marks[loop_mark_count - 1] = owned_live_count;    /* break / continue keep it */
+                }
                 indent(f, depth + 1);
                 fprintf(f, "for (int64_t clair_k_%s = 0; clair_k_%s < clair_count_%s; clair_k_%s++) {\n", v, v, v, v);
                 if (used) {
@@ -6338,6 +6514,12 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (!emit_block(f, body, depth + 2)) return 0;
                 indent(f, depth + 1);
                 fputs("}\n", f);
+                if (own_iter) {
+                    indent(f, depth + 1);
+                    fprintf(f, "clair_rt_list_free(%s);\n", own_iter);
+                    owned_live_count--;
+                    free(own_iter);
+                }
                 indent(f, depth);
                 fputs("}\n", f);
                 return 1;
@@ -6357,7 +6539,13 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (!emit_expr(f, list)) return 0;
                 fputs(";\n", f);
                 d = depth + 1;
+                emit_tmp_frees(f, tfirst, tcount, d, 0);
                 indent(f, d);
+            }
+            if (direct && own_iter) { free(own_iter); own_iter = NULL; }
+            if (own_iter) {
+                owned_live[owned_live_count++] = (OwnedVar){ own_iter, 0 };
+                loop_marks[loop_mark_count - 1] = owned_live_count;        /* break / continue keep it */
             }
             char *name = direct ? str_dup(list->text) : str_fmt("clair_list_%s", v);
             if (!name) return 0;
@@ -6370,6 +6558,12 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
             if (!emit_block(f, body, d + 1)) return 0;
             indent(f, d);
             fputs("}\n", f);
+            if (own_iter) {
+                indent(f, d);
+                fprintf(f, "clair_rt_list_free(%s);\n", own_iter);
+                owned_live_count--;
+                free(own_iter);
+            }
             if (!direct) {
                 indent(f, depth);
                 fputs("}\n", f);
@@ -6386,9 +6580,19 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 fputs("}\n", f);
                 return 1;
             }
-            fputs("if (", f);
-            if (!emit_expr(f, n->children[0])) return 0;
-            fputs(") {\n", f);
+            if (tmp_count > tmp_first) {
+                /* V0.52: the new lists of the condition are freed before the blocks run */
+                size_t first = tmp_first, count = tmp_count;
+                fprintf(f, "if (((clair_cond_%zu = (", tmp_ids[first]);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs("))", f);
+                emit_tmp_frees(f, first, count, depth, 1);
+                fprintf(f, ", clair_cond_%zu)) {\n", tmp_ids[first]);
+            } else {
+                fputs("if (", f);
+                if (!emit_expr(f, n->children[0])) return 0;
+                fputs(") {\n", f);
+            }
             if (!emit_block(f, n->children[1], depth + 1)) return 0;
             indent(f, depth);
             fputc('}', f);
@@ -8730,7 +8934,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
                     f
                 );
             }
-            if (own_decl_count > 0) {
+            tmp_lists_used = 0;
+            find_tmp_lists(program, NULL, 0);
+            if (own_decl_count > 0 || tmp_lists_used) {
                 fputs(
                     "/* A list nobody uses any more: freed now instead of at the end. */\n"
                     "static void clair_rt_list_free(ClairList list) {\n"

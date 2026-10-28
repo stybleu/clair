@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.51 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.52 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -973,6 +973,26 @@ printf '%s\n' 'classes_valeur.cl : OK -> classes valeur, objets sur la pile, ali
     { printf '%s\n' 'tools/jeux/vecteurs.cl : ECHEC -> sortie differente du C pour 1000' >&2; exit 1; }
 if grep -q 'clair_rt_object_make(&(ClairClass_Vec)' build/jeu_vecteurs.generated.c; then printf '%s\n' 'jeu vecteurs : ECHEC -> des Vec en memoire' >&2; exit 1; fi
 printf '%s\n' 'jeu vecteurs (1000) : OK -> meme sortie que le C, aucun objet Vec en memoire'
+
+# V0.52 : les listes faites par une fonction et utilisees tout de suite sont rendues a la memoire
+./build/clair tests/fonctions_listes.cl -o build/test_fonctions_listes
+[ "$(./build/test_fonctions_listes)" = "$(cat tests/fonctions_listes.expected)" ]
+G=build/test_fonctions_listes.generated.c
+grep -Fq 't += clair_fn_somme((clair_tmp_' $G
+grep -Fq 'if (clair_tmp_' $G
+grep -Fq 'clair_rt_list_free(clair_list_v);' $G
+grep -Fq 'clair_fn_somme_rec((clair_tmp_' $G
+grep -Fq 'ClairList c = clair_fn_garde(' $G
+printf '%s\n' 'fonctions_listes.cl : OK -> listes neuves en argument, [i], len, in, if, for ... in, return dans la boucle, recursion ; gardees : alias, champ, valeur rendue ; identique a Python'
+./build/clair tests/fonctions_memoire.cl -o build/test_fonctions_memoire
+out_fm="$(./build/memoire_max ./build/test_fonctions_memoire 2> build/fonctions_memoire.kio)"
+[ "$out_fm" = "$(cat tests/fonctions_memoire.expected)" ]
+kio_fm="$(cat build/fonctions_memoire.kio)"
+if [ "$kio_fm" -gt 30000 ]; then
+    printf '%s\n' "fonctions_memoire.cl : ECHEC -> $kio_fm Kio de memoire (moins de 30000 attendus)" >&2
+    exit 1
+fi
+printf '%s\n' "fonctions_memoire.cl : OK -> 6 millions de listes faites par des fonctions, $kio_fm Kio au plus"
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='
