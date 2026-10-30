@@ -42,6 +42,7 @@ Son compilateur est écrit en C et utilise Clang.
 - C généré lisible, proche du C écrit à la main
 - Optimisations de listes sur la pile
 - Optimisations SIMD ARM64 NEON
+- Optimisation DCE (`--dce`) : suppression des fonctions, méthodes, classes et de certaines variables inutilisées ([documentation](docs/README_DCE.md))
 - Division entière contrôlée
 
 - Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), avec leurs fonctions mathématiques (`sqrt`, `sin`, `exp`, `log`, `pi(1000)`, `isqrt`, `gcd`...), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
