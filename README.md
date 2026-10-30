@@ -101,6 +101,7 @@ Les validations principales sont réalisées sous Termux ARM64.
 Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
+- [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
 - [Clair V0.54](docs/README_V0.54.md) : une boucle ne garde plus ses textes : la mémoire d'un tour est rendue à la fin du tour ; les dictionnaires copient leurs clés
 - [Clair V0.53](docs/README_V0.53.md) : mesures avec incertitude (`9.81 ± 0.02`, `measure[m]`), propagée dans tout le calcul ; les constantes de `phys` avec leur incertitude CODATA 2022

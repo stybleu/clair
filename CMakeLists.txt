@@ -4,6 +4,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 add_executable(clair
     src/main.c
+    src/dce.c
     src/lexer.c
     src/ast.c
     src/parser.c
