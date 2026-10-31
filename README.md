@@ -43,6 +43,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Optimisations de listes sur la pile
 - Optimisations SIMD ARM64 NEON
 - Optimisation DCE (`--dce`) : suppression des fonctions, méthodes, classes et de certaines variables inutilisées ([documentation](docs/README_DCE.md))
+- Différentiation automatique (--ad) : dérivées et gradients, compatible --dce.
 - Division entière contrôlée
 
 - Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), avec leurs fonctions mathématiques (`sqrt`, `sin`, `exp`, `log`, `pi(1000)`, `isqrt`, `gcd`...), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
@@ -102,6 +103,7 @@ Les validations principales sont réalisées sous Termux ARM64.
 Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
+- [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
 - [Clair V0.54](docs/README_V0.54.md) : une boucle ne garde plus ses textes : la mémoire d'un tour est rendue à la fin du tour ; les dictionnaires copient leurs clés

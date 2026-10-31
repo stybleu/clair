@@ -28,6 +28,7 @@ Compilation avec `--ad` ou `--ad --dce`.
 - V4.21 : mémoire stable sur le benchmark.
 - V4.24 : 137/137 points finis conformes.
 
+- V4.30 : correctif intégré, compilation et régressions validées.
 ## Limites
 
 - Fonctions mathématiques simples avec une expression retournée.
@@ -39,5 +40,5 @@ Compilation avec `--ad` ou `--ad --dce`.
 
 ## État
 
-Version expérimentale, non publiée sur GitHub main.
-L'intégration nécessite un audit et des tests supplémentaires.
+Version expérimentale, publiée sur GitHub main (commit a08049b).
+Intégration validée en V4.30 et publiée sur GitHub main.
