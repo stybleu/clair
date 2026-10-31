@@ -5323,6 +5323,73 @@ static void clair_num_emit_root(FILE *f, const char *name, int depth) {
 }
 /* CLAIR_NUM_GC_END */
 
+
+/* V4.16 : ecriture rapide reservee aux gradients generes. */
+static int clair_ad_v416_match(const AstNode *b, size_t first, size_t *count) {
+    if (!b || b->kind != AST_BLOCK || first >= b->child_count) return 0;
+    const AstNode *last = b->children[b->child_count - 1];
+    if (!last || last->kind != AST_RETURN || last->child_count != 1 ||
+        !last->children[0] || last->children[0]->kind != AST_INTEGER ||
+        !last->children[0]->text || strcmp(last->children[0]->text, "0")) return 0;
+
+    size_t n = b->child_count - first - 1;
+    if (n < 2 || n > 16) return 0;
+
+    for (size_t k = 0; k < n; k++) {
+        const AstNode *w = b->children[first + k];
+        if (!w || w->kind != AST_INDEX_ASSIGN || w->child_count != 2 ||
+            !w->text || (strcmp(w->text, "clair_h_adout") && strcmp(w->text, "@adout")) ||
+            !w->type_name || strcmp(w->type_name, "list[float]")) return 0;
+
+        const AstNode *idx = w->children[0];
+        const AstNode *value = w->children[1];
+        char index_text[24], named_value[64], raw_value[64];
+
+        snprintf(index_text, sizeof(index_text), "%zu", k);
+        snprintf(named_value, sizeof(named_value), "clair_h_adg%zu", k);
+        snprintf(raw_value, sizeof(raw_value), "@adg%zu", k);
+
+        if (!idx || idx->kind != AST_INTEGER || !idx->text ||
+            strcmp(idx->text, index_text) ||
+            !value || value->kind != AST_IDENTIFIER ||
+            !value->text || (strcmp(value->text, named_value) &&
+                             strcmp(value->text, raw_value))) return 0;
+    }
+
+    *count = n;
+    return 1;
+}
+
+static int clair_ad_v416_emit(FILE *f, const AstNode *b,
+                              size_t first, size_t count, int depth) {
+    const char *target = b->children[first]->text;
+
+    indent(f, depth);
+    fprintf(f,
+        "if (%s && %s->len >= %zu && %s->elem_size == sizeof(double) && %s->data) {\n",
+        target, target, count, target, target);
+
+    indent(f, depth + 1);
+    fprintf(f, "double *clair_v416_data = (double *)%s->data;\n", target);
+
+    for (size_t k = 0; k < count; k++) {
+        indent(f, depth + 1);
+        fprintf(f, "clair_v416_data[%zu] = ", k);
+        if (!emit_expr(f, b->children[first + k]->children[1])) return 0;
+        fputs(";\n", f);
+    }
+
+    indent(f, depth);
+    fputs("} else {\n", f);
+
+    for (size_t k = 0; k < count; k++)
+        if (!emit_stmt(f, b->children[first + k], depth + 1)) return 0;
+
+    indent(f, depth);
+    fputs("}\n", f);
+    return 1;
+}
+
 static int emit_block(FILE *f, const AstNode *block, int depth) {
     if (!block || block->kind != AST_BLOCK) return 0;
     long region = -1;
@@ -5335,7 +5402,11 @@ static int emit_block(FILE *f, const AstNode *block, int depth) {
     }
     size_t mark = owned_live_count;
     for (size_t i = 0; i < block->child_count; i++) {
-        if (!emit_stmt(f, block->children[i], depth)) return 0;
+        size_t n = 0;
+        if (clair_ad_v416_match(block, i, &n)) {
+            if (!clair_ad_v416_emit(f, block, i, n, depth)) return 0;
+            i += n - 1;
+        } else if (!emit_stmt(f, block->children[i], depth)) return 0;
     }
     const AstNode *last = block->child_count ? block->children[block->child_count - 1] : NULL;
     int jumps = last && (last->kind == AST_RETURN || last->kind == AST_BREAK || last->kind == AST_CONTINUE);

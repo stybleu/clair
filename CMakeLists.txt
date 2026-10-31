@@ -5,6 +5,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 add_executable(clair
     src/main.c
     src/dce.c
+    src/ad.c
+    src/ad_reverse.c
     src/lexer.c
     src/ast.c
     src/parser.c
