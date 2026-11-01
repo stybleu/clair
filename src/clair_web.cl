@@ -11,6 +11,7 @@ Class Request {
     headers: dict[string, string]
     cookies: dict[string, string]
     files: dict[string, string]
+    session: dict[string, string]
     body: string
     ip: string
 
@@ -37,6 +38,14 @@ Class Request {
             return self.headers[low]
         }
         return ""
+    }
+
+    // a value kept in the session (signed: the browser cannot change it)
+    def session_value(name: string, otherwise: string) -> string {
+        if name in self.session {
+            return self.session[name]
+        }
+        return otherwise
     }
 
     def cookie(name: string, otherwise: string) -> string {
@@ -106,6 +115,33 @@ def with_cookie(r: Response, name: string, value: string) -> Response {
     return with_header(r, "Set-Cookie", name + "=" + __web_quote(value) + "; Path=/; SameSite=Lax")
 }
 
+// V0.57: the session, kept by the browser in a signed cookie (HttpOnly, 31 days): it cannot change it
+def with_session(r: Response, values: dict[string, string]) -> Response {
+    return with_header(r, "Set-Cookie", __web_session_cookie(values))
+}
+
+def end_session(r: Response) -> Response {
+    return with_header(r, "Set-Cookie", "clair_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+}
+
+def forget_cookie(r: Response, name: string) -> Response {
+    return with_header(r, "Set-Cookie", name + "=; Path=/; Max-Age=0")
+}
+
+// a password, salted and hashed 600000 times (PBKDF2-SHA256, the format of Werkzeug): keep this, never the password
+def hash_password(password: string) -> string {
+    return __web_hash_password(password)
+}
+
+def check_password(hashed: string, password: string) -> bool {
+    return __web_check_password(hashed, password)
+}
+
+// n random bytes in hexadecimal: a name nobody can guess
+def random_token(n: int) -> string {
+    return __web_random(n)
+}
+
 // templates/name with the values: {{ x }}, {% if x %}, {% for l in x %}, {% extends "base.html" %}...
 def page(name: string, values: dict[string, string]) -> string {
     return __web_render(name, values)
@@ -158,7 +194,7 @@ def keep(sent: string, path: string) -> int {
 
 // what the routes the compiler writes use
 def __request() -> Request {
-    return Request(__web_text(0), __web_text(1), __web_pairs(0), __web_pairs(1), __web_pairs(2), __web_pairs(3), __web_pairs(4), __web_text(2), __web_text(3))
+    return Request(__web_text(0), __web_text(1), __web_pairs(0), __web_pairs(1), __web_pairs(2), __web_pairs(3), __web_pairs(4), __web_pairs(5), __web_text(2), __web_text(3))
 }
 
 def __parts(path: string) -> list[string] {

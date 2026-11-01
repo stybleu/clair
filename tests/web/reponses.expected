@@ -267,6 +267,138 @@ HTTP/1.1 405 Method Not Allowed
 HTTP/1.1 400 Bad Request
 HTTP/1.1 501 Not Implemented
 HTTP/1.1 413 Content Too Large
+### V0.57 : sessions signees
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 20
+
+moi : (personne) / -
+401 Unauthorized
+content-type: text/html; charset=utf-8
+content-length: 151
+
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>401</title>
+<h1>401</h1>
+<p>mauvais mot de passe</p>
+
+302 Found
+content-type: text/plain; charset=utf-8
+content-length: 0
+location: /moi
+set-cookie: clair_session=(signee); Path=/; Max-Age=2678400; HttpOnly; SameSite=Lax
+
+
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 31
+
+moi : Ada / lecteur & redacteur
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 31
+
+moi : Ada / lecteur & redacteur
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 20
+
+moi : (personne) / -
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 20
+
+moi : (personne) / -
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 20
+
+moi : (personne) / -
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 20
+
+moi : (personne) / -
+302 Found
+content-type: text/plain; charset=utf-8
+content-length: 0
+location: /moi
+set-cookie: clair_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
+
+
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 2
+
+32
+### V0.57 : requetes venues d un autre site (CSRF) et autre nom de serveur
+403 Forbidden
+content-type: text/html; charset=utf-8
+content-length: 220
+
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>403 Forbidden</title>
+<h1>403 Forbidden</h1>
+<pre>a page of another site cannot send this request (CSRF protection)</pre>
+
+403 Forbidden
+content-type: text/html; charset=utf-8
+content-length: 220
+
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>403 Forbidden</title>
+<h1>403 Forbidden</h1>
+<pre>a page of another site cannot send this request (CSRF protection)</pre>
+
+403 Forbidden
+content-type: text/html; charset=utf-8
+content-length: 220
+
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>403 Forbidden</title>
+<h1>403 Forbidden</h1>
+<pre>a page of another site cannot send this request (CSRF protection)</pre>
+
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 1
+
+3
+200 OK
+200 OK
+content-type: text/html; charset=utf-8
+content-length: 1
+
+9
+403 Forbidden
+content-type: text/html; charset=utf-8
+content-length: 220
+
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>403 Forbidden</title>
+<h1>403 Forbidden</h1>
+<pre>this server answers only to 127.0.0.1 and localhost (Host header)</pre>
+
+200 OK
+HTTP/1.1 200 OK 
+Server: Clair 
+Content-Type: text/html; charset=utf-8 
+Content-Length: N 
+Connection: close 
+X-Content-Type-Options: nosniff 
+X-Frame-Options: SAMEORIGIN
+1
+X-Frame-Options: DENY
 ### memoire
 300
 200 OK

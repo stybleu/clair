@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.56 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.57 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -1033,6 +1033,7 @@ if ! bash tests/run_web.sh > build/web.log 2>&1; then
     exit 1
 fi
 printf '%s\n' "web/site.cl : OK -> routes, modeles (extends, include, if, for), formulaires, cookies, data/, fichiers envoyes, static/, erreurs 500 sans arret ; PHP : $(sed -n 's/^web PHP : //p' build/web.log)"
+printf '%s\n' 'web/site.cl : OK -> V0.57 : sessions signees (changees, coupees, fabriquees : refusees), mots de passe Werkzeug, CSRF et autre nom de serveur refuses, en-tetes de securite'
 printf '%s\n' "web/site.cl : OK -> $(sed -n 's/^web : OK, //p' build/web.log)"
 ./build/clair tests/web/site.cl -o build/test_web_dce --dce
 grep -q '^static int64_t clair_fn___web_handle(void) {' build/test_web_dce.generated.c

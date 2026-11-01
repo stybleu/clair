@@ -77,6 +77,32 @@ MP='--LIMITE\r\nContent-Disposition: form-data; name="legende"\r\n\r\nma photo\r
     $C raw 'GET /%00 HTTP/1.1\r\n\r\n'
     $C raw 'POST /compteur HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n'
     $C raw 'POST /compteur HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\n'
+    echo '### V0.57 : sessions signees'
+    $C GET /moi
+    $C POST /connexion 'corps=nom=Ada&mot=faux' 'Content-Type: application/x-www-form-urlencoded'
+    $C POST /connexion 'corps=nom=Ada&mot=ouvre-toi' 'Content-Type: application/x-www-form-urlencoded' > ../connexion.txt
+    sed 's/clair_session=[^;]*;/clair_session=(signee);/' ../connexion.txt
+    SESSION="$(sed -n 's/^set-cookie: \(clair_session=[^;]*\);.*/\1/p' ../connexion.txt)"
+    $C GET /moi "Cookie: $SESSION"
+    $C GET /moi "Cookie: autre=1; $SESSION; encore=2"
+    $C GET /moi "Cookie: $(printf '%s' "$SESSION" | sed 's/^clair_session=./clair_session=A/')"
+    $C GET /moi "Cookie: $(printf '%s' "$SESSION" | sed 's/\.\([0-9]*\)\./.1\1./')"
+    $C GET /moi "Cookie: $(printf '%s' "$SESSION" | sed 's/.$//')"
+    $C GET /moi 'Cookie: clair_session=bm9tPUV2ZQ.99999999999.AAAA'
+    $C POST /deconnexion
+    $C GET /jeton
+    echo '### V0.57 : requetes venues d un autre site (CSRF) et autre nom de serveur'
+    $C POST /compteur 'Sec-Fetch-Site: cross-site'
+    $C POST /compteur 'Sec-Fetch-Site: same-site'
+    $C POST /compteur 'Origin: http://pirate.example'
+    $C POST /compteur 'Sec-Fetch-Site: same-origin'
+    $C POST /compteur "Origin: http://127.0.0.1:$PORT" | sed -n 1p
+    $C GET /carre/3 'Sec-Fetch-Site: cross-site'
+    $C GET /carre/4 'Host: pirate.example'
+    $C GET /carre/5 "Host: localhost:$PORT" | sed -n 1p
+    $C tete /carre/6 | sed 's/Content-Length: [0-9]*/Content-Length: N/'
+    $C tete /cadre | grep -c 'X-Frame-Options'
+    $C tete /cadre | grep 'X-Frame-Options'
     echo '### memoire'
     $C repete 300 /boucle/40
     $C GET /boucle/12
@@ -88,7 +114,7 @@ if ! diff tests/web/reponses.expected build/web_reponses.txt > build/web_diff.tx
     exit 1
 fi
 [ "$(cat build/web_site/recu.txt)" = "$(printf 'contenu\r\ndu fichier')" ] || { echo "web : fichier envoye mal recu" >&2; exit 1; }
-[ "$(cat build/web_site/data/compteur)" = 2 ] || { echo "web : data/compteur faux" >&2; exit 1; }
+[ "$(cat build/web_site/data/compteur)" = 4 ] || { echo "web : data/compteur faux" >&2; exit 1; }
 
 # la memoire du serveur ne grandit pas avec les requetes
 cd build/web_site

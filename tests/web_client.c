@@ -7,6 +7,8 @@
  *       dans CORPS, \r et \n sont des fins de ligne.
  *   web_client PORT raw TEXTE
  *       envoie TEXTE tel quel (avec \r et \n) et ecrit la premiere ligne de la reponse.
+ *   web_client PORT tete CHEMIN
+ *       une requete GET, ecrit tous les en-tetes de la reponse.
  *   web_client PORT repete N CHEMIN
  *       N requetes GET, ecrit combien ont repondu 200.
  */
@@ -83,7 +85,10 @@ static char *request(int port, const char *method, const char *path, const char 
                      char **headers, int nh, size_t *len) {
     int fd = connect_to(port);
     char head[8192];
-    int k = snprintf(head, sizeof(head), "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n", method, path, port);
+    int own_host = 0;
+    for (int i = 0; i < nh; i++) own_host |= strncasecmp(headers[i], "Host:", 5) == 0;
+    int k = own_host ? snprintf(head, sizeof(head), "%s %s HTTP/1.1\r\n", method, path)
+                     : snprintf(head, sizeof(head), "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n", method, path, port);
     for (int i = 0; i < nh; i++) k += snprintf(head + k, sizeof(head) - (size_t)k, "%s\r\n", headers[i]);
     if (body) k += snprintf(head + k, sizeof(head) - (size_t)k, "Content-Length: %zu\r\n", body_len);
     k += snprintf(head + k, sizeof(head) - (size_t)k, "\r\n");
@@ -110,6 +115,14 @@ int main(int argc, char **argv) {
         close(fd);
         char *eol = strstr(answer, "\r\n");
         if (eol) *eol = '\0';
+        printf("%s\n", answer);
+        return 0;
+    }
+    if (strcmp(argv[2], "tete") == 0) {                  /* every header of the answer */
+        char *answer = request(port, "GET", argv[3], NULL, 0, NULL, 0, &len);
+        char *end = strstr(answer, "\r\n\r\n");
+        if (end) *end = '\0';
+        for (char *p = answer; *p; p++) if (*p == '\r') *p = ' ';
         printf("%s\n", answer);
         return 0;
     }

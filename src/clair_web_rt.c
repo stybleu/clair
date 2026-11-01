@@ -535,7 +535,10 @@ static const char *clair_web_text(int64_t what) {
     return s ? clair_web_text_of(s, strlen(s)) : "";
 }
 
-/* 0 the arguments of the URL, 1 the form, 2 the headers (names in lower case), 3 the cookies, 4 the files sent */
+static void clair_web_read_session(ClairDict d);
+
+/* 0 the arguments of the URL, 1 the form, 2 the headers (names in lower case), 3 the cookies, 4 the files sent,
+   5 the session (V0.57) */
 static ClairDict clair_web_pairs(int64_t what) {
     ClairDict d = clair_rt_dict_make(NULL, NULL, 0, sizeof(const char *));
     if (!clair_web_req.method) return d;
@@ -561,6 +564,8 @@ static ClairDict clair_web_pairs(int64_t what) {
         for (size_t i = 0; i < clair_web_req.nh; i++)
             if (strcmp(clair_web_req.hname[i], "cookie") == 0)
                 clair_web_fill_pairs(d, clair_web_req.hvalue[i], strlen(clair_web_req.hvalue[i]), ';');
+    } else if (what == 5) {
+        clair_web_read_session(d);
     }
     return d;
 }
@@ -740,6 +745,413 @@ static int64_t clair_web_keep(const char *from, const char *to) {
     free(b.p);
     unlink(from);
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* V0.57: SHA-256, HMAC, PBKDF2 (signed sessions, passwords)          */
+/* ------------------------------------------------------------------ */
+
+typedef struct { uint32_t h[8]; uint64_t len; unsigned char buf[64]; size_t n; } ClairSha256;
+
+static const uint32_t clair_sha_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+#define CLAIR_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+static void clair_sha_block(uint32_t h[8], const unsigned char *p) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | (uint32_t)p[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = CLAIR_ROR(w[i - 15], 7) ^ CLAIR_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = CLAIR_ROR(w[i - 2], 17) ^ CLAIR_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], k = h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = k + (CLAIR_ROR(e, 6) ^ CLAIR_ROR(e, 11) ^ CLAIR_ROR(e, 25)) + ((e & f) ^ (~e & g)) + clair_sha_k[i] + w[i];
+        uint32_t t2 = (CLAIR_ROR(a, 2) ^ CLAIR_ROR(a, 13) ^ CLAIR_ROR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        k = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += k;
+}
+
+static void clair_sha_init(ClairSha256 *s) {
+    static const uint32_t iv[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+    memcpy(s->h, iv, sizeof(iv));
+    s->len = 0;
+    s->n = 0;
+}
+
+static void clair_sha_add(ClairSha256 *s, const void *data, size_t n) {
+    const unsigned char *p = data;
+    s->len += n;
+    if (s->n) {
+        size_t take = 64 - s->n < n ? 64 - s->n : n;
+        memcpy(s->buf + s->n, p, take);
+        s->n += take;
+        p += take;
+        n -= take;
+        if (s->n < 64) return;
+        clair_sha_block(s->h, s->buf);
+        s->n = 0;
+    }
+    while (n >= 64) {
+        clair_sha_block(s->h, p);
+        p += 64;
+        n -= 64;
+    }
+    memcpy(s->buf, p, n);
+    s->n = n;
+}
+
+static void clair_sha_end(ClairSha256 *s, unsigned char out[32]) {
+    uint64_t bits = s->len * 8;
+    unsigned char pad = 0x80;
+    clair_sha_add(s, &pad, 1);
+    unsigned char zero = 0;
+    while (s->n != 56) clair_sha_add(s, &zero, 1);
+    unsigned char lenb[8];
+    for (int i = 0; i < 8; i++) lenb[i] = (unsigned char)(bits >> (56 - 8 * i));
+    clair_sha_add(s, lenb, 8);
+    for (int i = 0; i < 8; i++) {
+        out[4 * i] = (unsigned char)(s->h[i] >> 24);
+        out[4 * i + 1] = (unsigned char)(s->h[i] >> 16);
+        out[4 * i + 2] = (unsigned char)(s->h[i] >> 8);
+        out[4 * i + 3] = (unsigned char)s->h[i];
+    }
+}
+
+/* HMAC-SHA256: the key is taken once, then each message costs two blocks of SHA-256 */
+typedef struct { ClairSha256 inner, outer; } ClairHmac;
+
+static void clair_hmac_init(ClairHmac *h, const void *key, size_t kn) {
+    unsigned char k[64] = { 0 }, pad[64];
+    if (kn > 64) {
+        ClairSha256 s;
+        clair_sha_init(&s);
+        clair_sha_add(&s, key, kn);
+        clair_sha_end(&s, k);
+    } else if (kn) {
+        memcpy(k, key, kn);
+    }
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+    clair_sha_init(&h->inner);
+    clair_sha_add(&h->inner, pad, 64);
+    for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5c;
+    clair_sha_init(&h->outer);
+    clair_sha_add(&h->outer, pad, 64);
+}
+
+static void clair_hmac(const ClairHmac *key, const void *msg, size_t n, unsigned char out[32]) {
+    ClairSha256 in = key->inner, ou = key->outer;
+    unsigned char t[32];
+    clair_sha_add(&in, msg, n);
+    clair_sha_end(&in, t);
+    clair_sha_add(&ou, t, 32);
+    clair_sha_end(&ou, out);
+}
+
+/* PBKDF2-HMAC-SHA256, 32 bytes (what Werkzeug and hashlib.pbkdf2_hmac give) */
+static void clair_pbkdf2(const char *pw, size_t pn, const char *salt, size_t sn, unsigned long iters, unsigned char out[32]) {
+    ClairHmac h;
+    clair_hmac_init(&h, pw, pn);
+    unsigned char *msg = malloc(sn + 4), u[32];
+    if (!msg) clair_web_oom();
+    memcpy(msg, salt, sn);
+    msg[sn] = 0; msg[sn + 1] = 0; msg[sn + 2] = 0; msg[sn + 3] = 1;
+    clair_hmac(&h, msg, sn + 4, u);
+    free(msg);
+    memcpy(out, u, 32);
+    for (unsigned long i = 1; i < iters; i++) {
+        clair_hmac(&h, u, 32, u);
+        for (int j = 0; j < 32; j++) out[j] ^= u[j];
+    }
+}
+
+/* the same answer whatever the bytes: no time to guess them from */
+static int clair_web_same(const unsigned char *a, const unsigned char *b, size_t n) {
+    unsigned char d = 0;
+    for (size_t i = 0; i < n; i++) d |= a[i] ^ b[i];
+    return d == 0;
+}
+
+static void clair_web_random_bytes(unsigned char *out, size_t n) {
+    int fd = open("/dev/urandom", O_RDONLY);
+    size_t got = 0;
+    while (fd >= 0 && got < n) {
+        ssize_t r = read(fd, out + got, n - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    if (fd >= 0) close(fd);
+    if (got < n) clair_web_fail("cannot read /dev/urandom", NULL);
+}
+
+static void clair_web_hex_into(char *out, const unsigned char *b, size_t n) {
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) { out[2 * i] = hex[b[i] >> 4]; out[2 * i + 1] = hex[b[i] & 15]; }
+    out[2 * n] = '\0';
+}
+
+/* web.random_token(n): n random bytes, in hexadecimal */
+static const char *clair_web_random(int64_t n) {
+    if (n < 1 || n > 1024) clair_web_fail("web.random_token() takes 1 to 1024 bytes", NULL);
+    unsigned char *b = malloc((size_t)n);
+    char *h = clair_rt_arena_alloc((size_t)n * 2 + 1);
+    if (!b) clair_web_oom();
+    clair_web_random_bytes(b, (size_t)n);
+    clair_web_hex_into(h, b, (size_t)n);
+    free(b);
+    return h;
+}
+
+/* ---- passwords: the format of Werkzeug, pbkdf2:sha256:600000$salt$hash ---- */
+
+#define CLAIR_WEB_PBKDF2_ROUNDS 600000UL
+
+static const char *clair_web_hash_password(const char *pw) {
+    static const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    unsigned char r[16], dk[32];
+    char salt[17], hex[65];
+    clair_web_random_bytes(r, sizeof(r));
+    for (int i = 0; i < 16; i++) salt[i] = chars[r[i] % 62];
+    salt[16] = '\0';
+    clair_pbkdf2(pw, strlen(pw), salt, 16, CLAIR_WEB_PBKDF2_ROUNDS, dk);
+    clair_web_hex_into(hex, dk, 32);
+    char *out = clair_rt_arena_alloc(128);
+    snprintf(out, 128, "pbkdf2:sha256:%lu$%s$%s", CLAIR_WEB_PBKDF2_ROUNDS, salt, hex);
+    return out;
+}
+
+/* web.check_password(hash, password): also the hashes made by Werkzeug with pbkdf2:sha256 */
+static bool clair_web_check_password(const char *hash, const char *pw) {
+    const char *p = hash;
+    unsigned long rounds = 260000;                       /* pbkdf2:sha256 without a number: Werkzeug 2.0 */
+    if (strncmp(p, "pbkdf2:sha256", 13) != 0) return false;
+    p += 13;
+    if (*p == ':') {
+        char *end = NULL;
+        rounds = strtoul(p + 1, &end, 10);
+        if (!end || end == p + 1 || rounds == 0 || rounds > 100000000UL) return false;
+        p = end;
+    }
+    if (*p != '$') return false;
+    const char *salt = p + 1, *dollar = strchr(salt, '$');
+    if (!dollar || strlen(dollar + 1) != 64) return false;
+    unsigned char want[32], dk[32];
+    for (int i = 0; i < 32; i++) {
+        int a = clair_web_hex((unsigned char)dollar[1 + 2 * i]), b = clair_web_hex((unsigned char)dollar[2 + 2 * i]);
+        if (a < 0 || b < 0) return false;
+        want[i] = (unsigned char)(a * 16 + b);
+    }
+    clair_pbkdf2(pw, strlen(pw), salt, (size_t)(dollar - salt), rounds, dk);
+    return clair_web_same(dk, want, 32);
+}
+
+/* ---- signed sessions: the cookie clair_session=payload.expiry.signature ---- */
+
+#define CLAIR_WEB_SESSION_DAYS 31
+
+static unsigned char clair_web_key[32];
+static int clair_web_key_ready = 0;
+
+/* the secret key: $CLAIR_SECRET_KEY, or data/.secret_key, made once at random */
+static void clair_web_load_key(void) {
+    if (clair_web_key_ready) return;
+    const char *env = getenv("CLAIR_SECRET_KEY");
+    if (env && *env) {
+        ClairSha256 s;
+        clair_sha_init(&s);
+        clair_sha_add(&s, env, strlen(env));
+        clair_sha_end(&s, clair_web_key);
+        clair_web_key_ready = 1;
+        return;
+    }
+    ClairWebBuf b = { 0 };
+    int ok = clair_web_read_file("data/.secret_key", &b) && b.len >= 64;
+    for (int i = 0; ok && i < 32; i++) {
+        int x = clair_web_hex((unsigned char)b.p[2 * i]), y = clair_web_hex((unsigned char)b.p[2 * i + 1]);
+        if (x < 0 || y < 0) ok = 0;
+        else clair_web_key[i] = (unsigned char)(x * 16 + y);
+    }
+    free(b.p);
+    if (!ok) {
+        char hex[65];
+        clair_web_random_bytes(clair_web_key, 32);
+        clair_web_hex_into(hex, clair_web_key, 32);
+        if (mkdir("data", 0755) != 0 && errno != EEXIST) clair_web_fail("cannot make the folder ", "data");
+        int fd = open("data/.secret_key", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) clair_web_fail("cannot write ", "data/.secret_key");
+        clair_web_write_all(fd, hex, 64, "data/.secret_key");
+        clair_web_write_all(fd, "\n", 1, "data/.secret_key");
+        close(fd);
+    }
+    clair_web_key_ready = 1;
+}
+
+static const char clair_web_b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static void clair_web_b64_into(ClairWebBuf *out, const unsigned char *p, size_t n) {
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        clair_web_buf_ch(out, clair_web_b64[v >> 18]);
+        clair_web_buf_ch(out, clair_web_b64[(v >> 12) & 63]);
+        if (i + 1 < n) clair_web_buf_ch(out, clair_web_b64[(v >> 6) & 63]);
+        if (i + 2 < n) clair_web_buf_ch(out, clair_web_b64[v & 63]);
+    }
+}
+
+static int clair_web_b64_value(char c) {
+    const char *at = c ? strchr(clair_web_b64, c) : NULL;
+    return at ? (int)(at - clair_web_b64) : -1;
+}
+
+/* 0 when s is not base64url */
+static int clair_web_b64_decode(const char *s, size_t n, ClairWebBuf *out) {
+    uint32_t v = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+        int x = clair_web_b64_value(s[i]);
+        if (x < 0) return 0;
+        v = v << 6 | (uint32_t)x;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            clair_web_buf_ch(out, (char)((v >> bits) & 255));
+        }
+    }
+    clair_web_buf_add(out, "", 0);
+    return 1;
+}
+
+static void clair_web_session_mac(const char *text, size_t n, unsigned char mac[32]) {
+    ClairHmac h;
+    clair_web_load_key();
+    clair_hmac_init(&h, clair_web_key, 32);
+    ClairWebBuf msg = { 0 };
+    clair_web_buf_str(&msg, "clair-session|");
+    clair_web_buf_add(&msg, text, n);
+    clair_hmac(&h, msg.p, msg.len, mac);
+    free(msg.p);
+}
+
+static void clair_web_quote_into(ClairWebBuf *b, const char *s) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (isalnum(*p) || *p == '-' || *p == '.' || *p == '_' || *p == '~') clair_web_buf_ch(b, (char)*p);
+        else { clair_web_buf_ch(b, '%'); clair_web_buf_ch(b, hex[*p >> 4]); clair_web_buf_ch(b, hex[*p & 15]); }
+    }
+}
+
+/* web.with_session(r, values): the Set-Cookie of a session holding values, signed, for 31 days */
+static const char *clair_web_session_cookie(ClairDict values) {
+    ClairWebBuf payload = { 0 };
+    clair_web_buf_add(&payload, "", 0);
+    for (size_t i = 0; values && i < values->len; i++) {
+        if (i) clair_web_buf_ch(&payload, '&');
+        clair_web_quote_into(&payload, values->keys[i]);
+        clair_web_buf_ch(&payload, '=');
+        clair_web_quote_into(&payload, ((const char **)values->values)[i]);
+    }
+    ClairWebBuf v = { 0 };
+    clair_web_b64_into(&v, (const unsigned char *)payload.p, payload.len);
+    free(payload.p);
+    char exp[32];
+    snprintf(exp, sizeof(exp), ".%lld", (long long)time(NULL) + CLAIR_WEB_SESSION_DAYS * 86400LL);
+    clair_web_buf_str(&v, exp);
+    unsigned char mac[32];
+    clair_web_session_mac(v.p, v.len, mac);
+    clair_web_buf_ch(&v, '.');
+    clair_web_b64_into(&v, mac, 32);
+    if (v.len > 3800) {
+        free(v.p);
+        clair_web_fail("a session holds at most 3 KB: keep big things in data/ and their name in the session", NULL);
+    }
+    ClairWebBuf c = { 0 };
+    clair_web_buf_str(&c, "clair_session=");
+    clair_web_buf_add(&c, v.p, v.len);
+    char attrs[96];
+    snprintf(attrs, sizeof(attrs), "; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax", CLAIR_WEB_SESSION_DAYS * 86400);
+    clair_web_buf_str(&c, attrs);
+    free(v.p);
+    const char *r = clair_web_text_of(c.p, c.len);
+    free(c.p);
+    return r;
+}
+
+/* the values of the session sent by the browser, if its signature is good and it is not too old */
+static void clair_web_read_session(ClairDict d) {
+    for (size_t i = 0; i < clair_web_req.nh; i++) {
+        if (strcmp(clair_web_req.hname[i], "cookie") != 0) continue;
+        const char *c = clair_web_req.hvalue[i];
+        for (const char *p = c; (p = strstr(p, "clair_session=")) != NULL; p += 14) {
+            if (p != c && p[-1] != ' ' && p[-1] != ';') continue;
+            const char *v = p + 14;
+            size_t n = strcspn(v, "; ");
+            const char *dot2 = NULL, *dot1 = NULL;
+            for (size_t k = n; k > 0; k--) {
+                if (v[k - 1] != '.') continue;
+                if (!dot2) dot2 = v + k - 1;
+                else { dot1 = v + k - 1; break; }
+            }
+            if (!dot1 || !dot2) return;
+            unsigned char mac[32];
+            clair_web_session_mac(v, (size_t)(dot2 - v), mac);
+            ClairWebBuf sig = { 0 };
+            int good = clair_web_b64_decode(dot2 + 1, (size_t)(v + n - dot2 - 1), &sig) && sig.len == 32 &&
+                       clair_web_same((const unsigned char *)sig.p, mac, 32);
+            free(sig.p);
+            if (!good) return;
+            long long exp = strtoll(dot1 + 1, NULL, 10);
+            if (exp < (long long)time(NULL)) return;
+            ClairWebBuf payload = { 0 };
+            if (!clair_web_b64_decode(v, (size_t)(dot1 - v), &payload)) { free(payload.p); return; }
+            clair_web_fill_pairs(d, payload.p ? payload.p : "", payload.len, '&');
+            free(payload.p);
+            return;
+        }
+    }
+}
+
+/* ---- what a browser cannot be made to do by another site ---- */
+
+/* NULL when the request may go on, else why it is refused (403) */
+static const char *clair_web_refuse(void) {
+    /* a server of this phone only: the address asked must be this phone (no DNS rebinding) */
+    const char *host = clair_web_header("host");
+    if (!clair_web_public && host) {
+        char a[64], b[64], c[64];
+        snprintf(a, sizeof(a), "127.0.0.1:%lld", (long long)clair_web_port);
+        snprintf(b, sizeof(b), "localhost:%lld", (long long)clair_web_port);
+        snprintf(c, sizeof(c), "[::1]:%lld", (long long)clair_web_port);
+        int ok = strcasecmp(host, a) == 0 || strcasecmp(host, b) == 0 || strcasecmp(host, c) == 0 ||
+                 (clair_web_port == 80 && (strcasecmp(host, "127.0.0.1") == 0 || strcasecmp(host, "localhost") == 0));
+        if (!ok) return "this server answers only to 127.0.0.1 and localhost (Host header)";
+    }
+    /* a form or a script of another site cannot send POST, PUT, DELETE, PATCH here (CSRF) */
+    const char *m = clair_web_req.method;
+    if (strcmp(m, "GET") == 0 || strcmp(m, "HEAD") == 0 || strcmp(m, "OPTIONS") == 0) return NULL;
+    const char *site = clair_web_header("sec-fetch-site");
+    if (site) {
+        if (strcmp(site, "same-origin") == 0 || strcmp(site, "none") == 0) return NULL;
+        return "a page of another site cannot send this request (CSRF protection)";
+    }
+    const char *origin = clair_web_header("origin");
+    if (!origin || !host) return NULL;                   /* not a browser */
+    const char *o = strstr(origin, "://");
+    o = o ? o + 3 : origin;
+    if (strcasecmp(o, host) != 0) return "a page of another site cannot send this request (CSRF protection)";
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1441,7 +1853,11 @@ static void clair_web_send(int fd, int head_only) {
         clair_web_buf_str(&h, line);
     }
     clair_web_buf_str(&h, "Connection: close\r\n");
-    for (const char *p = clair_web_resp.headers ? clair_web_resp.headers : ""; *p;) {
+    /* V0.57: no guessing of the type, no page of this site inside a frame of another (unless the route says so) */
+    const char *extra = clair_web_resp.headers ? clair_web_resp.headers : "";
+    if (!strcasestr(extra, "X-Content-Type-Options:")) clair_web_buf_str(&h, "X-Content-Type-Options: nosniff\r\n");
+    if (!strcasestr(extra, "X-Frame-Options:")) clair_web_buf_str(&h, "X-Frame-Options: SAMEORIGIN\r\n");
+    for (const char *p = extra; *p;) {
         size_t n = strcspn(p, "\n");
         size_t k = n;
         while (k && (p[k - 1] == '\r' || p[k - 1] == ' ')) k--;
@@ -1528,6 +1944,15 @@ static void clair_web_serve(int fd) {
         clair_web_page(st, NULL);
         clair_web_send(fd, head_only);
         clair_web_log(st, clair_web_ms_since(&t0));
+        clair_web_response_free();
+        clair_web_request_free();
+        return;
+    }
+    const char *refused = clair_web_refuse();             /* V0.57 */
+    if (refused) {
+        clair_web_page(403, refused);
+        clair_web_send(fd, head_only);
+        clair_web_log(403, clair_web_ms_since(&t0));
         clair_web_response_free();
         clair_web_request_free();
         return;

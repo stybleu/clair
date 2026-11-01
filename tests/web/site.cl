@@ -120,6 +120,39 @@ def casse() -> string {
     return web.page("casse.html", {})
 }
 
+// V0.57 : une connexion (mot de passe hache par Werkzeug), une session signee, une deconnexion
+@web.route("/connexion", "POST")
+def connexion(req: Request) -> Response {
+    let hache: string = "pbkdf2:sha256:600000$Clair2026Essai01$b9b5a5b9a2b31ab479c33990a13b5d902e4a0a79f7bc1349abdfaf1cdf4d7746"
+    if not web.check_password(hache, req.field("mot", "")) {
+        return web.error(401, "mauvais mot de passe")
+    }
+    let s: dict[string, string] = req.session
+    s["nom"] = req.field("nom", "?")
+    s["role"] = "lecteur & redacteur"
+    return web.with_session(web.redirect("/moi"), s)
+}
+
+@web.route("/moi")
+def moi(req: Request) -> string {
+    return "moi : " + req.session_value("nom", "(personne)") + " / " + req.session_value("role", "-")
+}
+
+@web.route("/deconnexion", "POST")
+def deconnexion() -> Response {
+    return web.end_session(web.redirect("/moi"))
+}
+
+@web.route("/jeton")
+def jeton() -> string {
+    return str(len(web.random_token(16)))
+}
+
+@web.route("/cadre")
+def cadre() -> Response {
+    return web.with_header(web.html("dans un cadre"), "X-Frame-Options", "DENY")
+}
+
 @web.route("/boucle/<n>")
 def boucle(n: int) -> string {
     let s: string = ""
