@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include "parser.h"
+#include "diagnostics.h"
 #include "units.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,7 @@
 /* V0.49: a node made now belongs to the line of the last token read */
 static void next(Parser *p) {
     ast_current_line = p->current.line;
+    p->previous = p->current;
     p->current = lexer_next(&p->lexer);
 }
 
@@ -15,6 +17,7 @@ static int expect(Parser *p, TokenKind kind, const char *what) {
     if (p->current.kind == kind) { next(p); return 1; }
     fprintf(stderr, "parse error at %zu:%zu: expected %s, got %s\n",
             p->current.line, p->current.column, what, token_kind_name(p->current.kind));
+    clair_diag_show(80, ast_current_file, p->current.line, p->current.column, "expected token");
     p->had_error = 1;
     return 0;
 }
@@ -31,6 +34,7 @@ static AstNode *make_binary(Token op, AstNode *left, AstNode *right) {
         ast_free(right);
         return NULL;
     }
+    bin->op_column = op.column;
     if (!ast_add_child(bin, left)) {
         ast_free(bin);
         ast_free(left);
@@ -272,6 +276,9 @@ static AstNode *parse_atom(Parser *p) {
         return e;
     }
 
+    Token location = t;
+    if (t.line > p->previous.line && (p->previous.kind == TOKEN_STAR || p->previous.kind == TOKEN_PLUS || p->previous.kind == TOKEN_MINUS || p->previous.kind == TOKEN_SLASH)) location = p->previous;
+    clair_diag_show(80, ast_current_file, location.line, location.column, "expected expression");
     fprintf(stderr, "parse error at %zu:%zu: expected expression, got %s\n",
             t.line, t.column, token_kind_name(t.kind));
     p->had_error = 1;
@@ -1554,6 +1561,7 @@ static AstNode *parse_statement(Parser *p) {
         return ast_new(kind, NULL, 0);
     }
 
+    clair_diag_show(80, ast_current_file, p->current.line, p->current.column, "unexpected token");
     fprintf(stderr, "parse error at %zu:%zu: unexpected token %s in block\n",
             p->current.line, p->current.column, token_kind_name(p->current.kind));
     p->had_error = 1;
@@ -1780,6 +1788,8 @@ void parser_init(Parser *p, const char *source) {
     p->loop_depth = 0;
     p->hidden_count = 0;
     p->current.line = 1;
+    p->current.column = 1;
+    p->current.kind = TOKEN_EOF;
     next(p);
 }
 
@@ -1883,6 +1893,7 @@ AstNode *parser_parse_program(Parser *p) {
                 if (body->text) strcpy(body->text, "absolue");
             }
         } else {
+            clair_diag_show(80, ast_current_file, p->current.line, p->current.column, "expected Class");
             fprintf(stderr, "parse error at %zu:%zu: expected Class, def or import, got %s\n",
                     p->current.line, p->current.column, token_kind_name(p->current.kind));
             p->had_error = 1;

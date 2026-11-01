@@ -7,6 +7,7 @@
 typedef struct {
     Lexer lexer;
     Token current;
+    Token previous;
     int had_error;
     size_t loop_depth;
     size_t hidden_count;    /* hidden variables made by the parser (enumerate) */

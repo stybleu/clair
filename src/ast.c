@@ -52,6 +52,7 @@ AstNode *ast_clone(const AstNode *node) {
     AstNode *copy = ast_new(node->kind, node->text, node->text ? strlen(node->text) : 0);
     if (!copy) return NULL;
     copy->line = node->line;
+    copy->op_column = node->op_column;
     copy->file = node->file;
     copy->measure_src = node->measure_src;
     if (node->type_name && !ast_set_type(copy, node->type_name, strlen(node->type_name))) {

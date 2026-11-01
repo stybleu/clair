@@ -151,3 +151,10 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 - [Documentation V0.50](docs/README_V0.50.md)
 - [Rapport d'audit V0.50](docs/AUDIT_V0.50.md)
+
+
+## Diagnostics
+
+Clair dispose de diagnostics enrichis.
+
+[Diagnostics V1.9](docs/DIAGNOSTICS_V1.9.md)

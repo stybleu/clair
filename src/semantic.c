@@ -1,4 +1,6 @@
 #include "semantic.h"
+extern void clair_v19_set_plus_column(size_t);
+#include "diagnostics.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +10,9 @@
  * V0.49: every message says where: " (line 12)", or " (orbite.cl, line 12)"
  * in a module.  The line is that of the expression or statement being checked.
  */
+extern void clair_v17_set_suggestion(const char *name);
+extern int clair_v17_diag_enabled(void);
+
 static size_t sem_line = 0;
 static const char *sem_file = NULL;
 
@@ -25,6 +30,7 @@ static void report(const char *fmt, ...) {
     if (sem_line && sem_file) fprintf(stderr, " (%s, line %zu)", sem_file, sem_line);
     else if (sem_line) fprintf(stderr, " (line %zu)", sem_line);
     fputc('\n', stderr);
+    clair_diag_show(83, sem_file, sem_line, 1, buf);
 }
 
 typedef struct {
@@ -290,6 +296,73 @@ static int is_known_type(const Semantic *s, const char *type) {
         return 1;
     }
     return find_class(s, type) != NULL;
+}
+
+
+/* CLAIR_V16_SUGGESTIONS */
+
+/* Distance d'edition, limitee aux identifiants courts. */
+static unsigned clair_v16_distance(const char *a, const char *b) {
+    size_t na = strlen(a), nb = strlen(b);
+    if (na > 48 || nb > 48) return 99;
+
+    unsigned prev[49], curr[49];
+
+    for (size_t j = 0; j <= nb; ++j)
+        prev[j] = (unsigned)j;
+
+    for (size_t i = 1; i <= na; ++i) {
+        curr[0] = (unsigned)i;
+
+        for (size_t j = 1; j <= nb; ++j) {
+            unsigned cost = a[i-1] != b[j-1];
+            unsigned del = prev[j] + 1;
+            unsigned ins = curr[j-1] + 1;
+            unsigned sub = prev[j-1] + cost;
+
+            unsigned v = del < ins ? del : ins;
+            curr[j] = v < sub ? v : sub;
+        }
+
+        for (size_t j = 0; j <= nb; ++j)
+            prev[j] = curr[j];
+    }
+
+    return prev[nb];
+}
+
+/* Les variables hors portee ont deja quitte s->vars. */
+static const char *clair_v16_suggest(
+    const Semantic *s, const char *name
+) {
+    if (!name || !*name) return NULL;
+
+    size_t n = strlen(name);
+    if (n < 3 || n > 48) return NULL;
+
+    unsigned limit = n < 5 ? 1 : 2;
+    unsigned best_distance = 99;
+    const char *best = NULL;
+    int ambiguous = 0;
+
+    for (size_t i = s->var_count; i > 0; --i) {
+        const char *candidate = s->vars[i-1].name;
+        if (!candidate) continue;
+
+        unsigned d = clair_v16_distance(name, candidate);
+        if (d == 0 || d > limit) continue;
+
+        if (d < best_distance) {
+            best_distance = d;
+            best = candidate;
+            ambiguous = 0;
+        } else if (d == best_distance &&
+                   best && strcmp(best, candidate) != 0) {
+            ambiguous = 1;
+        }
+    }
+
+    return ambiguous ? NULL : best;
 }
 
 static const char *find_var(const Semantic *s, const char *name) {
@@ -1820,7 +1893,9 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         if (strcmp(left, "string") == 0 || strcmp(right, "string") == 0) {
-            error_type(s, "operator '+' requires two numbers or two strings");
+            clair_v19_set_plus_column(n->op_column);
+            report("semantic error: incompatible types for '+': %s and %s\n", left, right);
+            s->had_error = 1;
             return NULL;
         }
         if (!is_numeric(left) || !is_numeric(right)) {
@@ -2142,7 +2217,15 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
         case AST_IDENTIFIER: {
             const char *type = find_var(s, n->text);
             if (!type) {
+                const char *suggestion = clair_v16_suggest(s, n->text);
+                if (suggestion)
+                    clair_v17_set_suggestion(suggestion);
                 report("semantic error: undefined variable '%s'\n", n->text);
+                if (suggestion && !clair_v17_diag_enabled()) {
+                    fprintf(stderr,
+                        "  suggestion : Vouliez-vous dire '%s' ?\n",
+                        suggestion);
+                }
                 s->had_error = 1;
                 return NULL;
             }

@@ -6,6 +6,7 @@
 #include "dce.h"
 #include "ad.h"
 #include "ad_reverse.h"
+#include "diagnostics.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -460,17 +461,19 @@ int main(int argc, char **argv) {
     int unchecked = 0;
     int dce_enabled = 0;
     int ad_enabled = 0;
+    int diag_enabled = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
         else if (strcmp(argv[i], "--sans-verif") == 0 || strcmp(argv[i], "--unchecked") == 0) unchecked = 1;
         else if (strcmp(argv[i], "--ad") == 0) ad_enabled = 1;
+        else if (strcmp(argv[i], "--diagnostics") == 0) diag_enabled = 1;
         else if (strcmp(argv[i], "--dce") == 0) dce_enabled = 1;
         else if (strcmp(argv[i], "--fma") == 0) allow_fma = 1;
         else if (!input && argv[i][0] != '-') input = argv[i];
         else { input = NULL; break; }
     }
     if (!input || !output) {
-        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif] [--fma] [--dce] [--ad]\n", argv[0]);
+        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif] [--fma] [--dce] [--ad] [--diagnostics]\n", argv[0]);
         return 2;
     }
     codegen_set_unchecked(unchecked);
@@ -481,6 +484,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    clair_diag_init(input, source, diag_enabled);
     Parser parser;
     ast_current_file = NULL;
     parser_init(&parser, source);

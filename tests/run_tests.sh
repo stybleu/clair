@@ -178,7 +178,7 @@ if ./build/clair tests/invalid_string_numeric.cl -o build/test_invalid_string_nu
     printf '%s\n' 'invalid_string_numeric.cl : ECHEC -> addition string aurait du etre refusee en V0.9' >&2
     exit 1
 fi
-grep -Fq "operator '+' requires two numbers or two strings" build/invalid_string_numeric.stderr
+grep -Fq "incompatible types for '+':" build/invalid_string_numeric.stderr
 printf '%s\n' 'invalid_string_numeric.cl : OK -> string + non-string refuse'
 
 if ./build/clair tests/invalid_string_order.cl -o build/test_invalid_string_order >build/invalid_string_order.stdout 2>build/invalid_string_order.stderr; then
@@ -613,7 +613,7 @@ grep -Fq 'int64_t v = ((int64_t *)grow->data)[clair_k_v];' build/test_for_each.g
 printf '%s\n' 'for_each.cl : OK -> for v in liste, comme Python (liste qui grandit, liste remplacee, break, continue)'
 expect_compile_error invalid_for_each_type "for ... in needs a list, got int"
 expect_compile_error invalid_for_each_matrix "for ... in needs a list, got matrix[float]: use for i in range(rows(m))"
-expect_compile_error invalid_for_each_element "operator '+' requires two numbers or two strings"
+expect_compile_error invalid_for_each_element "incompatible types for '+':"
 
 ./build/clair tests/syntaxe_python.cl -o build/test_syntaxe_python
 [ "$(./build/test_syntaxe_python)" = "$(cat tests/syntaxe_python.expected)" ]
