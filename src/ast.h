@@ -56,6 +56,7 @@ typedef struct AstNode {
     size_t op_column; /* V1.9.1 : colonne de l operateur */
     const char *file;    /* V0.49: NULL for the program, "orbite.cl" for a module */
     const char *measure_src;   /* V0.53: a constant of phys known to ±: its sources, "2:1 1:-2" (static text) */
+    struct AstNode *decorators; /* V0.55: a function: @web.route(...) written before it (children: the calls), or NULL */
 } AstNode;
 
 /* V0.49: given to every new node; the parser keeps them up to date */

@@ -916,6 +916,57 @@ static int check_text_call(Semantic *s, AstNode *n) {
 }
 
 /*
+ * V0.55: what the module web (src/clair_web.cl) asks of its C part (clair_web_rt.c):
+ * the network, the files of static/, data/ and templates/, PHP.  Only the module
+ * web calls them; anywhere else these names are unknown.
+ * 1 when n is one of them (renamed @__web_...), 0 otherwise, -1 on error.
+ */
+static int check_web_call(Semantic *s, AstNode *n) {
+    static const struct { const char *name; size_t argc; const char *args[4]; const char *result; } calls[] = {
+        { "__web_run", 2, { "int", "string" }, "int" },
+        { "__web_text", 1, { "int" }, "string" },
+        { "__web_pairs", 1, { "int" }, "dict[string,string]" },
+        { "__web_reply", 4, { "int", "string", "string", "string" }, "int" },
+        { "__web_static", 1, { "string" }, "int" },
+        { "__web_render", 2, { "string", "dict[string,string]" }, "string" },
+        { "__web_escape", 1, { "string" }, "string" },
+        { "__web_quote", 1, { "string" }, "string" },
+        { "__web_json", 1, { "string" }, "string" },
+        { "__web_lower", 1, { "string" }, "string" },
+        { "__web_is_number", 2, { "string", "int" }, "bool" },
+        { "__web_data", 3, { "int", "string", "string" }, "string" },
+        { "__web_keep", 2, { "string", "string" }, "int" },
+        { NULL, 0, { NULL }, NULL }
+    };
+    if (!n->file || strcmp(n->file, "web.cl") != 0 || strncmp(n->text, "__web_", 6) != 0) return 0;
+    size_t c = 0;
+    while (calls[c].name && strcmp(n->text, calls[c].name) != 0) c++;
+    if (!calls[c].name) return 0;
+    if (n->child_count != calls[c].argc) {
+        report("semantic error: %s() expects %zu argument(s), got %zu\n", calls[c].name, calls[c].argc, n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        const char *want = calls[c].args[i];
+        const char *t = expr_type_expected(s, n->children[i], want);
+        if (!t) return -1;
+        if (!assignable(want, t)) {
+            report("semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, calls[c].name, want, t);
+            s->had_error = 1;
+            return -1;
+        }
+    }
+    char *renamed = malloc(strlen(n->text) + 2);
+    if (!renamed) return -1;
+    renamed[0] = '@';
+    strcpy(renamed + 1, n->text);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, calls[c].result) ? 1 : -1;
+}
+
+/*
  * Standard input and output, files and bytes (V0.46):
  *   input() / input(prompt) -> string          read_text() / read_text(path) -> string
  *   read_bytes() / read_bytes(path) -> list[u8]
@@ -2379,6 +2430,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
                 if (builtin == 0) builtin = check_io_call(s, n);
+                if (builtin == 0) builtin = check_web_call(s, n);
                 if (builtin == 0) builtin = check_absolue_call(s, n);
                 if (builtin == 0) builtin = check_format_call(s, n);
                 if (builtin == 1) return n->type_name;

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.54 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.55 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -1025,6 +1025,25 @@ if [ "$kio_tm" -gt 30000 ]; then
     exit 1
 fi
 printf '%s\n' "textes_memoire.cl : OK -> un million de tours avec textes, objets et mots comptes, $kio_tm Kio au plus"
+
+# V0.55 : le module web (un serveur avec ses routes, ses pages, ses formulaires)
+if ! bash tests/run_web.sh > build/web.log 2>&1; then
+    printf '%s\n' 'web : ECHEC' >&2
+    tail -n 12 build/web.log >&2
+    exit 1
+fi
+printf '%s\n' "web/site.cl : OK -> routes, modeles (extends, include, if, for), formulaires, cookies, data/, fichiers envoyes, static/, erreurs 500 sans arret ; PHP : $(sed -n 's/^web PHP : //p' build/web.log)"
+printf '%s\n' "web/site.cl : OK -> $(sed -n 's/^web : OK, //p' build/web.log)"
+./build/clair tests/web/site.cl -o build/test_web_dce --dce
+grep -q '^static int64_t clair_fn___web_handle(void) {' build/test_web_dce.generated.c
+printf '%s\n' 'web/site.cl : OK -> aussi avec --dce'
+expect_compile_error invalid_web_parametre 'web error: f() has no parameter x for <x> of "/a/<x>" (line 3)'
+expect_compile_error invalid_web_chemin 'web error: the parameter x of f() is not in the path "/a": add <x>, or give it the type Request (line 3)'
+expect_compile_error invalid_web_type 'web error: the parameter x of f() comes from the path: it is a string, an int or a float, not list[int] (line 3)'
+expect_compile_error invalid_web_retour 'web error: f() answers a request: it gives a string (a page) or a Response, not int (line 3)'
+expect_compile_error invalid_web_double 'web error: POST /a/<y> is already answered by f() of line 3 (line 8)'
+expect_compile_error invalid_web_import 'web error: @route(...) on f(): the only decorator is @web.route, after import web (line 1)'
+expect_compile_error invalid_web_methode "web error: unknown method 'FETCH' in @web.route: GET, POST, PUT, DELETE, PATCH or OPTIONS (line 3)"
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

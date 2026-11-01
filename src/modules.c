@@ -1,6 +1,7 @@
 #include "modules.h"
 #include "parser.h"
 #include "units.h"
+#include "clair_web_module.h"   /* V0.55: the module web, written in Clair (src/clair_web.cl) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -268,7 +269,8 @@ static Module *load_module(const char *name, const char *from) {
     char *path = malloc(len);
     if (!path) return NULL;
     snprintf(path, len, "%s%s.cl", base_dir, name);
-    char *source = read_source(path);
+    /* V0.55: web is built into the compiler (a file web.cl does not replace it) */
+    char *source = strcmp(name, "web") == 0 ? dup_text((const char *)clair_web_module_text) : read_source(path);
     if (!source) {
         import_error(from, "no module named '%s' (no file %s)", name, path);
         free(path);
@@ -291,6 +293,15 @@ static Module *load_module(const char *name, const char *from) {
         return NULL;
     }
     free(path);
+    for (size_t i = 0; i < program->child_count; i++) {
+        const AstNode *c = program->children[i];
+        if (c->kind == AST_FUNCTION && c->decorators) {
+            error_line = c->decorators->child_count ? c->decorators->children[0]->line : c->line;
+            import_error(file_name, "@web.route(...) is written in the main program, not in a module%s%s", "", "");
+            ast_free(program);
+            return NULL;
+        }
+    }
     m = &modules[module_count++];
     memset(m, 0, sizeof(*m));
     m->name = dup_text(name);

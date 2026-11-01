@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block titre %}Les {{ n }} premiers carrés{% endblock %}
+{% block contenu %}
+<h1>Les {{ n }} premiers carrés</h1>
+<pre>{% for l in lignes %}{{ l }}
+{% endfor %}</pre>
+{% endblock %}

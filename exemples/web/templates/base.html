@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block titre %}Carnet{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header><a href="/">Carnet</a> · <a href="/carres/10">Carrés</a> · <a href="/api/notes">API</a> · <a href="/info.php">PHP</a></header>
+<main>
+{% block contenu %}{% endblock %}
+</main>
+<footer>Fait avec Clair</footer>
+</body>
+</html>

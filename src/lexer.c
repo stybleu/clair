@@ -173,6 +173,7 @@ Token lexer_next(Lexer *l) {
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_CARET_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_CARET, l->source + start_pos, 1, line, column);
         case '~': return make_token(TOKEN_TILDE, l->source + start_pos, 1, line, column);
+        case '@': return make_token(TOKEN_AT, l->source + start_pos, 1, line, column);
         case '=':
             if (peek(l) == '=') { advance(l); return make_token(TOKEN_EQUAL_EQUAL, l->source + start_pos, 2, line, column); }
             return make_token(TOKEN_EQUAL, l->source + start_pos, 1, line, column);
@@ -224,7 +225,7 @@ const char *token_kind_name(TokenKind kind) {
         case TOKEN_SHL: return "<<"; case TOKEN_SHR: return ">>"; case TOKEN_AMP_EQUAL: return "&=";
         case TOKEN_PIPE_EQUAL: return "|="; case TOKEN_CARET_EQUAL: return "^="; case TOKEN_SHL_EQUAL: return "<<=";
         case TOKEN_SHR_EQUAL: return ">>=";
-        case TOKEN_IMPORT: return "import"; case TOKEN_FROM: return "from"; case TOKEN_AS: return "as";
+        case TOKEN_IMPORT: return "import"; case TOKEN_FROM: return "from"; case TOKEN_AS: return "as"; case TOKEN_AT: return "@";
         case TOKEN_ERROR: return "error";
     }
     return "unknown";

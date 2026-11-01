@@ -1870,6 +1870,51 @@ AstNode *parser_parse_program(Parser *p) {
         }
 
         AstNode *decl = NULL;
+        AstNode *decorators = NULL;
+        /* V0.55: @web.route("/x") before a def, one or more */
+        while (p->current.kind == TOKEN_AT) {
+            size_t at_line = p->current.line, at_column = p->current.column;
+            next(p);
+            if (!decorators) decorators = ast_new(AST_BLOCK, NULL, 0);
+            AstNode *call = decorators ? parse_expression(p) : NULL;
+            if (!call || (call->kind != AST_CALL && call->kind != AST_METHOD_CALL)) {
+                if (call) fprintf(stderr, "parse error at %zu:%zu: write a call after @, like @web.route(\"/\")\n", at_line, at_column);
+                ast_free(call);
+                ast_free(decorators);
+                p->had_error = 1;
+                ast_free(program);
+                return NULL;
+            }
+            if (!ast_add_child(decorators, call)) {
+                ast_free(call);
+                ast_free(decorators);
+                ast_free(program);
+                return NULL;
+            }
+            if (p->current.kind != TOKEN_AT && p->current.kind != TOKEN_DEF) {
+                fprintf(stderr, "parse error at %zu:%zu: a def must follow @%s(...), got %s\n", p->current.line,
+                        p->current.column, call->text ? call->text : "", token_kind_name(p->current.kind));
+                ast_free(decorators);
+                p->had_error = 1;
+                ast_free(program);
+                return NULL;
+            }
+        }
+        if (decorators) {
+            decl = parse_function(p);
+            if (!decl) {
+                ast_free(decorators);
+                ast_free(program);
+                return NULL;
+            }
+            decl->decorators = decorators;
+            if (!ast_add_child(program, decl)) {
+                ast_free(decl);
+                ast_free(program);
+                return NULL;
+            }
+            continue;
+        }
         if (p->current.kind == TOKEN_IMPORT || p->current.kind == TOKEN_FROM) {
             if (!parse_import(p, program)) {
                 p->had_error = 1;
@@ -1894,7 +1939,7 @@ AstNode *parser_parse_program(Parser *p) {
             }
         } else {
             clair_diag_show(80, ast_current_file, p->current.line, p->current.column, "expected Class");
-            fprintf(stderr, "parse error at %zu:%zu: expected Class, def or import, got %s\n",
+            fprintf(stderr, "parse error at %zu:%zu: expected Class, def, import or @, got %s\n",
                     p->current.line, p->current.column, token_kind_name(p->current.kind));
             p->had_error = 1;
             ast_free(program);

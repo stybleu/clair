@@ -7,6 +7,7 @@
 #include "ad.h"
 #include "ad_reverse.h"
 #include "diagnostics.h"
+#include "web.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -491,6 +492,13 @@ int main(int argc, char **argv) {
     AstNode *program = parser_parse_program(&parser);
     ast_current_line = 0;                 /* V0.49: nodes made by the compiler have no line */
     if (!program || parser.had_error) {
+        ast_free(program);
+        free(source);
+        return 1;
+    }
+
+    /* V0.55: @web.route(...): checked, and the function that answers requests is written */
+    if (!web_prepare(program)) {
         ast_free(program);
         free(source);
         return 1;

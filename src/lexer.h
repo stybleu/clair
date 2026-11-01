@@ -75,6 +75,7 @@ typedef enum {
     TOKEN_IMPORT,           /* V0.47: import, from, as */
     TOKEN_FROM,
     TOKEN_AS,
+    TOKEN_AT,               /* V0.55: @web.route(...) before a def */
     TOKEN_ERROR
 } TokenKind;
 

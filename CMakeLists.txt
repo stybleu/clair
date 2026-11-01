@@ -15,6 +15,7 @@ add_executable(clair
     src/modules.c
     src/units.c
     src/codegen_c.c
+    src/web.c
 )
 target_compile_options(clair PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -43,4 +44,29 @@ add_custom_command(
     DEPENDS src/clair_measure.h src/clair_measure_rt.c tools/embed_file.cmake
     COMMENT "Embedding the measure runtime")
 target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_measure_runtime.h)
+
+# V0.55: the module web: its Clair part (read by the compiler as the module web),
+# and its C part, copied into the programs that import web
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_web_module.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DRAW=1
+            "-DIN=clair_web.cl" -DNAME=clair_web_module_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_web_module.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_web.cl tools/embed_file.cmake
+    COMMENT "Embedding the module web")
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_web_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_web_rt.c" -DNAME=clair_web_runtime_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_web_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_web_prelude.c" -DNAME=clair_web_prelude_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_web_prelude.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/clair_web_prelude.h
+    DEPENDS src/clair_web_rt.c src/clair_web_prelude.c tools/embed_file.cmake
+    COMMENT "Embedding the web server")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_web_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_web_runtime.h)
 target_include_directories(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

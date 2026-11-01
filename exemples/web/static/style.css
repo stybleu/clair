@@ -1,0 +1,8 @@
+body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 0 auto; padding: 0 1rem; line-height: 1.5; }
+header { padding: 1rem 0; border-bottom: 1px solid #ccc; }
+footer { margin-top: 2rem; color: #777; font-size: 0.9rem; }
+form { display: flex; gap: 0.5rem; }
+input { flex: 1; padding: 0.5rem; font-size: 1rem; }
+button { padding: 0.5rem 1rem; font-size: 1rem; }
+.petit { color: #777; font-size: 0.9rem; }
+@media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } a { color: #8cf; } }
