@@ -938,6 +938,7 @@ static int64_t fast_plan_const_width(const FastPlan *plan, const char *base) {
 static int fast_plan_for(const AstNode *loop, FastPlan *plan) {
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
     plan->inner_loop = NULL;
+    for (int i = 0; i < 4; i++) plan->inner_edge[i] = NULL;   /* fast_plan_free frees them */
     if (fast_suppress) return 0;
     if (!loop || loop->kind != AST_FOR || !loop->text) return 0;
     if (loop->child_count != 2 && loop->child_count != 3) return 0;  /* step must be 1 */
@@ -997,6 +998,7 @@ static int while_counter_pattern(const AstNode *loop, const char **var, const As
 static int fast_plan_while(const AstNode *loop, FastPlan *plan, const char **var, const AstNode **stop) {
     plan->check_count = plan->access_count = plan->base_count = plan->owned_count = 0;
     plan->inner_loop = NULL;
+    for (int i = 0; i < 4; i++) plan->inner_edge[i] = NULL;   /* fast_plan_free frees them */
     if (fast_suppress) return 0;
     if (!while_counter_pattern(loop, var, stop)) return 0;
     const AstNode *body = loop->children[1];
