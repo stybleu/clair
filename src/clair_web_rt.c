@@ -2026,6 +2026,7 @@ static int64_t clair_web_run(int64_t port, const char *host) {
         clair_web_fail("a port is a number from 0 to 65535, got ", n);
     }
     signal(SIGPIPE, SIG_IGN);
+    fflush(stdout);                                        /* what the program printed before is seen now */
     snprintf(clair_web_host, sizeof(clair_web_host), "%s", host);
     clair_web_public = strcmp(host, "127.0.0.1") != 0;
     int s = socket(AF_INET, SOCK_STREAM, 0);

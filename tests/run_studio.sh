@@ -1,0 +1,94 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# V0.58 : Clair Studio (tools/studio/studio.cl), interroge comme le ferait l'editeur
+# du navigateur : jeton, fichiers, compilation, lancement, entree, arret.
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+[ -x build/web_client ] || clang -std=c11 -O2 tests/web_client.c -o build/web_client || exit 1
+./build/clair tools/studio/studio.cl -o build/studio_test_bin || exit 1
+rm -rf build/studio_test build/studio_projets
+cp -r tools/studio build/studio_test
+mkdir -p build/studio_projets
+cd build/studio_test
+CLAIR_STUDIO_OUVRIR=0 ../studio_test_bin "$ROOT/build/studio_projets" 0 > studio.out 2> studio.err &
+PID=$!
+trap 'kill $PID 2> /dev/null' EXIT
+PORT=""
+for _ in $(seq 1 100); do
+    PORT="$(sed -n 's|.*http://127\.0\.0\.1:\([0-9]*\)/$|\1|p' studio.err | head -n 1)"
+    [ -n "$PORT" ] && break
+    sleep 0.05
+done
+JETON="$(sed -n 's|.*/?t=\([0-9a-f]*\)$|\1|p' studio.out)"
+if [ -z "$PORT" ] || [ -z "$JETON" ]; then
+    echo "le Studio ne demarre pas :" >&2
+    cat studio.out studio.err >&2
+    exit 1
+fi
+C="../web_client $PORT"
+echec() { echo "studio : $1" >&2; exit 1; }
+corps() { sed '1,/^$/d'; }
+code() { head -n 1 | cut -d' ' -f1; }
+
+[ "$($C GET / | code)" = 403 ] || echec "sans jeton, la page devrait etre refusee"
+[ "$($C GET /api/fichiers | code)" = 403 ] || echec "sans jeton, l'API devrait etre refusee"
+[ "$($C GET "/?t=mauvais" | code)" = 403 ] || echec "un mauvais jeton devrait etre refuse"
+SESSION="$($C GET "/?t=$JETON" | sed -n 's/^set-cookie: \(clair_session=[^;]*\);.*/\1/p')"
+[ -n "$SESSION" ] || echec "le jeton ne donne pas de session"
+S="Cookie: $SESSION"
+$C GET / "$S" | grep -q '<title>Clair Studio</title>' || echec "page de l'editeur"
+$C GET /api/fichiers "$S" | corps | grep -q '"nom":"bonjour.cl"' || echec "bonjour.cl n'est pas dans le dossier"
+
+# ecrire, lire, lancer
+$C POST /api/ecrire/essai.cl 'corps=def main() -> int {\n    print("un")\n    print(6 * 7)\n    return 0\n}\n' "$S" | corps | grep -q '"ok":true' || echec "ecrire"
+[ "$($C GET /api/lire/essai.cl "$S" | corps | head -n 2 | tail -n 1)" = '    print("un")' ] || echec "lire"
+ID="$($C POST /api/lancer/essai.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+[ -n "$ID" ] || echec "lancer"
+SORTIE=""
+for _ in $(seq 1 200); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    SORTIE="$SORTIE$(printf '%s' "$R" | sed -n 's/.*"sortie":"\(.*\)","fini".*/\1/p')"
+    printf '%s' "$R" | grep -q '"fini":true' && break
+    sleep 0.05
+done
+printf '%s' "$R" | grep -q '"code":0' || echec "le programme n'a pas fini avec le code 0 : $R"
+[ "$SORTIE" = 'un\n42\n' ] || echec "sortie : $SORTIE"
+$C GET /api/c/essai.cl "$S" | grep -q 'int main(void)' || echec "le C"
+
+# une erreur de compilation, avec sa ligne
+$C POST /api/ecrire/faux.cl 'corps=def main() -> int {\n    let x: int = 3\n    let y: string = x + "a"\n    return 0\n}\n' "$S" > /dev/null
+$C POST /api/lancer/faux.cl 'corps=' "$S" | corps | grep -q '"ok":false,"erreurs":".*(line 3)' || echec "erreur de compilation"
+
+# un programme qui demande, puis une boucle sans fin arretee
+$C POST /api/ecrire/demande.cl 'corps=def main() -> int {\n    let n: string = input()\n    print("Bonjour " + n)\n    return 0\n}\n' "$S" > /dev/null
+ID="$($C POST /api/lancer/demande.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+$C POST "/api/entree/$ID" 'corps=Ada\n' "$S" | corps | grep -q '"ok":true' || echec "entree"
+for _ in $(seq 1 200); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    printf '%s' "$R" | grep -q 'Bonjour Ada' && break
+    sleep 0.05
+done
+printf '%s' "$R" | grep -q 'Bonjour Ada' || echec "programme qui demande : $R"
+$C POST /api/ecrire/boucle.cl 'corps=def main() -> int {\n    let i: int = 0\n    while true {\n        i += 1\n    }\n    return 0\n}\n' "$S" > /dev/null
+ID="$($C POST /api/lancer/boucle.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+sleep 0.3
+$C GET "/api/suivre/$ID" "$S" | corps | grep -q '"fini":false' || echec "la boucle devrait tourner"
+$C POST "/api/arreter/$ID" 'corps=' "$S" | corps | grep -q '"ok":true' || echec "arreter"
+for _ in $(seq 1 100); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    printf '%s' "$R" | grep -q '"fini":true' && break
+    sleep 0.05
+done
+printf '%s' "$R" | grep -q '"code":137' || echec "la boucle arretee : $R"
+
+# renommer, supprimer, et rien en dehors du dossier
+$C POST /api/renommer/essai.cl/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "renommer"
+$C POST /api/renommer/autre.cl/bonjour.cl 'corps=' "$S" | corps | grep -q '"ok":false' || echec "renommer sur un fichier qui existe"
+$C POST /api/supprimer/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "supprimer"
+[ ! -e "$ROOT/build/studio_projets/autre.cl" ] || echec "autre.cl devrait etre supprime"
+[ "$($C GET /api/lire/..%2F..%2Fsrc%2Fmain.c "$S" | code)" = 404 ] || echec "un fichier hors du dossier"
+[ "$($C GET /api/lire/.secret "$S" | code)" = 403 ] || echec "un fichier cache"
+[ "$($C POST /api/ecrire/pirate.cl 'corps=x' "$S" 'Sec-Fetch-Site: cross-site' | code)" = 403 ] || echec "une page d'un autre site"
+kill $PID 2> /dev/null
+wait $PID 2> /dev/null
+echo "studio : OK"

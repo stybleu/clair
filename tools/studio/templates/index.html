@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="theme-color" content="#16181d">
+<title>Clair Studio</title>
+<link rel="stylesheet" href="/static/studio.css">
+</head>
+<body>
+<div id="app">
+  <header class="barre">
+    <button id="b-fichiers" class="icone" title="Fichiers" aria-label="Fichiers">☰</button>
+    <div class="titre">
+      <span id="nom-fichier">…</span>
+      <span id="etat-sauve" class="discret"></span>
+    </div>
+    <button id="b-c" class="texte" title="Voir le C écrit par Clair">C</button>
+    <button id="b-arreter" class="icone arreter" title="Arrêter" aria-label="Arrêter" hidden>■</button>
+    <button id="b-lancer" class="lancer" title="Compiler et lancer" aria-label="Lancer">▶</button>
+  </header>
+
+  <main class="editeur" id="editeur">
+    <div class="marge" id="marge"><div id="numeros"></div></div>
+    <div class="zone">
+      <pre class="couleurs" id="couleurs" aria-hidden="true"></pre>
+      <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"
+                wrap="off" aria-label="Code Clair"></textarea>
+    </div>
+  </main>
+
+  <nav class="touches" id="touches" aria-label="Touches">
+    <button data-t="    ">⇥</button><button data-t="{">{</button><button data-t="}">}</button>
+    <button data-t="(">(</button><button data-t=")">)</button><button data-t="[">[</button><button data-t="]">]</button>
+    <button data-t=":">:</button><button data-t="&quot;">"</button><button data-t="=">=</button>
+    <button data-t="->">-&gt;</button><button data-t="<">&lt;</button><button data-t=">">&gt;</button>
+    <button data-t="+">+</button><button data-t="-">-</button><button data-t="*">*</button><button data-t="/">/</button>
+    <button data-t="±">±</button><button data-t="_">_</button><button data-t=".">.</button><button data-t=",">,</button>
+    <button data-cmd="undo" title="Annuler">↶</button><button data-cmd="redo" title="Refaire">↷</button>
+  </nav>
+
+  <section class="console" id="console" hidden>
+    <div class="console-tete">
+      <span id="etat">Prêt</span>
+      <button id="b-fermer" class="icone petit" aria-label="Fermer la console">✕</button>
+    </div>
+    <pre id="sortie"></pre>
+    <form id="f-entree" class="entree" hidden>
+      <input id="entree" autocomplete="off" autocapitalize="off" placeholder="Entrée du programme (Entrée pour envoyer)">
+    </form>
+  </section>
+</div>
+
+<div class="voile" id="voile" hidden></div>
+<aside class="tiroir" id="tiroir" hidden>
+  <div class="tiroir-tete">
+    <strong>Fichiers</strong>
+    <span class="discret" title="{{ dossier }}">{{ dossier }}</span>
+  </div>
+  <ul id="liste"></ul>
+  <div class="tiroir-pied">
+    <button id="b-nouveau">+ Nouveau</button>
+    <button id="b-renommer">Renommer</button>
+    <button id="b-supprimer" class="danger">Supprimer</button>
+  </div>
+</aside>
+
+<div class="fenetre" id="fenetre-c" hidden>
+  <div class="console-tete"><span id="titre-c">Le C</span><button id="b-fermer-c" class="icone petit" aria-label="Fermer">✕</button></div>
+  <pre id="texte-c"></pre>
+</div>
+
+<script src="/static/studio.js"></script>
+</body>
+</html>

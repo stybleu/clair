@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.57 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.58 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -1088,6 +1088,14 @@ pkill -P "$PID_OS_WEB" 2> /dev/null || true
 [ "$out_ow1" = '0 BONJOUR' ]
 [ "$out_ow2" = 'a.css;b.js;' ]
 printf '%s\n' 'os_web.cl : OK -> une page web qui lance un programme et lit un dossier'
+
+# V0.58 : Clair Studio, l'IDE ecrit en Clair (tools/studio)
+if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
+    printf '%s\n' 'tools/studio : ECHEC' >&2
+    tail -n 8 build/studio.log >&2
+    exit 1
+fi
+printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

@@ -33,3 +33,6 @@ __pycache__/
 .DS_Store
 *.swp
 *.swo
+
+# V0.58 : Clair Studio garde son jeton et sa cle ici
+/tools/studio/data/
