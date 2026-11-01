@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 printf '%s\n' '=================================================='
-printf '%s\n' ' CLAIR V0.55 - BUILD + TESTS'
+printf '%s\n' ' CLAIR V0.56 - BUILD + TESTS'
 printf '%s\n' '=================================================='
 
 cmake -S . -B build
@@ -1044,6 +1044,49 @@ expect_compile_error invalid_web_retour 'web error: f() answers a request: it gi
 expect_compile_error invalid_web_double 'web error: POST /a/<y> is already answered by f() of line 3 (line 8)'
 expect_compile_error invalid_web_import 'web error: @route(...) on f(): the only decorator is @web.route, after import web (line 1)'
 expect_compile_error invalid_web_methode "web error: unknown method 'FETCH' in @web.route: GET, POST, PUT, DELETE, PATCH or OPTIONS (line 3)"
+
+# V0.56 : le module os (programmes, fichiers, dossiers, temps)
+./build/clair tests/os_module.cl -o build/test_os_module
+rm -rf build/os_test
+mkdir -p build/os_test
+code_os=0
+(cd build/os_test && ../test_os_module un "deux trois" > ../os_module.out) || code_os=$?
+if [ "$code_os" != 4 ] || [ "$(cat build/os_module.out)" != "$(cat tests/os_module.expected)" ]; then
+    printf '%s\n' "os_module.cl : ECHEC (code $code_os)" >&2
+    diff tests/os_module.expected build/os_module.out | head -n 10 >&2
+    exit 1
+fi
+printf '%s\n' 'os_module.cl : OK -> arguments, os.run, os.shell, entree donnee, programme absent, dossiers, copie, chemins, environnement, temps, programme suivi pendant qu il tourne, arrete, os.exit'
+./build/clair exemples/os/lancer.cl -o build/lancer
+out_lancer="$(CLAIR="$ROOT/build/clair" ./build/lancer tests/hello.cl)"
+printf '%s\n' "$out_lancer" | grep -Fxq 'Hello from Clair'
+printf '%s\n' "$out_lancer" | grep -q '^--- termine, code 0, en '
+printf 'def main() -> int {\n    let x: int = "a"\n    return 0\n}\n' > build/lancer_faux.cl
+if CLAIR="$ROOT/build/clair" ./build/lancer build/lancer_faux.cl > build/lancer_faux.out; then
+    printf '%s\n' 'exemples/os/lancer.cl : ECHEC -> un programme faux aurait du etre refuse' >&2
+    exit 1
+fi
+grep -Fq "semantic error: cannot initialize int 'x' with string (line 2)" build/lancer_faux.out
+printf '%s\n' 'exemples/os/lancer.cl : OK -> compile un programme Clair puis le lance (et montre ses erreurs)'
+./build/clair tests/os_web.cl -o build/test_os_web
+rm -rf build/os_web
+mkdir -p build/os_web/static
+touch build/os_web/static/a.css build/os_web/static/b.js
+(cd build/os_web && echo 0 | ../test_os_web > serveur.out 2> serveur.err) &
+PID_OS_WEB=$!
+PORT_OS_WEB=""
+for _ in $(seq 1 100); do
+    PORT_OS_WEB="$(sed -n 's|.*http://127\.0\.0\.1:\([0-9]*\)/.*|\1|p' build/os_web/serveur.err 2> /dev/null | head -n 1)"
+    [ -n "$PORT_OS_WEB" ] && break
+    sleep 0.05
+done
+out_ow1="$(./build/web_client "$PORT_OS_WEB" GET /lancer/bonjour | tail -n 1)"
+out_ow2="$(./build/web_client "$PORT_OS_WEB" GET /fichiers | tail -n 1)"
+kill "$PID_OS_WEB" 2> /dev/null || true
+pkill -P "$PID_OS_WEB" 2> /dev/null || true
+[ "$out_ow1" = '0 BONJOUR' ]
+[ "$out_ow2" = 'a.css;b.js;' ]
+printf '%s\n' 'os_web.cl : OK -> une page web qui lance un programme et lit un dossier'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

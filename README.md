@@ -46,6 +46,7 @@ Son compilateur est écrit en C et utilise Clang.
 - Différentiation automatique (--ad) : dérivées et gradients, compatible --dce.
 - Division entière contrôlée
 - Serveur web intégré (`import web`), aussi simple que Flask : routes `@web.route("/bonjour/<nom>")` vérifiées à la compilation, modèles de pages (`extends`, `if`, `for`), formulaires, cookies, fichiers de `static/`, pages PHP, données gardées dans `data/`, erreurs 500 sans arrêter le serveur ([documentation](docs/README_V0.55.md), exemple `exemples/web/`)
+- Module `os` : lancer un programme et lire sa sortie pendant qu'il tourne (`os.run`, `os.start`), fichiers et dossiers (`os.listdir`, `os.mkdir`, `os.copy_file`...), chemins, arguments de la ligne de commande, environnement, temps ([documentation](docs/README_V0.56.md), exemple `exemples/os/lancer.cl` : le bouton ▶ d'un IDE)
 
 - Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), avec leurs fonctions mathématiques (`sqrt`, `sin`, `exp`, `log`, `pi(1000)`, `isqrt`, `gcd`...), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
 
@@ -107,6 +108,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
+- [Clair V0.56](docs/README_V0.56.md) : le module `os` : lancer des programmes et lire leur sortie, fichiers, dossiers, chemins, arguments, temps
 - [Clair V0.55](docs/README_V0.55.md) : un serveur web aussi simple que Flask : `@web.route`, modèles de pages, formulaires, cookies, `static/`, PHP, `data/`
 - [Clair V0.54](docs/README_V0.54.md) : une boucle ne garde plus ses textes : la mémoire d'un tour est rendue à la fin du tour ; les dictionnaires copient leurs clés
 - [Clair V0.53](docs/README_V0.53.md) : mesures avec incertitude (`9.81 ± 0.02`, `measure[m]`), propagée dans tout le calcul ; les constantes de `phys` avec leur incertitude CODATA 2022

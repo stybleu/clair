@@ -2,6 +2,7 @@
 #include "parser.h"
 #include "units.h"
 #include "clair_web_module.h"   /* V0.55: the module web, written in Clair (src/clair_web.cl) */
+#include "clair_os_module.h"    /* V0.56: the module os, written in Clair (src/clair_os.cl) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,8 +270,10 @@ static Module *load_module(const char *name, const char *from) {
     char *path = malloc(len);
     if (!path) return NULL;
     snprintf(path, len, "%s%s.cl", base_dir, name);
-    /* V0.55: web is built into the compiler (a file web.cl does not replace it) */
-    char *source = strcmp(name, "web") == 0 ? dup_text((const char *)clair_web_module_text) : read_source(path);
+    /* V0.55: web, V0.56: os are built into the compiler (a file web.cl or os.cl does not replace them) */
+    char *source = strcmp(name, "web") == 0 ? dup_text((const char *)clair_web_module_text)
+                 : strcmp(name, "os") == 0 ? dup_text((const char *)clair_os_module_text)
+                 : read_source(path);
     if (!source) {
         import_error(from, "no module named '%s' (no file %s)", name, path);
         free(path);

@@ -916,12 +916,14 @@ static int check_text_call(Semantic *s, AstNode *n) {
 }
 
 /*
- * V0.55: what the module web (src/clair_web.cl) asks of its C part (clair_web_rt.c):
- * the network, the files of static/, data/ and templates/, PHP.  Only the module
- * web calls them; anywhere else these names are unknown.
- * 1 when n is one of them (renamed @__web_...), 0 otherwise, -1 on error.
+ * What the modules built into the compiler ask of their C part: web (V0.55,
+ * src/clair_web.cl and clair_web_rt.c: the network, static/, data/, templates/,
+ * PHP) and os (V0.56, src/clair_os.cl and clair_os_rt.c: programs, files,
+ * folders, time).  Only the module itself calls them (__web_... from web.cl,
+ * __os_... from os.cl); anywhere else these names are unknown.
+ * 1 when n is one of them (renamed @__web_..., @__os_...), 0 otherwise, -1 on error.
  */
-static int check_web_call(Semantic *s, AstNode *n) {
+static int check_module_call(Semantic *s, AstNode *n) {
     static const struct { const char *name; size_t argc; const char *args[4]; const char *result; } calls[] = {
         { "__web_run", 2, { "int", "string" }, "int" },
         { "__web_text", 1, { "int" }, "string" },
@@ -936,9 +938,37 @@ static int check_web_call(Semantic *s, AstNode *n) {
         { "__web_is_number", 2, { "string", "int" }, "bool" },
         { "__web_data", 3, { "int", "string", "string" }, "string" },
         { "__web_keep", 2, { "string", "string" }, "int" },
+        { "__os_args", 0, { NULL }, "list[string]" },
+        { "__os_error", 0, { NULL }, "string" },
+        { "__os_env", 2, { "string", "string" }, "string" },
+        { "__os_set_env", 2, { "string", "string" }, "bool" },
+        { "__os_time", 1, { "int" }, "float" },
+        { "__os_sleep", 1, { "float" }, "int" },
+        { "__os_exit", 1, { "int" }, "int" },
+        { "__os_listdir", 1, { "string" }, "list[string]" },
+        { "__os_stat", 2, { "string", "int" }, "int" },
+        { "__os_mkdir", 1, { "string" }, "bool" },
+        { "__os_remove", 1, { "string" }, "bool" },
+        { "__os_rename", 2, { "string", "string" }, "bool" },
+        { "__os_copy_file", 2, { "string", "string" }, "bool" },
+        { "__os_cwd", 0, { NULL }, "string" },
+        { "__os_chdir", 1, { "string" }, "bool" },
+        { "__os_which", 1, { "string" }, "string" },
+        { "__os_path", 2, { "int", "string" }, "string" },
+        { "__os_join", 2, { "string", "string" }, "string" },
+        { "__os_start", 2, { "list[string]", "bool" }, "int" },
+        { "__os_read", 2, { "int", "int" }, "string" },
+        { "__os_write", 2, { "int", "string" }, "bool" },
+        { "__os_close_input", 1, { "int" }, "bool" },
+        { "__os_running", 1, { "int" }, "bool" },
+        { "__os_stop", 1, { "int" }, "bool" },
+        { "__os_wait", 2, { "int", "float" }, "int" },
         { NULL, 0, { NULL }, NULL }
     };
-    if (!n->file || strcmp(n->file, "web.cl") != 0 || strncmp(n->text, "__web_", 6) != 0) return 0;
+    if (!n->file) return 0;
+    int web = strcmp(n->file, "web.cl") == 0 && strncmp(n->text, "__web_", 6) == 0;
+    int os = strcmp(n->file, "os.cl") == 0 && strncmp(n->text, "__os_", 5) == 0;
+    if (!web && !os) return 0;
     size_t c = 0;
     while (calls[c].name && strcmp(n->text, calls[c].name) != 0) c++;
     if (!calls[c].name) return 0;
@@ -2430,7 +2460,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
                 if (builtin == 0) builtin = check_io_call(s, n);
-                if (builtin == 0) builtin = check_web_call(s, n);
+                if (builtin == 0) builtin = check_module_call(s, n);
                 if (builtin == 0) builtin = check_absolue_call(s, n);
                 if (builtin == 0) builtin = check_format_call(s, n);
                 if (builtin == 1) return n->type_name;

@@ -1,0 +1,41 @@
+arg un
+arg deux trois
+0
+bonjour le monde
+
+3 [sortie
+] [erreur
+]
+ligne 1
+ligne 2
+
+127 cannot run programme_qui_nexiste_pas: No such file or directory
+
+1
+1
+1
+3
+1
+dans dossier : a.txt
+dans dossier : b.txt
+dans dossier : sous
+1
+1
+0
+cannot remove nexiste: No such file or directory
+c.cl a/b .cl a/b.cl
+1
+absent
+present
+
+1
+1
+2
+3
+
+0
+-1
+1
+137
+1
+0
