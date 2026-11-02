@@ -69,6 +69,7 @@ static int run_clang(const char *cpath, const char *output) {
             (char *)output,
             "-lm",
             "-pthread",          /* big matrix products and dense layers use every core */
+            codegen_needs_dl() ? "-ldl" : NULL,          /* V0.66: import gui loads SDL3 with dlopen */
             NULL
         };
         execvp("clang", args);

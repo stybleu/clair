@@ -1201,6 +1201,42 @@ timeout 60 ./build/test_dict_grand > build/dict_grand.out || { printf '%s\n' 'di
 cmp -s build/dict_grand.out tests/dict_grand.expected || { printf '%s\n' 'dict_grand.cl : ECHEC' >&2; diff tests/dict_grand.expected build/dict_grand.out | head -n 5 >&2; exit 1; }
 printf '%s\n' 'dict_grand.cl : OK -> 200 000 cles ecrites et relues d un coup, dans leur ordre, in'
 
+# V0.66 : nbody (la physique, sans fenetre), puis gui et la fenetre de nbody, sans ecran (SDL3 et son pilote offscreen)
+gui_echec() { printf '%s\n' "$1 : ECHEC -> $2" >&2; exit 1; }
+./build/clair tests/nbody_module.cl -o build/test_nbody_module
+./build/test_nbody_module > build/nbody_module.out || gui_echec nbody_module.cl "$(tail -n 2 build/nbody_module.out)"
+cmp -s build/nbody_module.out tests/nbody_module.expected || { diff tests/nbody_module.expected build/nbody_module.out | head -n 6 >&2; gui_echec nbody_module.cl "sortie"; }
+printf '%s\n' 'nbody_module.cl : OK -> orbite ronde (un tour, energie, moment cinetique, quantite de mouvement), ordre 4, corps sans masse, huit a trois corps, collision (masse, quantite de mouvement, volume), pas choisi seul, sans SDL3'
+./build/clair tests/gui_module.cl -o build/test_gui_module
+./build/clair tests/nbody_fenetre.cl -o build/test_nbody_fenetre
+./build/clair tests/gui_sans_sdl.cl -o build/test_gui_sans_sdl
+rm -rf build/gui_test
+mkdir -p build/gui_test
+if (cd build/gui_test && CLAIR_SDL3=none ../test_gui_sans_sdl > sans.out 2> sans.err); then gui_echec gui_sans_sdl.cl "aurait du s'arreter"; fi
+[ "$(cat build/gui_test/sans.out)" = 0 ] && grep -Fq 'Clair runtime error: gui needs SDL3 (libSDL3.so.0 not found).' build/gui_test/sans.err || gui_echec gui_sans_sdl.cl "message : $(cat build/gui_test/sans.err)"
+gui_evenements='1:down:40:95;2:up:40:95;2:keydown:0:0:espace;3:keyup:0:0:espace'
+if (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=4 CLAIR_GUI_EVENTS="$gui_evenements" ../test_gui_module > gui.out 2> gui.err); then
+    gui_ok=1
+else
+    grep -q 'gui: no screen\|gui: cannot open the window' build/gui_test/gui.err || gui_echec gui_module.cl "$(tail -n 3 build/gui_test/gui.err)"
+    gui_ok=0
+fi
+if [ "$(cat build/gui_test/gui.out)" = "sans SDL3" ]; then
+    printf '%s\n' 'gui_module.cl : SAUTE -> SDL3 absent (pkg install x11-repo && pkg install sdl3) : la fenetre n est pas essayee'
+elif [ "$gui_ok" = 0 ]; then
+    printf '%s\n' "gui_module.cl : SAUTE -> SDL3 n'ouvre pas de fenetre sans ecran : $(head -n 1 build/gui_test/gui.err)"
+else
+    cmp -s build/gui_test/gui.out tests/gui_module.expected || { diff tests/gui_module.expected build/gui_test/gui.out | head -n 6 >&2; gui_echec gui_module.cl "sortie"; }
+    (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=40 CLAIR_GUI_EVENTS='5:down:50:560;6:up:50:560;10:down:50:560;11:up:50:560;20:down:748:560;21:up:748:560' ../test_nbody_fenetre > fenetre.out 2> fenetre.err) || gui_echec nbody_fenetre.cl "$(tail -n 3 build/gui_test/fenetre.err)"
+    cmp -s build/gui_test/fenetre.out tests/nbody_fenetre.expected || { diff tests/nbody_fenetre.expected build/gui_test/fenetre.out | head -n 6 >&2; gui_echec nbody_fenetre.cl "sortie"; }
+    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter'
+fi
+if printf '#include <SDL3/SDL.h>\n' | clang -E -x c - > /dev/null 2>&1; then
+    clang -std=c11 -Wall -Wextra -Wno-unused-function tests/gui_abi.c -o build/gui_abi -ldl -lm 2> build/gui_abi.err || gui_echec tests/gui_abi.c "$(grep -m 2 error build/gui_abi.err)"
+    ./build/gui_abi > /dev/null || gui_echec tests/gui_abi.c "execution"
+    printf '%s\n' 'gui_abi.c : OK -> les declarations de SDL3 du module gui sont celles des en-tetes de SDL3'
+fi
+
 # V0.58 : Clair Studio, l'IDE ecrit en Clair (tools/studio)
 if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     printf '%s\n' 'tools/studio : ECHEC' >&2

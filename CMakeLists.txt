@@ -108,4 +108,42 @@ add_custom_command(
     DEPENDS src/clair_plot_rt.c tools/embed_file.cmake
     COMMENT "Embedding the module plot (C part)")
 target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_runtime.h)
+
+# V0.66: the module gui, the same way
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_gui_module.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DRAW=1
+            "-DIN=clair_gui.cl" -DNAME=clair_gui_module_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_gui_module.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_gui.cl tools/embed_file.cmake
+    COMMENT "Embedding the module gui")
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_gui_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_gui_rt.c" -DNAME=clair_gui_runtime_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_gui_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_gui_rt.c tools/embed_file.cmake
+    COMMENT "Embedding the module gui (C part)")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_gui_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_gui_runtime.h)
+
+# V0.66: the module nbody, the same way
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_module.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DRAW=1
+            "-DIN=clair_nbody.cl" -DNAME=clair_nbody_module_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_module.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_nbody.cl tools/embed_file.cmake
+    COMMENT "Embedding the module nbody")
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_nbody_rt.c" -DNAME=clair_nbody_runtime_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_nbody_rt.c tools/embed_file.cmake
+    COMMENT "Embedding the module nbody (C part)")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_runtime.h)
 target_include_directories(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

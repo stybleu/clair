@@ -1,4 +1,4 @@
-// Clair Studio (V0.58 a V0.64.1) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.66) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -22,7 +22,7 @@
     "and", "or", "not", "true", "false", "break", "continue", "print", "absolue", "range", "test", "assert", "assert_equal"]);
   const TYPES = new Set(["int", "float", "string", "bool", "list", "dict", "measure", "bigint", "bigfloat", "certfloat",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "float32", "matrix", "ptr", "uint1024",
-    "Request", "Response", "RunResult", "Process"]);
+    "Request", "Response", "RunResult", "Process", "Window", "Color", "Event", "Image", "Simulation"]);
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   function colorier(ligne) {
@@ -912,7 +912,7 @@
     return m ? m.analyse : null;
   }
   async function chargerModule(nom) {
-    const integre = nom === "os" || nom === "web" || nom === "plot";
+    const integre = ["os", "web", "plot", "gui", "nbody"].includes(nom);
     const m = modules.get(nom) || { analyse: null };
     m.enCours = true;
     m.quand = performance.now();

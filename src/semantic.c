@@ -924,7 +924,7 @@ static int check_text_call(Semantic *s, AstNode *n) {
  * 1 when n is one of them (renamed @__web_..., @__os_...), 0 otherwise, -1 on error.
  */
 static int check_module_call(Semantic *s, AstNode *n) {
-    static const struct { const char *name; size_t argc; const char *args[5]; const char *result; } calls[] = {
+    static const struct { const char *name; size_t argc; const char *args[8]; const char *result; } calls[] = {
         { "__web_run", 2, { "int", "string" }, "int" },
         { "__web_text", 1, { "int" }, "string" },
         { "__web_pairs", 1, { "int" }, "dict[string,string]" },
@@ -982,13 +982,59 @@ static int check_module_call(Semantic *s, AstNode *n) {
         { "__plot_arrows", 4, { "list[float]", "list[float]", "int", "int" }, "int" },
         { "__plot_out", 3, { "int", "string", "float" }, "int" },
         { "__plot_image", 1, { "string" }, "int" },
+        { "__gui_open", 3, { "string", "int", "int" }, "int" },
+        { "__gui_available", 0, { NULL }, "bool" },
+        { "__gui_frame", 0, { NULL }, "bool" },
+        { "__gui_event_count", 0, { NULL }, "int" },
+        { "__gui_event_text", 2, { "int", "int" }, "string" },
+        { "__gui_event_num", 2, { "int", "int" }, "float" },
+        { "__gui_key", 2, { "string", "int" }, "bool" },
+        { "__gui_mouse", 1, { "int" }, "float" },
+        { "__gui_mouse_button", 2, { "int", "int" }, "bool" },
+        { "__gui_size", 1, { "int" }, "int" },
+        { "__gui_set_color", 4, { "int", "int", "int", "int" }, "int" },
+        { "__gui_clear", 0, { NULL }, "int" },
+        { "__gui_rect", 5, { "float", "float", "float", "float", "bool" }, "int" },
+        { "__gui_line", 4, { "float", "float", "float", "float" }, "int" },
+        { "__gui_point", 2, { "float", "float" }, "int" },
+        { "__gui_circle", 4, { "float", "float", "float", "bool" }, "int" },
+        { "__gui_triangle", 6, { "float", "float", "float", "float", "float", "float" }, "int" },
+        { "__gui_polygon", 3, { "list[float]", "list[float]", "int" }, "int" },
+        { "__gui_text", 4, { "string", "float", "float", "float" }, "int" },
+        { "__gui_text_width", 2, { "string", "float" }, "float" },
+        { "__gui_image_load", 1, { "string" }, "int" },
+        { "__gui_image_size", 2, { "int", "int" }, "int" },
+        { "__gui_image_draw", 6, { "int", "float", "float", "float", "float", "float" }, "int" },
+        { "__gui_present", 0, { NULL }, "int" },
+        { "__gui_set_fps", 1, { "int" }, "int" },
+        { "__gui_time", 1, { "int" }, "float" },
+        { "__gui_title", 1, { "string" }, "int" },
+        { "__gui_screenshot", 1, { "string" }, "bool" },
+        { "__gui_pixel", 3, { "int", "int", "int" }, "int" },
+        { "__gui_button", 5, { "string", "float", "float", "float", "float" }, "bool" },
+        { "__gui_color_name", 2, { "string", "int" }, "int" },
+        { "__gui_hex", 2, { "string", "int" }, "int" },
+        { "__gui_close", 0, { NULL }, "int" },
+        { "__nbody_use", 8, { "list[float]", "list[float]", "list[float]", "list[float]", "list[float]", "list[float]", "list[float]", "list[float]" }, "int" },
+        { "__nbody_step", 5, { "float", "int", "float", "float", "int" }, "int" },
+        { "__nbody_energy", 3, { "float", "float", "int" }, "float" },
+        { "__nbody_sum", 1, { "int" }, "float" },
+        { "__nbody_center", 0, { NULL }, "int" },
+        { "__nbody_tau", 2, { "float", "float" }, "float" },
+        { "__nbody_look", 2, { "list[string]", "list[int]" }, "int" },
+        { "__nbody_param", 2, { "int", "float" }, "int" },
+        { "__nbody_unit", 2, { "int", "string" }, "int" },
+        { "__nbody_show", 0, { NULL }, "float" },
+        { "__nbody_fail", 1, { "string" }, "int" },
         { NULL, 0, { NULL }, NULL }
     };
     if (!n->file) return 0;
     int web = strcmp(n->file, "web.cl") == 0 && strncmp(n->text, "__web_", 6) == 0;
     int os = strcmp(n->file, "os.cl") == 0 && strncmp(n->text, "__os_", 5) == 0;
     int plot = strcmp(n->file, "plot.cl") == 0 && strncmp(n->text, "__plot_", 7) == 0;     /* V0.61 */
-    if (!web && !os && !plot) return 0;
+    int gui = strcmp(n->file, "gui.cl") == 0 && strncmp(n->text, "__gui_", 6) == 0;          /* V0.66 */
+    int nbody = strcmp(n->file, "nbody.cl") == 0 && strncmp(n->text, "__nbody_", 8) == 0;    /* V0.66 */
+    if (!web && !os && !plot && !gui && !nbody) return 0;
     size_t c = 0;
     while (calls[c].name && strcmp(n->text, calls[c].name) != 0) c++;
     if (!calls[c].name) return 0;
