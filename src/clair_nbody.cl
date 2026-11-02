@@ -11,6 +11,8 @@
 // The bodies are in the lists of the simulation: s.x[i], s.y[i], s.vx[i], s.m[i]... (a body
 // absorbed by a collision has a mass of 0 and a radius of -1). In SI units: nbody.simulation(nbody.G()).
 //
+// V0.71: s.integrator = "mercurius": WHFast while the planets are apart, IAS15 for their close encounters
+// (s.hill: the critical distance, in Hill radii; s.crit: the critical distances, kept by the module).
 // V0.70: s.gravity = "tree": the tree of Barnes and Hut (N log N), on every core (s.threads: 0 = all);
 // s.add_plummer(...): a cluster of stars in equilibrium.
 // V0.69: s.integrator = "whfast": Wisdom-Holman (as in REBOUND), for planets over millions of years;
@@ -49,6 +51,8 @@ Class Simulation {
     gravity: string
     theta: float
     threads: int
+    hill: float
+    crit: list[float]                                // V0.71: kept by MERCURIUS (its critical distances)
 
     // the C part works on the lists of this simulation (V0.70: and with its gravity: the tree or not)
     def bind() -> int {
@@ -65,6 +69,14 @@ Class Simulation {
         }
         __nbody_param(11, float(self.threads))
         __nbody_param(12, self.theta)
+        __nbody_param(13, self.hill)
+        if self.integrator == "mercurius" and len(self.crit) != len(self.m) + 3 {
+            self.crit = []                          // computed again at the first step (bodies were added)
+            for i in range(len(self.m) + 3) {
+                self.crit.append(0.0)
+            }
+        }
+        __nbody_crit(self.crit)
         return __nbody_use(self.x, self.y, self.z, self.vx, self.vy, self.vz, self.m, self.r)
     }
 
@@ -158,7 +170,7 @@ Class Simulation {
             if tau <= 0.0 {
                 return 0.001
             }
-            if self.integrator == "whfast" {
+            if self.integrator == "whfast" or self.integrator == "mercurius" {
                 self.dt = tau * 2.0 * 3.141592653589793 / 40.0
             } else {
                 self.dt = tau / 500.0
@@ -178,6 +190,9 @@ Class Simulation {
         if self.integrator == "ias15" {
             return f + 4
         }
+        if self.integrator == "mercurius" {
+            return f + 16
+        }
         if self.integrator == "whfast" {
             if self.merge {
                 __nbody_fail("s.merge: WHFast does not merge bodies (s.integrator = \"ias15\" does)")
@@ -188,7 +203,7 @@ Class Simulation {
             return f + 2
         }
         if self.integrator != "leapfrog" {
-            __nbody_fail("s.integrator: \"leapfrog\", \"yoshida\", \"ias15\" or \"whfast\", not \"" + self.integrator + "\"")
+            __nbody_fail("s.integrator: \"leapfrog\", \"yoshida\", \"ias15\", \"whfast\" or \"mercurius\", not \"" + self.integrator + "\"")
         }
         return f
     }
@@ -391,7 +406,8 @@ Class Simulation {
         return __nbody_quantile(d, w, fraction * total)
     }
 
-    // V0.68: the IAS15 steps done (0), done again because they were too long (1)
+    // V0.68: the IAS15 steps done (0), done again because they were too long (1); V0.71, MERCURIUS, after
+    // s.run(): the steps with a close encounter (3), the IAS15 steps they took (4)
     def steps_done(what: int) -> int {
         return int(__nbody_stat(what))
     }
@@ -474,7 +490,7 @@ def G() -> float {
 
 // an empty simulation; g: the constant of gravitation in the units chosen (1.0, or nbody.G() in SI)
 def simulation(g: float) -> Simulation {
-    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9, "direct", 0.5, 0)
+    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9, "direct", 0.5, 0, 3.0, [])
 }
 
 // V0.68: the constant of gravitation in astronomical units, solar masses and years of 365.25 days:
@@ -512,10 +528,24 @@ def load(path: string) -> Simulation {
     s.gravity = __nbody_loaded_text(-4)
     s.theta = __nbody_loaded(-1, 11)
     s.threads = int(__nbody_loaded(-1, 12))
+    s.hill = __nbody_loaded(-1, 13)
+    let crit: bool = s.integrator == "mercurius" and n > 0
     for i in range(n) {
         s.add3(__nbody_loaded_text(i), __nbody_loaded(i, 0), __nbody_loaded(i, 1), __nbody_loaded(i, 2), __nbody_loaded(i, 3), __nbody_loaded(i, 4), __nbody_loaded(i, 5), __nbody_loaded(i, 6))
         s.r[i] = __nbody_loaded(i, 7)
         s.colors[i] = int(__nbody_loaded(i, 8))
+        let c: float = __nbody_loaded(i, 9)
+        if c != c {
+            crit = false                            // not saved (NAN): computed again
+        }
+    }
+    if crit {                                       // V0.71: MERCURIUS goes on with the same critical distances
+        for i in range(n) {
+            s.crit.append(__nbody_loaded(i, 9))
+        }
+        s.crit.append(s.dt)
+        s.crit.append(s.G)
+        s.crit.append(s.hill)
     }
     s.flags()
     return s

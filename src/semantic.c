@@ -1039,6 +1039,7 @@ static int check_module_call(Semantic *s, AstNode *n) {
         { "__nbody_plummer", 5, { "int", "float", "float", "float", "int" }, "int" },                /* V0.70 */
         { "__nbody_gen", 2, { "int", "int" }, "float" },
         { "__nbody_quantile", 3, { "list[float]", "list[float]", "float" }, "float" },
+        { "__nbody_crit", 1, { "list[float]" }, "int" },                                             /* V0.71 */
         { NULL, 0, { NULL }, NULL }
     };
     if (!n->file) return 0;

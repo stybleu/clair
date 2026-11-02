@@ -1,4 +1,4 @@
-// V0.70.1 : la fenetre de nbody avec le calcul dans un fil a part (CLAIR_NBODY_THREAD=1, sans ecran :
+// V0.70.1 (V0.71 : MERCURIUS) : la fenetre de nbody avec le calcul dans un fil a part (CLAIR_NBODY_THREAD=1, sans ecran :
 // tests/run_tests.sh). Le temps avance au rythme de l'horloge : on verifie qu'il avance, pas sa valeur.
 import nbody
 
@@ -15,6 +15,16 @@ def main() -> int {
     let w0: float = w.energy()
     w.show()
     print("WHFast : le temps avance " + str(w.t > 0.1) + ", energie gardee " + str(abs((w.energy() - w0) / w0) < 1e-9))
+    let c: Simulation = nbody.simulation_solar()
+    c.integrator = "mercurius"
+    c.add("Soleil", 1.0, 0.0, 0.0, 0.0, 0.0)
+    c.add_orbit("Jupiter", 0.000954791915, 0, 5.2, 0.0, 0.0, 0.0, 0.0, 175.0)
+    c.add_orbit("comete", 0.0, 0, 3.5, 0.5, 0.0, 0.0, 0.0, 180.0)
+    c.dt = 0.01
+    c.speed = 2.0
+    let c0: float = c.energy()
+    c.show()
+    print("MERCURIUS (une comete frole Jupiter) : le temps avance " + str(c.t > 0.1) + ", un multiple du pas " + str(abs(c.t / 0.01 - float(int(c.t / 0.01 + 0.5))) < 1e-6) + ", energie gardee " + str(abs((c.energy() - c0) / c0) < 1e-8))
     let a: Simulation = nbody.simulation(1.0)
     a.add_plummer(2000, 1.0, 1.0, 4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "")
     a.gravity = "tree"

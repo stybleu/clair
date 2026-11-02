@@ -3,6 +3,7 @@
  * V0.68: IAS15 (s.integrator = "ias15"), the orbital elements, the solar system.
  * V0.69: WHFast (s.integrator = "whfast"), s.save() and nbody.load().
  * V0.70: the tree of Barnes and Hut (s.gravity = "tree") on every core, Plummer spheres.
+ * V0.71: MERCURIUS (s.integrator = "mercurius"), the hybrid of WHFast and IAS15.
  *
  * Copied into the C of the programs that import nbody (tools/embed_file.cmake), after the
  * runtime of gui (nbody imports gui: the window of s.show() is the window of gui).
@@ -21,9 +22,10 @@
 static struct {
     ClairList x, y, z, vx, vy, vz, m, r;           /* the lists of the simulation */
     ClairList names, colors;
+    ClairList crit;                                  /* V0.71: s.crit, the critical distances of MERCURIUS */
     double *ax, *ay, *az;
     size_t cap;
-    double dt, speed, trail, tscale, lscale, G, soft, t, epsilon, theta_saved;
+    double dt, speed, trail, tscale, lscale, G, soft, t, epsilon, theta_saved, hill;
     int flags;
     char tunit[32], lunit[32];
 } clair_nb;
@@ -38,6 +40,13 @@ static int64_t clair_nbody_fail(const char *what) { clair_nbody_die(what); }
 static size_t clair_nbody_n(void) { return clair_nb.m ? clair_nb.m->len : 0; }
 
 #define CLAIR_NB(list) ((double *)clair_nb.list->data)
+
+/* V0.71: s.crit (MERCURIUS keeps there the critical distance of each body, then the dt, G and s.hill they
+   were computed with) */
+static int64_t clair_nbody_crit(ClairList c) {
+    clair_nb.crit = c;
+    return 0;
+}
 
 static int64_t clair_nbody_use(ClairList x, ClairList y, ClairList z, ClairList vx, ClairList vy, ClairList vz, ClairList m, ClairList r) {
     size_t n = m ? m->len : 0;
@@ -521,6 +530,7 @@ static int64_t clair_nbody_collide(void) {
 }
 
 static int64_t clair_nbody_whfast(double h, int64_t steps, double G, double soft);
+static int64_t clair_nbody_mercurius(double h, int64_t steps, double G, double soft, int64_t flags);
 
 /* V0.70: the forces at the end of a leapfrog are those its next call starts with, if the program has
    moved nothing in between (checked to the last bit: the result is the same as computing them again) */
@@ -559,6 +569,7 @@ static int clair_nbody_forces_kept(double G, double eps2) {
 static int64_t clair_nbody_step(double h, int64_t steps, double G, double soft, int64_t flags) {
     if (!clair_nb.m) clair_nbody_die("no simulation");
     if (flags & 8) return clair_nbody_whfast(h, steps, G, soft);
+    if (flags & 16) return clair_nbody_mercurius(h, steps, G, soft, flags);
     double eps2 = soft * soft;
     int64_t hits = 0;
     static const double w1 = 1.3512071919596578, w0 = -1.7024143839193153;     /* 1/(2-2^(1/3)), -2^(1/3)/(2-2^(1/3)) */
@@ -693,6 +704,7 @@ static int64_t clair_nbody_param(int64_t which, double v) {
         case 9: clair_nb.epsilon = v; break;          /* V0.68: the precision of IAS15 */
         case 10: clair_bh.theta = v > 0 ? v : 0; break;   /* V0.70: the tree (0: direct sums) */
         case 12: clair_nb.theta_saved = v; break;     /* V0.70: s.theta, kept even without the tree */
+        case 13: clair_nb.hill = v > 0 ? v : 3; break;    /* V0.71: MERCURIUS, the critical distance in Hill radii */
         case 11: clair_bh.threads = (int)v; break;    /* V0.70: the cores (0: all) */
         default: break;
     }
@@ -741,8 +753,12 @@ static struct {
 
 static double clair_nbody_out(int64_t i) { return i >= 0 && i < 12 ? clair_ias.out[i] : 0; }
 
-/* 0 the IAS15 steps done, 1 the steps done again, 2 the predictor-corrector that did not settle */
+static int64_t clair_mc_enc_steps, clair_mc_ias_steps;   /* V0.71, MERCURIUS: the steps with an encounter, their IAS15 steps */
+
+/* 0 the IAS15 steps done, 1 the steps done again, 2 the predictor-corrector that did not settle;
+   MERCURIUS: 3 the steps with an encounter, 4 the IAS15 steps they took */
 static double clair_nbody_stat(int64_t what) {
+    if (what == 3 || what == 4) return (double)(what == 3 ? clair_mc_enc_steps : clair_mc_ias_steps);
     return what == 0 ? (double)clair_ias.steps : what == 1 ? (double)clair_ias.rejected : (double)clair_ias.unconverged;
 }
 
@@ -796,9 +812,13 @@ static void clair_ias_put(const double *pos) {
     for (size_t i = 0; i < n; i++) { x[i] = pos[3 * i]; y[i] = pos[3 * i + 1]; z[i] = pos[3 * i + 2]; }
 }
 
+static void (*clair_ias_hook)(double G, double eps2);   /* V0.71: other forces (MERCURIUS: the bodies of an encounter) */
+static int64_t (*clair_ias_collide_hook)(void);         /* V0.71: more collisions (MERCURIUS: with the star) */
+
 static void clair_ias_accel(double G, double eps2, double *out) {
     size_t n = clair_nbody_n();
-    clair_nbody_forces(G, eps2);
+    if (clair_ias_hook) clair_ias_hook(G, eps2);
+    else clair_nbody_forces(G, eps2);
     for (size_t i = 0; i < n; i++) { out[3 * i] = clair_nb.ax[i]; out[3 * i + 1] = clair_nb.ay[i]; out[3 * i + 2] = clair_nb.az[i]; }
 }
 
@@ -998,6 +1018,7 @@ static int64_t clair_ias_run(double duration, double G, double soft, int64_t fla
         if (!last || want >= dt || trying < want) dt = trying;   /* a last step cut short does not shrink the next ones */
         if (flags & 1) {
             int64_t k = clair_nbody_collide();
+            if (clair_ias_collide_hook) k += clair_ias_collide_hook();
             if (k) { hits += k; clair_ias_forget(); }
         }
         if (one) break;
@@ -1039,16 +1060,15 @@ static struct {
 /* c0 .. c3 of Stumpff for z: c0 = cos(sqrt z), c1 = sin(sqrt z) / sqrt z, ... (any sign of z):
    z is divided by 4 until small, the series is summed, then doubled back (Danby) */
 static void clair_wh_stumpff(double z, double c[4]) {
+    /* (-1)^j / (2j+2)! and (-1)^j / (2j+3)!: for |z| <= 0.1 the next terms are below 1e-20 */
+    static const double s2[8] = { 1.0 / 2, -1.0 / 24, 1.0 / 720, -1.0 / 40320, 1.0 / 3628800, -1.0 / 479001600,
+                                  1.0 / 87178291200.0, -1.0 / 20922789888000.0 };
+    static const double s3[8] = { 1.0 / 6, -1.0 / 120, 1.0 / 5040, -1.0 / 362880, 1.0 / 39916800,
+                                  -1.0 / 6227020800.0, 1.0 / 1307674368000.0, -1.0 / 355687428096000.0 };
     int k = 0;
     while (fabs(z) > 0.1) { z /= 4; k++; }
-    /* c2 = sum (-z)^j / (2j+2)!, c3 = sum (-z)^j / (2j+3)! */
-    double c2 = 1.0 / 2, c3 = 1.0 / 6, term2 = c2, term3 = c3;
-    for (int j = 1; j < 12; j++) {
-        term2 *= -z / ((2.0 * j + 1) * (2.0 * j + 2));
-        term3 *= -z / ((2.0 * j + 2) * (2.0 * j + 3));
-        c2 += term2;
-        c3 += term3;
-    }
+    double c2 = s2[7], c3 = s3[7];                   /* the series in z, smallest terms first (Horner) */
+    for (int j = 6; j >= 0; j--) { c2 = c2 * z + s2[j]; c3 = c3 * z + s3[j]; }
     double c1 = 1 - z * c3, c0 = 1 - z * c2;
     for (; k > 0; k--) {                             /* c(4z) from c(z) */
         c3 = (c2 + c0 * c3) / 4;
@@ -1098,7 +1118,7 @@ static void clair_wh_kepler(double *x, double *v, double mu, double dt) {
         before = last;
         last = X;
         X = Xn;
-        if (X == last || X == before) { ok = 1; break; }
+        if (X == last || X == before) { ok = X == last ? 2 : 1; break; }
     }
     if (!ok) {                                       /* bisection: slow but sure (F grows with X) */
         double lo = 0, hi = 0, step = t / r0;
@@ -1121,7 +1141,7 @@ static void clair_wh_kepler(double *x, double *v, double mu, double dt) {
         }
         X = (lo + hi) / 2;
     }
-    clair_wh_stumpff(beta * X * X, c);
+    if (ok != 2) clair_wh_stumpff(beta * X * X, c); /* (2: c is already the one of X) */
     G[0] = c[0]; G[1] = X * c[1]; G[2] = X * X * c[2]; G[3] = X * X * X * c[3];
     double r = r0 + eta0 * G[1] + zeta0 * G[2];
     double fm1 = -mu * G[2] / r0;                   /* f - 1 */
@@ -1254,6 +1274,347 @@ static int64_t clair_nbody_whfast(double h, int64_t steps, double G, double soft
     clair_wh_from_jacobi(0);
     clair_wh_from_jacobi(1);
     return 0;
+}
+
+/* ---- V0.71: MERCURIUS, the hybrid integrator (s.integrator = "mercurius") ----
+ *
+ * After Chambers (1999), "A hybrid symplectic integrator that permits close encounters between massive
+ * bodies", MNRAS 304, 793, and Rein, Hernandez, Tamayo et al. (2019), "Hybrid symplectic integrators for
+ * planetary dynamics", MNRAS 485, 5490.  Written here from the articles; REBOUND (GPL) is the reference
+ * the results are checked against (same start, same steps: the same numbers), no code is copied from it.
+ *
+ * Democratic heliocentric coordinates: places from the star, speeds from the center of mass.  Each
+ * step: half a kick (the planets pull one another), half a "jump" (the star moves under the total
+ * momentum), each planet on its Kepler orbit around the star, half a jump, half a kick.  The pull of
+ * two planets is cut in two by a smooth function L of their distance (the one of Mercury, Chambers
+ * 1999): far away (L = 1) it is all in the kicks, as in WHFast; within a critical distance (s.hill Hill
+ * radii, or how far they go in 0.4 dt) part of it goes with the Kepler orbits.  The planets that come
+ * that close during a step (found from their places and speeds at both ends) do that step again with
+ * IAS15, with the star and the rest of their pull: precise even when two planets pass a few planet
+ * radii apart, at the speed of WHFast otherwise.  Collisions (s.merge) are looked for after each IAS15
+ * step of the encounters, with the star as well.  The critical distances are computed at the first step
+ * and kept in s.crit (each simulation its own): again only when bodies are added or s.dt, G or s.hill
+ * change, and s.save() keeps them, so that a simulation read again goes on exactly the same.
+ */
+
+static struct {
+    size_t cap;
+    double *dcrit, *bk;                              /* the critical distances (in s.crit); the bodies before Kepler */
+    size_t n;                                        /* the bodies (bk holds 6 lists of n) */
+    int *enc;                                        /* in an encounter at this step */
+    double m0, r0, G;                                /* the star (its mass and size change when it takes a body) */
+    size_t *map;                                     /* encounter: the body in the lists of each one integrated */
+    size_t nmap;
+    double *buf;                                     /* encounter: the bodies integrated (8 lists) */
+    const void *owner;                               /* the simulation the counts belong to */
+} clair_mc;
+
+/* the changeover function of Mercury (Chambers 1999): 0 near, 1 far, smooth (C2) in between */
+static double clair_mc_L(double d, double dcrit) {
+    double y = (d - 0.1 * dcrit) / (0.9 * dcrit);
+    if (y < 0) return 0;
+    if (y > 1) return 1;
+    return 10 * (y * y * y) - 15 * (y * y * y * y) + 6 * (y * y * y * y * y);   /* 10 y^3 - 15 y^4 + 6 y^5 */
+}
+
+static void clair_mc_to_dh(double cp[3], double cv[3]) {
+    size_t n = clair_nbody_n();
+    double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    const double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    double M = 0;
+    for (int d = 0; d < 3; d++) cp[d] = cv[d] = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (r[i] < 0) continue;
+        cp[0] += m[i] * x[i]; cp[1] += m[i] * y[i]; cp[2] += m[i] * z[i];
+        cv[0] += m[i] * vx[i]; cv[1] += m[i] * vy[i]; cv[2] += m[i] * vz[i];
+        M += m[i];
+    }
+    for (int d = 0; d < 3; d++) { cp[d] /= M; cv[d] /= M; }
+    double s0[3] = { x[0], y[0], z[0] };
+    for (size_t i = 0; i < n; i++) {
+        if (r[i] < 0 && i > 0) continue;
+        x[i] -= s0[0]; y[i] -= s0[1]; z[i] -= s0[2];
+        vx[i] -= cv[0]; vy[i] -= cv[1]; vz[i] -= cv[2];
+    }
+}
+
+static void clair_mc_from_dh(const double cp[3], const double cv[3]) {
+    size_t n = clair_nbody_n();
+    double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    const double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    double s[3] = { 0, 0, 0 }, p[3] = { 0, 0, 0 }, M = 0;
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        s[0] += m[i] * x[i]; s[1] += m[i] * y[i]; s[2] += m[i] * z[i];
+        p[0] += m[i] * vx[i]; p[1] += m[i] * vy[i]; p[2] += m[i] * vz[i];
+        M += m[i];
+    }
+    M += m[0];
+    double s0[3] = { cp[0] - s[0] / M, cp[1] - s[1] / M, cp[2] - s[2] / M };   /* the star, from the center of mass */
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        x[i] += s0[0]; y[i] += s0[1]; z[i] += s0[2];
+        vx[i] += cv[0]; vy[i] += cv[1]; vz[i] += cv[2];
+    }
+    x[0] = s0[0]; y[0] = s0[1]; z[0] = s0[2];
+    vx[0] = cv[0] - p[0] / m[0]; vy[0] = cv[1] - p[1] / m[0]; vz[0] = cv[2] - p[2] / m[0];
+}
+
+/* the critical distance of each planet: s.hill Hill radii, or how far it goes in 0.4 dt, or twice its size */
+static void clair_mc_dcrit(double G, double h) {
+    size_t n = clair_nbody_n();
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    const double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    clair_mc.dcrit[0] = 2 * (r[0] > 0 ? r[0] : 0);
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) { clair_mc.dcrit[i] = 0; continue; }
+        double dv[3] = { vx[i] - vx[0], vy[i] - vy[0], vz[i] - vz[0] };
+        double d = sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i]), v2 = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2];
+        double GM = G * (m[0] + m[i]), a = GM * d / (2 * GM - d * v2), vc = sqrt(GM / fabs(a));
+        double dc = 0;
+        if (vc * 0.4 * h > dc) dc = vc * 0.4 * h;
+        if (sqrt(v2) * 0.4 * h > dc) dc = sqrt(v2) * 0.4 * h;
+        double hr = clair_nb.hill * a * cbrt(m[i] / (3 * m[0]));
+        if (hr > dc) dc = hr;
+        if (2 * r[i] > dc) dc = 2 * r[i];
+        clair_mc.dcrit[i] = dc;
+    }
+}
+
+/* the kick: the planets on one another, the far part (L) */
+static void clair_mc_kick(double G, double eps2, double h) {
+    size_t n = clair_nbody_n();
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    double *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz), *ax = clair_nb.ax, *ay = clair_nb.ay, *az = clair_nb.az;
+    for (size_t i = 0; i < n; i++) ax[i] = ay[i] = az[i] = 0;
+    for (size_t i = 2; i < n; i++) {
+        if (r[i] < 0) continue;
+        for (size_t j = 1; j < i; j++) {
+            if (r[j] < 0) continue;
+            double dx = x[i] - x[j], dy = y[i] - y[j], dz = z[i] - z[j];
+            double d = sqrt(dx * dx + dy * dy + dz * dz + eps2);
+            double dc = clair_mc.dcrit[i] > clair_mc.dcrit[j] ? clair_mc.dcrit[i] : clair_mc.dcrit[j];
+            double f = G * clair_mc_L(d, dc) / (d * d * d);
+            ax[i] -= f * m[j] * dx; ay[i] -= f * m[j] * dy; az[i] -= f * m[j] * dz;
+            ax[j] += f * m[i] * dx; ay[j] += f * m[i] * dy; az[j] += f * m[i] * dz;
+        }
+    }
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        vx[i] += h * ax[i]; vy[i] += h * ay[i]; vz[i] += h * az[i];
+    }
+}
+
+/* the jump: the star moves under the momentum of the planets */
+static void clair_mc_jump(double h) {
+    size_t n = clair_nbody_n();
+    double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z);
+    const double *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz), *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    double p[3] = { 0, 0, 0 };
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        p[0] += m[i] * vx[i]; p[1] += m[i] * vy[i]; p[2] += m[i] * vz[i];
+    }
+    for (int d = 0; d < 3; d++) p[d] /= m[0];
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        x[i] += h * p[0]; y[i] += h * p[1]; z[i] += h * p[2];
+    }
+}
+
+/* the forces of an encounter (heliocentric): the star, and the near part (1 - L) of the pulls between them */
+static void clair_mc_encounter_forces(double G, double eps2) {
+    size_t n = clair_nbody_n();
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    double *ax = clair_nb.ax, *ay = clair_nb.ay, *az = clair_nb.az;
+    for (size_t i = 0; i < n; i++) {
+        if (r[i] < 0) { ax[i] = ay[i] = az[i] = 0; continue; }
+        double d = sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i] + eps2), f = -G / (d * d * d) * clair_mc.m0;
+        ax[i] = f * x[i]; ay[i] = f * y[i]; az[i] = f * z[i];
+    }
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        for (size_t j = 0; j < i; j++) {
+            if (r[j] < 0) continue;
+            double dx = x[i] - x[j], dy = y[i] - y[j], dz = z[i] - z[j];
+            double d = sqrt(dx * dx + dy * dy + dz * dz + eps2);
+            double di = clair_mc.dcrit[clair_mc.map[i]], dj = clair_mc.dcrit[clair_mc.map[j]];
+            double f = G * (1 - clair_mc_L(d, di > dj ? di : dj)) / (d * d * d);
+            ax[i] -= f * m[j] * dx; ay[i] -= f * m[j] * dy; az[i] -= f * m[j] * dz;
+            ax[j] += f * m[i] * dx; ay[j] += f * m[i] * dy; az[j] += f * m[i] * dz;
+        }
+    }
+}
+
+/* will i and j come within 1.1 critical distances during the step?  Their distance squared is a cubic in
+   time, from its values and slopes at both ends (Hermite); where its slope is 0 inside the step gives the
+   closest point.  p: the places and speeds after the step, b: before (6 lists of n) */
+static int clair_mc_close(const double *const p[6], const double *b, size_t n, size_t i, size_t j, double h) {
+    double dn[3], vn[3], dO[3], vO[3];
+    for (int d = 0; d < 3; d++) {
+        dn[d] = p[d][i] - p[d][j]; vn[d] = p[3 + d][i] - p[3 + d][j];
+        dO[d] = b[d * n + i] - b[d * n + j]; vO[d] = b[(3 + d) * n + i] - b[(3 + d) * n + j];
+    }
+    double rn = dn[0] * dn[0] + dn[1] * dn[1] + dn[2] * dn[2], ro = dO[0] * dO[0] + dO[1] * dO[1] + dO[2] * dO[2];
+    double drn = 2 * (dn[0] * vn[0] + dn[1] * vn[1] + dn[2] * vn[2]), dro = 2 * (dO[0] * vO[0] + dO[1] * vO[1] + dO[2] * vO[2]);
+    double dc = clair_mc.dcrit[i] > clair_mc.dcrit[j] ? clair_mc.dcrit[i] : clair_mc.dcrit[j], lim = 1.21 * dc * dc;
+    double rmin = rn < ro ? rn : ro;
+    /* far apart: the two slope terms of the cubic are each at most 4/27 of h |slope|, so it stays above
+       rmin - 4/27 h (|dro| + |drn|) (with a margin for the rounding: same answer as the full test) */
+    double sl = h * (fabs(dro) + fabs(drn));
+    if (rmin - 4.0 / 27 * sl - 1e-12 * (rn + ro + sl) > lim) return 0;
+    double A = 6 * (ro - rn) + 3 * h * (dro + drn), B = 6 * (rn - ro) - 2 * h * (2 * dro + drn), C = h * dro;
+    double disc = B * B - 4 * A * C, sq = sqrt(disc > 0 ? disc : 0);
+    for (int k = 0; k < 2; k++) {                    /* where its slope is 0, inside the step */
+        double tm = (-B + (k ? -sq : sq)) / (2 * A);
+        if (tm > 0 && tm < 1) {
+            double rm = (1 - tm) * (1 - tm) * (1 + 2 * tm) * ro + tm * tm * (3 - 2 * tm) * rn
+                      + tm * (1 - tm) * (1 - tm) * h * dro - tm * tm * (1 - tm) * h * drn;
+            if (rm < 0) rm = 0;
+            if (rm < rmin) rmin = rm;
+        }
+    }
+    return rmin < lim;
+}
+
+/* in an encounter, after each IAS15 step: the bodies that touch the star (at 0) fall into it */
+static int64_t clair_mc_star_hits(void) {
+    if (!(clair_mc.r0 > 0)) return 0;
+    size_t n = clair_nbody_n();
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z);
+    double *m = CLAIR_NB(m), *r = CLAIR_NB(r), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    int64_t hits = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (r[i] < 0) continue;
+        double d = sqrt(x[i] * x[i] + y[i] * y[i] + z[i] * z[i]);
+        if (d >= clair_mc.r0 + r[i]) continue;
+        clair_mc.m0 += m[i];                         /* the star takes its mass (its speed comes from the center of mass) */
+        clair_mc.r0 = cbrt(clair_mc.r0 * clair_mc.r0 * clair_mc.r0 + r[i] * r[i] * r[i]);
+        m[i] = 0; r[i] = -1;
+        vx[i] = vy[i] = vz[i] = 0;
+        hits++;
+    }
+    return hits;
+}
+
+/* the planets in an encounter: this step again, with IAS15, from where they were before it */
+static int64_t clair_mc_encounter(double G, double soft, int64_t flags, double h) {
+    size_t n = clair_nbody_n(), q = 0;
+    for (size_t i = 1; i < n; i++) if (clair_mc.enc[i]) clair_mc.map[q++] = i;
+    if (q == 0) return 0;
+    clair_mc.nmap = q;
+    double *buf = clair_mc.buf;
+    const double *b = clair_mc.bk;
+    for (size_t k = 0; k < q; k++) {
+        size_t i = clair_mc.map[k];
+        for (int d = 0; d < 6; d++) buf[d * q + k] = b[d * n + i];
+        buf[6 * q + k] = CLAIR_NB(m)[i];
+        buf[7 * q + k] = CLAIR_NB(r)[i];
+    }
+    ClairListObj L[8];
+    for (int d = 0; d < 8; d++) { L[d].data = buf + d * q; L[d].len = q; L[d].capacity = q; L[d].elem_size = sizeof(double); }
+    ClairList keep[8] = { clair_nb.x, clair_nb.y, clair_nb.z, clair_nb.vx, clair_nb.vy, clair_nb.vz, clair_nb.m, clair_nb.r };
+    clair_nb.x = &L[0]; clair_nb.y = &L[1]; clair_nb.z = &L[2]; clair_nb.vx = &L[3]; clair_nb.vy = &L[4]; clair_nb.vz = &L[5];
+    clair_nb.m = &L[6]; clair_nb.r = &L[7];
+    clair_ias_hook = clair_mc_encounter_forces;
+    clair_ias_collide_hook = clair_mc_star_hits;
+    clair_ias.owner = NULL;                          /* a new IAS15 for each encounter */
+    int64_t hits = clair_ias_run(h, G, soft, flags & 1, 1e-9, h * 1e-4, 0);
+    clair_mc_ias_steps += clair_ias.steps;
+    clair_mc_enc_steps++;
+    clair_ias_hook = NULL;
+    clair_ias_collide_hook = NULL;
+    clair_ias.owner = NULL;
+    clair_nb.x = keep[0]; clair_nb.y = keep[1]; clair_nb.z = keep[2]; clair_nb.vx = keep[3]; clair_nb.vy = keep[4]; clair_nb.vz = keep[5];
+    clair_nb.m = keep[6]; clair_nb.r = keep[7];
+    double *lists[8] = { CLAIR_NB(x), CLAIR_NB(y), CLAIR_NB(z), CLAIR_NB(vx), CLAIR_NB(vy), CLAIR_NB(vz), CLAIR_NB(m), CLAIR_NB(r) };
+    for (size_t k = 0; k < q; k++) for (int d = 0; d < 8; d++) lists[d][clair_mc.map[k]] = buf[d * q + k];
+    CLAIR_NB(m)[0] = clair_mc.m0;
+    CLAIR_NB(r)[0] = clair_mc.r0;
+    return hits;
+}
+
+static void clair_mc_reserve(size_t n) {
+    if (n > clair_mc.cap) {
+        size_t cap = n < 16 ? 16 : n;
+        double *bk = realloc(clair_mc.bk, 6 * cap * sizeof(double));
+        if (bk) clair_mc.bk = bk;
+        int *en = realloc(clair_mc.enc, cap * sizeof(int));
+        if (en) clair_mc.enc = en;
+        size_t *mp = realloc(clair_mc.map, cap * sizeof(size_t));
+        if (mp) clair_mc.map = mp;
+        double *bf = realloc(clair_mc.buf, 8 * cap * sizeof(double));
+        if (bf) clair_mc.buf = bf;
+        if (!bk || !en || !mp || !bf) clair_nbody_die("out of memory");
+        clair_mc.cap = cap;
+    }
+}
+
+/* s.crit is up to date: computed for these bodies, with this dt, G and s.hill (V0.71) */
+static int clair_mc_crit_ok(size_t n, double h, double G) {
+    ClairList c = clair_nb.crit;
+    if (!c || c->len != n + 3) return 0;
+    const double *v = (const double *)c->data;
+    return v[n] == h && v[n + 1] == G && v[n + 2] == clair_nb.hill;
+}
+
+static int64_t clair_nbody_mercurius(double h, int64_t steps, double G, double soft, int64_t flags) {
+    if (!clair_nb.m) clair_nbody_die("no simulation");
+    size_t n = clair_nbody_n();
+    if (steps <= 0 || n < 2) return 0;
+    double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    if (!(m[0] > 0) || r[0] < 0) clair_nbody_die("MERCURIUS: the first body is the star the others turn around: it needs a mass");
+    clair_mc_reserve(n);
+    /* the critical distances: computed at the first step, then kept in s.crit (as REBOUND does), again
+       when bodies were added or s.dt, G or s.hill changed */
+    if (!clair_nb.crit || clair_nb.crit->len != n + 3) clair_nbody_die("MERCURIUS: s.crit is kept by the module (one value per body, then 3)");
+    int same = clair_mc_crit_ok(n, h, G);
+    double *crit = (double *)clair_nb.crit->data;
+    clair_mc.dcrit = crit;
+    double cp[3], cv[3], eps2 = soft * soft;
+    clair_mc_to_dh(cp, cv);
+    if (!same) {
+        clair_mc_dcrit(G, h);
+        crit[n] = h; crit[n + 1] = G; crit[n + 2] = clair_nb.hill;
+    }
+    clair_mc.n = n;
+    clair_mc.m0 = m[0];
+    clair_mc.r0 = r[0];
+    clair_mc.G = G;
+    if (clair_mc.owner != (const void *)clair_nb.x) {   /* another simulation: the counts start again */
+        clair_mc.owner = clair_nb.x;
+        clair_mc_enc_steps = clair_mc_ias_steps = 0;
+    }
+    int64_t hits = 0;
+    clair_mc_kick(G, eps2, h / 2);
+    for (int64_t st = 0; st < steps; st++) {
+        clair_mc_jump(h / 2);
+        for (int d = 0; d < 3; d++) cp[d] += h * cv[d];
+        double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+        double *cur[6] = { x, y, z, vx, vy, vz };
+        for (int d = 0; d < 6; d++) memcpy(clair_mc.bk + d * n, cur[d], n * sizeof(double));
+        for (size_t i = 1; i < n; i++) {             /* each planet on its Kepler orbit around the star */
+            if (r[i] < 0) continue;
+            double p[3] = { x[i], y[i], z[i] }, v[3] = { vx[i], vy[i], vz[i] };
+            clair_wh_kepler(p, v, G * m[0], h);
+            x[i] = p[0]; y[i] = p[1]; z[i] = p[2]; vx[i] = v[0]; vy[i] = v[1]; vz[i] = v[2];
+        }
+        int any = 0;
+        const double *const now[6] = { x, y, z, vx, vy, vz };
+        for (size_t i = 0; i < n; i++) clair_mc.enc[i] = 0;
+        for (size_t i = 0; i < n; i++) {             /* the encounters of this step (the star counts, for its size) */
+            if (r[i] < 0) continue;
+            for (size_t j = i + 1; j < n; j++) {
+                if (r[j] < 0) continue;
+                if (clair_mc_close(now, clair_mc.bk, n, i, j, h)) { clair_mc.enc[j] = 1; if (i > 0) clair_mc.enc[i] = 1; any = 1; }
+            }
+        }
+        if (any) hits += clair_mc_encounter(G, soft, flags, h);
+        clair_mc_jump(h / 2);
+        clair_mc_kick(G, eps2, st == steps - 1 ? h / 2 : h);
+    }
+    clair_mc_from_dh(cp, cv);
+    return hits;
 }
 
 /* ---- V0.68: the orbital elements ---- */
@@ -1485,22 +1846,26 @@ static int64_t clair_nbody_save(const char *path, const char *integrator, const 
     fprintf(f, "speed %.17g\ntrail %.17g\n", clair_nb.speed, clair_nb.trail);
     fprintf(f, "time_unit %s\ntime_scale %.17g\nlength_unit %s\nlength_scale %.17g\n", tunit, clair_nb.tscale, lunit, clair_nb.lscale);
     fprintf(f, "gravity %s\ntheta %.17g\nthreads %d\n", gravity, clair_nb.theta_saved, clair_bh.threads);   /* V0.70 */
+    fprintf(f, "hill %.17g\n", clair_nb.hill);       /* V0.71 */
     fprintf(f, "bodies %zu\n", n);
+    int crit = strcmp(integrator, "mercurius") == 0 && clair_mc_crit_ok(n, clair_nb.dt, clair_nb.G);   /* V0.71 */
     for (size_t i = 0; i < n; i++) {
         for (const char *c = clair_nbody_name(i); *c; c++) fputc(*c == '\t' || *c == '\n' || *c == '\r' ? ' ' : *c, f);
         int64_t col = -1;
         if (clair_nb.colors && i < clair_nb.colors->len) col = ((int64_t *)clair_nb.colors->data)[i];
-        fprintf(f, "\t%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %lld\n", m[i], x[i], y[i], z[i], vx[i], vy[i], vz[i], r[i], (long long)col);
+        fprintf(f, "\t%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %lld", m[i], x[i], y[i], z[i], vx[i], vy[i], vz[i], r[i], (long long)col);
+        if (crit) fprintf(f, " %.17g", ((const double *)clair_nb.crit->data)[i]);   /* MERCURIUS: its critical distance */
+        fprintf(f, "\n");
     }
     if (fclose(f) != 0) { fprintf(stderr, "Clair runtime error: nbody: s.save(): cannot write %s\n", path); exit(EXIT_FAILURE); }
     return (int64_t)n;
 }
 
 static struct {
-    double p[13];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale theta threads */
+    double p[14];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale theta threads hill */
     char text[4][64];                                /* integrator, time unit, length unit, gravity */
     size_t n, cap;
-    double *v;                                       /* 9 numbers per body */
+    double *v;                                       /* 10 numbers per body (the 10th: MERCURIUS, or NAN) */
     char **names;
 } clair_nl;
 
@@ -1515,8 +1880,8 @@ static int64_t clair_nbody_load(const char *path) {
     if (!f) { fprintf(stderr, "Clair runtime error: nbody: nbody.load(): cannot read %s\n", path); exit(EXIT_FAILURE); }
     for (size_t i = 0; i < clair_nl.n; i++) free(clair_nl.names[i]);
     clair_nl.n = 0;
-    static const char *keys[13] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale", "theta", "threads" };
-    static const double defaults[13] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1, 0.5, 0 };
+    static const char *keys[14] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale", "theta", "threads", "hill" };
+    static const double defaults[14] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1, 0.5, 0, 3 };
     memcpy(clair_nl.p, defaults, sizeof(defaults));
     snprintf(clair_nl.text[0], 64, "leapfrog");
     snprintf(clair_nl.text[3], 64, "direct");
@@ -1546,7 +1911,7 @@ static int64_t clair_nbody_load(const char *path) {
                 want = k;
                 if ((size_t)want > clair_nl.cap) {
                     size_t cap = (size_t)want;
-                    double *v = realloc(clair_nl.v, cap * 9 * sizeof(double));
+                    double *v = realloc(clair_nl.v, cap * 10 * sizeof(double));
                     char **nm = v ? realloc(clair_nl.names, cap * sizeof(char *)) : NULL;
                     if (v) clair_nl.v = v;
                     if (!v || !nm) clair_nbody_die("out of memory");
@@ -1557,7 +1922,7 @@ static int64_t clair_nbody_load(const char *path) {
                 continue;
             }
             int found = 0;
-            for (int k = 0; k < 13; k++) {
+            for (int k = 0; k < 14; k++) {
                 if (strcmp(line, keys[k]) != 0) continue;
                 char *end;
                 clair_nl.p[k] = strtod(val, &end);
@@ -1577,12 +1942,15 @@ static int64_t clair_nbody_load(const char *path) {
         if (!tab) clair_nbody_load_fail(path, ln, "a body: name <tab> m x y z vx vy vz r color");
         *tab = '\0';
         char *p = tab + 1, *end;
-        double *v = clair_nl.v + 9 * clair_nl.n;
+        double *v = clair_nl.v + 10 * clair_nl.n;
         for (int k = 0; k < 9; k++) {
             v[k] = strtod(p, &end);
             if (end == p) clair_nbody_load_fail(path, ln, "a body: name <tab> m x y z vx vy vz r color");
             p = end;
         }
+        v[9] = strtod(p, &end);                      /* V0.71: the critical distance of MERCURIUS, if there */
+        if (end == p) v[9] = NAN;
+        p = end;
         while (*p == ' ') p++;
         if (*p) clair_nbody_load_fail(path, ln, "a body: too many numbers");
         char *name = malloc(strlen(line) + 1);
@@ -1597,11 +1965,12 @@ static int64_t clair_nbody_load(const char *path) {
     return (int64_t)clair_nl.n;
 }
 
-/* body i, number k (0 m, 1-3 x y z, 4-6 vx vy vz, 7 r, 8 color); i = -1: the settings */
+/* body i, number k (0 m, 1-3 x y z, 4-6 vx vy vz, 7 r, 8 color, 9 the critical distance of MERCURIUS or
+   NAN); i = -1: the settings */
 static double clair_nbody_loaded(int64_t i, int64_t k) {
-    if (i < 0) return k >= 0 && k < 13 ? clair_nl.p[k] : 0;
-    if ((size_t)i >= clair_nl.n || k < 0 || k > 8) return 0;
-    return clair_nl.v[9 * i + k];
+    if (i < 0) return k >= 0 && k < 14 ? clair_nl.p[k] : 0;
+    if ((size_t)i >= clair_nl.n || k < 0 || k > 9) return 0;
+    return clair_nl.v[10 * i + k];
 }
 
 /* the name of body i; -1 the integrator, -2 the time unit, -3 the length unit, -4 the gravity */
@@ -1813,7 +2182,7 @@ static double clair_nbody_show(void) {
         double bar_h = 44 * ui, bar_y = H - (8 / per_row) * (bar_h + 4 * ui) - 2 * ui;
         v.W = W;
         v.mid = bar_y / 2;
-        n = clair_nbody_n();
+        n = threaded ? P.n : clair_nbody_n();              /* V0.71: the physics thread owns the lists (MERCURIUS swaps them) */
         if (threaded) {                                    /* the last places the physics gave */
             pthread_mutex_lock(&P.lock);
             memcpy(ux, P.x, n * sizeof(double)); memcpy(uy, P.y, n * sizeof(double));

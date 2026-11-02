@@ -37,7 +37,7 @@ def main() -> int {
     let e0: float = s.energy()
     s.run(1000.0)
     let de: float = abs((s.energy() - e0) / e0)
-    print("systeme solaire, energie : ecart " + format(de, ".2e") + " (l'erreur de la methode, bornee)")
+    print("systeme solaire, energie : ecart " + format(de, ".1e") + " (l'erreur de la methode, bornee)")
     print("comme le calcul en 80 bits a 1e-8 UA : " + oui(abs(s.x[1] + 0.1180892654175700) < 1e-8 and abs(s.y[1] + 0.4519282250957961) < 1e-8 and abs(s.x[8] - 26.35240466649480) < 1e-8 and abs(s.y[8] + 14.39108776597206) < 1e-8))
     print("centre de masse immobile : " + oui(abs(s.center_of_mass(0)) < 1e-12 and abs(s.momentum(1)) < 1e-14))
     print("demi-grand axe de Jupiter : " + format(s.semi_major_axis(5, -1), ".4f") + " UA")

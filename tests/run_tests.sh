@@ -1222,6 +1222,11 @@ printf '%s\n' 'nbody_whfast.cl : OK -> WHFast : Kepler exact avec un grand pas (
 ./build/test_nbody_tree > build/nbody_tree.out || gui_echec nbody_tree.cl "$(tail -n 2 build/nbody_tree.out)"
 cmp -s build/nbody_tree.out tests/nbody_tree.expected || { diff tests/nbody_tree.expected build/nbody_tree.out | head -n 6 >&2; gui_echec nbody_tree.cl "sortie"; }
 printf '%s\n' 'nbody_tree.cl : OK -> sphere de Plummer (equilibre, rayon de demi-masse, meme graine), arbre comme le calcul direct, energie, un coeur ou tous au dernier chiffre, Yoshida, collisions trouvees par l arbre, deux amas sauves et relus'
+# V0.71 : MERCURIUS, l'integrateur hybride (WHFast loin, IAS15 dans les rencontres proches), compare a REBOUND et a IAS15
+./build/clair tests/nbody_mercurius.cl -o build/test_nbody_mercurius
+(cd build && ./test_nbody_mercurius > nbody_mercurius.out) || gui_echec nbody_mercurius.cl "$(tail -n 2 build/nbody_mercurius.out)"
+cmp -s build/nbody_mercurius.out tests/nbody_mercurius.expected || { diff tests/nbody_mercurius.expected build/nbody_mercurius.out | head -n 6 >&2; gui_echec nbody_mercurius.cl "sortie"; }
+printf '%s\n' 'nbody_mercurius.cl : OK -> MERCURIUS : systeme solaire mille ans (comme REBOUND), comete qui frole Jupiter (comme REBOUND et IAS15, ordre 2 ; WHFast se trompe), trois planetes serrees (comme REBOUND), sauve et relu au dernier chiffre, deux simulations ensemble, collisions entre planetes et avec l etoile'
 ./build/clair tests/gui_module.cl -o build/test_gui_module
 ./build/clair tests/nbody_fenetre.cl -o build/test_nbody_fenetre
 ./build/clair tests/nbody_ias15_fenetre.cl -o build/test_nbody_ias15_fenetre
@@ -1250,7 +1255,7 @@ else
     cmp -s build/gui_test/ias15.out tests/nbody_ias15_fenetre.expected || { diff tests/nbody_ias15_fenetre.expected build/gui_test/ias15.out | head -n 6 >&2; gui_echec nbody_ias15_fenetre.cl "sortie"; }
     (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=40 CLAIR_NBODY_THREAD=1 ../test_nbody_fil > fil.out 2> fil.err) || gui_echec nbody_fil.cl "$(tail -n 3 build/gui_test/fil.err)"
     cmp -s build/gui_test/fil.out tests/nbody_fil.expected || { diff tests/nbody_fil.expected build/gui_test/fil.out | head -n 6 >&2; gui_echec nbody_fil.cl "sortie"; }
-    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre, calcul dans un fil a part'
+    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre, calcul dans un fil a part (avec MERCURIUS)'
 fi
 if printf '#include <SDL3/SDL.h>\n' | clang -E -x c - > /dev/null 2>&1; then
     clang -std=c11 -Wall -Wextra -Wno-unused-function tests/gui_abi.c -o build/gui_abi -ldl -lm 2> build/gui_abi.err || gui_echec tests/gui_abi.c "$(grep -m 2 error build/gui_abi.err)"

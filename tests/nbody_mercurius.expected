@@ -1,0 +1,12 @@
+systeme solaire, mille ans : aucune rencontre oui, energie comme REBOUND (6.15e-10) oui
+systeme solaire, places comme REBOUND a 1e-7 UA (Mercure, Neptune) : oui
+comete : deviee par Jupiter, de a = 3.5 a a = 4.53 UA
+comete, MERCURIUS comme REBOUND a 1e-10 UA : oui
+comete, MERCURIUS a moins de 2e-5 UA d'IAS15 : oui ; WHFast a plus de 0.1 UA : oui
+comete, ordre 2 (pas deux fois plus court, ecart quatre fois plus petit) : oui
+comete, la rencontre faite avec IAS15 : oui
+trois planetes serrees, 100 pas : comme REBOUND a 1e-10 oui, rencontres oui, energie a 1e-6 oui
+sauve et relu : mercurius, suite identique oui
+deux simulations ensemble, comme seules : oui
+deux planetes : 1 collision, 2 corps, masse 0.003, quantite de mouvement gardee oui
+comete dans l'etoile : 1 collision, 2 corps, masse de l'etoile 1.0001, quantite de mouvement gardee oui

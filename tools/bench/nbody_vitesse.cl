@@ -1,4 +1,4 @@
-// V0.70 : la vitesse de nbody sur cet appareil (pour le journal : tools/journal.sh). Quelques secondes.
+// V0.70 (V0.71 : MERCURIUS) : la vitesse de nbody sur cet appareil (pour le journal : tools/journal.sh). Quelques secondes.
 import nbody
 import os
 
@@ -43,5 +43,26 @@ def main() -> int {
     w.run(1000.0)
     let t8: float = os.clock()
     print("WHFast, systeme solaire, 1 000 ans : " + format(t8 - t7, ".2f") + " s")
+    // V0.71 : MERCURIUS, sans rencontre (le systeme solaire) puis avec (trois planetes serrees)
+    let mc: Simulation = nbody.solar_system()
+    mc.integrator = "mercurius"
+    mc.dt = 0.005
+    let t9: float = os.clock()
+    mc.run(1000.0)
+    let t10: float = os.clock()
+    print("MERCURIUS, systeme solaire, 1 000 ans : " + format(t10 - t9, ".2f") + " s")
+    let p: Simulation = nbody.simulation(1.0)
+    p.integrator = "mercurius"
+    p.add("etoile", 1.0, 0.0, 0.0, 0.0, 0.0)
+    for k in range(3) {
+        let a: float = 1.0 + 0.1 * float(k)
+        p.add("p", 0.002, a, 0.0, 0.0, sqrt(1.0 / a))
+    }
+    p.center()
+    p.dt = 0.0012 * 2.0 * 3.141592653589793
+    let t11: float = os.clock()
+    p.run(1326.0 * p.dt)
+    let t12: float = os.clock()
+    print("MERCURIUS, trois planetes serrees, 1 326 pas : " + format(t12 - t11, ".2f") + " s, " + str(p.steps_done(3)) + " pas avec rencontre, " + str(p.steps_done(4)) + " pas d'IAS15")
     return 0
 }
