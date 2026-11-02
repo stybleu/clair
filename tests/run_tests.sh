@@ -1129,13 +1129,50 @@ fi
 grep -Fq 'this program has no test' build/sans_test.stderr
 printf '%s\n' 'clair --check : OK -> les erreurs sans compiler (tests compris), assert et assert_equal mal employes, test dans une fonction, deux tests du meme nom, --test sans test refuse'
 
+# V0.61 : le module plot (graphiques en SVG)
+./build/clair tests/plot_module.cl -o build/test_plot_module
+rm -rf build/plot_test
+mkdir -p build/plot_test/fig
+(cd build/plot_test && env -u CLAIR_PLOT_DIR ../test_plot_module > sortie.txt 2> erreurs.txt)
+plot_echec() { printf '%s\n' "plot_module.cl : ECHEC -> $1" >&2; exit 1; }
+[ "$(cat build/plot_test/sortie.txt)" = fini ] || plot_echec "sortie"
+[ "$(sed -n '1p;6p' build/plot_test/erreurs.txt)" = "$(printf 'plot: plot_1.svg (open it in a browser)\nplot: animation_1.svg (open it in a browser)')" ] || plot_echec "fichiers annonces : $(cat build/plot_test/erreurs.txt)"
+for f in plot_1 plot_2 plot_3 plot_4 plot_5 animation_1 garde; do
+    [ -s "build/plot_test/$f.svg" ] || plot_echec "$f.svg absent"
+    tail -n 1 "build/plot_test/$f.svg" | grep -q '^</svg>$' || plot_echec "$f.svg incomplet"
+done
+sed 's/cp[0-9][0-9]*/cpN/g; s/cg[0-9][0-9]*/cgN/g' build/plot_test/plot_1.svg > build/plot_test/plot_1.norm
+cmp -s build/plot_test/plot_1.norm tests/plot_module.expected.svg || { diff tests/plot_module.expected.svg build/plot_test/plot_1.norm | head -n 6 >&2; plot_echec "plot_1.svg differe de tests/plot_module.expected.svg"; }
+grep -q '<path fill="#eab308" fill-opacity="0.35" stroke="#2563eb"' build/plot_test/plot_2.svg || plot_echec "polygone rempli"
+grep -q '<ellipse cx=.* stroke="#0f766e"' build/plot_test/plot_2.svg || plot_echec "cercle"
+grep -q '>triangle</text>' build/plot_test/plot_2.svg || plot_echec "texte"
+grep -q 'class="cp-grille"' build/plot_test/plot_2.svg && plot_echec "un dessin sans axes n'a pas de grille"
+cmp -s build/plot_test/garde.svg build/plot_test/plot_2.svg || [ "$(sed 's/cp[0-9]*//g' build/plot_test/garde.svg)" = "$(sed 's/cp[0-9]*//g' build/plot_test/plot_2.svg)" ] || plot_echec "plot.save et plot.show"
+[ "$(grep -o '<rect x=' build/plot_test/plot_3.svg | wc -l)" -ge 3 ] && grep -q '>mer</text>' build/plot_test/plot_3.svg || plot_echec "barres"
+grep -q 'href="data:image/png;base64,iVBORw0KGgo' build/plot_test/plot_5.svg || plot_echec "carte en couleurs (PNG)"
+grep -q 'stop-color="#053061"' build/plot_test/plot_5.svg || plot_echec "palette bleu-rouge"
+grep -q 'data-frames="5" data-fps="5"' build/plot_test/animation_1.svg || plot_echec "animation"
+[ "$(grep -o '<animate attributeName="display"' build/plot_test/animation_1.svg | wc -l)" = 5 ] || plot_echec "images de l'animation"
+(cd build/plot_test && CLAIR_PLOT_DIR="$PWD/fig" ../test_plot_module > studio.txt 2> /dev/null)
+[ "$(grep -c "^$(printf '\033')\[clair:plot [0-9]*_[0-9]*_[0-9]*\.svg\]$" build/plot_test/studio.txt)" = 5 ] || plot_echec "lignes pour Clair Studio"
+grep -q "^$(printf '\033')\[clair:anim [0-9]*_a1_[0-9]*\.svg\]$" build/plot_test/studio.txt || plot_echec "animation pour Clair Studio"
+[ "$(ls build/plot_test/fig | wc -l)" = 6 ] || plot_echec "figures dans CLAIR_PLOT_DIR"
+for t in longueurs:'plot.line(): the two lists have 2 and 1 values, they need as many' \
+         couleur:'plot.color(): unknown color "rouge" onload="x"' \
+         grille:'plot.heatmap(): 2 x 2 = 4 values expected (values[j * nx + i]), got 3'; do
+    ./build/clair "tests/plot_erreur_${t%%:*}.cl" -o build/test_plot_erreur
+    if (cd build/plot_test && ../test_plot_erreur > /dev/null 2> erreur.txt); then plot_echec "${t%%:*} aurait du s'arreter"; fi
+    grep -Fq "Clair runtime error: ${t#*:}" build/plot_test/erreur.txt || plot_echec "message : $(cat build/plot_test/erreur.txt)"
+done
+printf '%s\n' 'plot_module.cl : OK -> courbes, points, legende, titre echappe, dessin sans axes, polygone, cercle, fleche, texte, barres, histogramme, carte en couleurs (PNG), isolignes, fleches de vent, animation, plot.save, mode Clair Studio, erreurs'
+
 # V0.58 : Clair Studio, l'IDE ecrit en Clair (tools/studio)
 if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     printf '%s\n' 'tools/studio : ECHEC' >&2
     tail -n 8 build/studio.log >&2
     exit 1
 fi
-printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer'
+printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

@@ -1,4 +1,4 @@
-/* Clair Studio (V0.58 a V0.60) */
+/* Clair Studio (V0.58 a V0.61) */
 :root {
   --fond: #ffffff; --fond2: #f3f4f6; --bord: #d9dce1; --texte: #1d2129; --discret: #6b7280;
   --accent: #2563eb; --vert: #15803d; --rouge: #b91c1c; --erreur-fond: #fde8e8;
@@ -128,3 +128,17 @@ button:active { filter: brightness(0.9); }
 .git-sortie { margin: 0; padding: 8px; font: 12px/1.45 var(--code); white-space: pre-wrap; overflow-wrap: anywhere;
               border-radius: 8px; background: var(--fond2); flex: none; }
 .git-sortie.err { color: var(--rouge); }
+
+/* V0.61 : les figures de plot */
+#sortie .figure { margin: 6px 0; white-space: normal; }
+.figure svg, .figure img { display: block; width: 100%; max-width: 680px; height: auto; border: 1px solid var(--bord);
+                           border-radius: 8px; cursor: zoom-in; }
+.anim-controles { display: flex; align-items: center; gap: 8px; max-width: 680px; padding: 4px 0; }
+.anim-controles button { min-height: 32px; width: 40px; padding: 0; }
+.anim-controles input { flex: 1; }
+.boutons { display: flex; gap: 6px; align-items: center; flex: none; }
+.figure-titre { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.texte-petit { min-height: 30px; padding: 0 10px; }
+.figure-corps { flex: 1; overflow: auto; padding: 8px; --zoom: 1; }
+.figure-corps svg, .figure-corps img { display: block; width: calc(100% * var(--zoom)); height: auto; max-width: none; }
+.figure-corps .anim-controles { max-width: none; }

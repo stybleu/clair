@@ -924,7 +924,7 @@ static int check_text_call(Semantic *s, AstNode *n) {
  * 1 when n is one of them (renamed @__web_..., @__os_...), 0 otherwise, -1 on error.
  */
 static int check_module_call(Semantic *s, AstNode *n) {
-    static const struct { const char *name; size_t argc; const char *args[4]; const char *result; } calls[] = {
+    static const struct { const char *name; size_t argc; const char *args[5]; const char *result; } calls[] = {
         { "__web_run", 2, { "int", "string" }, "int" },
         { "__web_text", 1, { "int" }, "string" },
         { "__web_pairs", 1, { "int" }, "dict[string,string]" },
@@ -967,12 +967,28 @@ static int check_module_call(Semantic *s, AstNode *n) {
         { "__os_running", 1, { "int" }, "bool" },
         { "__os_stop", 1, { "int" }, "bool" },
         { "__os_wait", 2, { "int", "float" }, "int" },
+        { "__plot_size", 2, { "int", "int" }, "int" },
+        { "__plot_set", 2, { "int", "string" }, "int" },
+        { "__plot_range", 3, { "int", "float", "float" }, "int" },
+        { "__plot_flag", 2, { "int", "int" }, "int" },
+        { "__plot_width", 1, { "float" }, "int" },
+        { "__plot_series", 3, { "int", "list[float]", "list[float]" }, "int" },
+        { "__plot_bars", 2, { "list[string]", "list[float]" }, "int" },
+        { "__plot_histogram", 2, { "list[float]", "int" }, "int" },
+        { "__plot_shape", 5, { "int", "float", "float", "float", "float" }, "int" },
+        { "__plot_text", 3, { "float", "float", "string" }, "int" },
+        { "__plot_extent", 4, { "float", "float", "float", "float" }, "int" },
+        { "__plot_field", 5, { "int", "list[float]", "int", "int", "int" }, "int" },
+        { "__plot_arrows", 4, { "list[float]", "list[float]", "int", "int" }, "int" },
+        { "__plot_out", 3, { "int", "string", "float" }, "int" },
+        { "__plot_image", 1, { "string" }, "int" },
         { NULL, 0, { NULL }, NULL }
     };
     if (!n->file) return 0;
     int web = strcmp(n->file, "web.cl") == 0 && strncmp(n->text, "__web_", 6) == 0;
     int os = strcmp(n->file, "os.cl") == 0 && strncmp(n->text, "__os_", 5) == 0;
-    if (!web && !os) return 0;
+    int plot = strcmp(n->file, "plot.cl") == 0 && strncmp(n->text, "__plot_", 7) == 0;     /* V0.61 */
+    if (!web && !os && !plot) return 0;
     size_t c = 0;
     while (calls[c].name && strcmp(n->text, calls[c].name) != 0) c++;
     if (!calls[c].name) return 0;

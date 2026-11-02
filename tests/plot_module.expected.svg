@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 300" width="480" height="300" class="clair-plot">
+<style>.clair-plot{color:#1f2937;font:12px system-ui,-apple-system,Roboto,sans-serif}.cp-fond{fill:#fff}.cp-grille{stroke:#e5e7eb;stroke-width:1;fill:none}.cp-axe{stroke:#6b7280;stroke-width:1}.cp-texte{fill:#1f2937}.cp-graduation{fill:#4b5563}.cp-titre{font-size:15px;font-weight:600}.cp-legende{fill:#fff;fill-opacity:.88;stroke:#d1d5db}.cp-barre{stroke:#fff;stroke-width:.5}@media (prefers-color-scheme:dark){.clair-plot{color:#e5e7eb}.cp-fond{fill:#16181d}.cp-grille{stroke:#2b2f37}.cp-axe{stroke:#8b919c}.cp-texte{fill:#e5e7eb}.cp-graduation{fill:#a3a9b3}.cp-legende{fill:#1f2229;stroke:#3a3f48}.cp-barre{stroke:#16181d}}</style>
+<rect class="cp-fond" x="0" y="0" width="480" height="300"/>
+<defs><clipPath id="cpN"><rect x="48.0" y="36.0" width="418.0" height="214.0"/></clipPath></defs>
+<path class="cp-grille" d="M67.0 36.0V250.0M162.0 36.0V250.0M257.0 36.0V250.0M352.0 36.0V250.0M447.0 36.0V250.0M48.0 240.3H466.0M48.0 179.5H466.0M48.0 118.7H466.0M48.0 57.9H466.0"/>
+<g clip-path="url(#cpN)">
+<path fill="none" stroke="#2563eb" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" d="M67.0 240.3L162.0 228.1L257.0 191.6L352.0 130.8L447.0 45.7"/>
+<path fill="none" stroke="#dc2626" stroke-width="9" stroke-linecap="round" d="M67.0 228.1h0M257.0 179.5h0M447.0 203.8h0"/>
+</g>
+<path class="cp-axe" fill="none" d="M48.0 36.0V250.0H466.0"/>
+<g class="cp-texte cp-graduation"><text x="67.0" y="268.0" text-anchor="middle">0</text><text x="162.0" y="268.0" text-anchor="middle">1</text><text x="257.0" y="268.0" text-anchor="middle">2</text><text x="352.0" y="268.0" text-anchor="middle">3</text><text x="447.0" y="268.0" text-anchor="middle">4</text><text x="42.0" y="240.3" text-anchor="end" dominant-baseline="middle">0</text><text x="42.0" y="179.5" text-anchor="end" dominant-baseline="middle">5</text><text x="42.0" y="118.7" text-anchor="end" dominant-baseline="middle">10</text><text x="42.0" y="57.9" text-anchor="end" dominant-baseline="middle">15</text></g>
+<text class="cp-texte" x="257.0" y="292.0" text-anchor="middle">temps (s)</text>
+<text class="cp-texte" transform="translate(14 143.0) rotate(-90)" text-anchor="middle">hauteur (m)</text>
+<text class="cp-texte cp-titre" x="240.0" y="22" text-anchor="middle">&lt;essai &amp; &quot;test&quot;&gt;</text>
+<rect class="cp-legende" x="56.0" y="44.0" width="112.0" height="44.0" rx="4"/>
+<path stroke="#2563eb" stroke-width="2" d="M64.0 57.0h18"/><text class="cp-texte" x="88.0" y="57.0" dominant-baseline="middle">x au carre</text>
+<path stroke="#dc2626" stroke-width="6" stroke-linecap="round" d="M73.0 75.0h0"/><text class="cp-texte" x="88.0" y="75.0" dominant-baseline="middle">mesures</text>
+</svg>

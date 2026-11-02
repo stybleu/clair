@@ -89,4 +89,23 @@ add_custom_command(
     DEPENDS src/clair_os_rt.c tools/embed_file.cmake
     COMMENT "Embedding the module os (C part)")
 target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_os_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_os_runtime.h)
+
+# V0.61: the module plot, the same way
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_module.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DRAW=1
+            "-DIN=clair_plot.cl" -DNAME=clair_plot_module_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_plot_module.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_plot.cl tools/embed_file.cmake
+    COMMENT "Embedding the module plot")
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_plot_rt.c" -DNAME=clair_plot_runtime_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_plot_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_plot_rt.c tools/embed_file.cmake
+    COMMENT "Embedding the module plot (C part)")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_runtime.h)
 target_include_directories(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

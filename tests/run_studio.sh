@@ -3,6 +3,7 @@
 # du navigateur : jeton, fichiers, compilation, lancement, entree, arret.
 # V0.59 : cache de compilation, verification sans compiler, tests, sources des modules.
 # V0.60 : Git : depot, etat, differences, versions, historique, restaurer, annuler, envoyer, recuperer.
+# V0.61 : les figures de plot.show() et les images de plot.image().
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -123,6 +124,29 @@ $C POST /api/tester/vite.cl 'corps=' "$S" | corps | grep -q '"ok":false,"erreurs
 $C GET /api/module/os "$S" | grep -q '^def run(command: list\[string\]) -> RunResult {' || echec "la source du module os"
 [ "$($C GET /api/module/secret "$S" | code)" = 404 ] || echec "un module qui n'existe pas"
 [ "$($C GET /api/module/os | code)" = 403 ] || echec "la source d'un module sans jeton"
+
+# V0.61 : les figures de plot.show() dans la console
+$C POST /api/ecrire/courbe.cl 'corps=import plot\n\ndef main() -> int {\n    print("avant")\n    plot.line([0.0, 1.0, 2.0], [0.0, 1.0, 4.0])\n    plot.show()\n    plot.image("dessin.svg")\n    print("apres")\n    return 0\n}\n' "$S" > /dev/null
+$C POST /api/ecrire/dessin.svg 'corps=<svg xmlns="http://www.w3.org/2000/svg"/>' "$S" > /dev/null
+ID="$($C POST /api/lancer/courbe.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+[ -n "$ID" ] || echec "plot : lancer"
+SORTIE=""
+for _ in $(seq 1 200); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    SORTIE="$SORTIE$(printf '%s' "$R" | sed -n 's/.*"sortie":"\(.*\)","fini".*/\1/p')"
+    printf '%s' "$R" | grep -q '"fini":true' && break
+    sleep 0.05
+done
+FIG="$(printf '%s' "$SORTIE" | sed -n 's/.*\\u001b\[clair:plot \([0-9_]*\.svg\)\].*/\1/p')"
+[ -n "$FIG" ] || echec "plot : pas de figure dans la sortie : $SORTIE"
+printf '%s' "$SORTIE" | grep -q '^avant\\n\\u001b\[clair:plot [0-9_]*\.svg\]\\n\\u001b\[clair:image dessin\.svg\]\\napres\\n$' || echec "plot : sortie : $SORTIE"
+$C GET "/api/figure/$FIG" "$S" | corps | grep -q '^<svg xmlns="http://www.w3.org/2000/svg"' || echec "plot : la figure"
+$C GET /api/image/dessin.svg "$S" | grep -qi '^content-type: image/svg+xml' || echec "plot : une image du dossier"
+[ "$($C GET /api/figure/..%2F..%2Fx.svg "$S" | code)" = 404 ] || echec "plot : une figure hors du dossier"
+[ "$($C GET /api/figure/abc.svg "$S" | code)" = 403 ] || echec "plot : un nom de figure invente"
+[ "$($C GET /api/image/courbe.cl "$S" | code)" = 404 ] || echec "plot : un fichier qui n'est pas une image"
+[ "$($C GET "/api/figure/$FIG" | code)" = 403 ] || echec "plot : une figure sans jeton"
+$C GET /api/module/plot "$S" | grep -q '^def heatmap(values: list\[float\], nx: int, ny: int) -> int {' || echec "plot : la source du module"
 
 # V0.60 : Git dans le dossier des programmes
 if command -v git > /dev/null; then

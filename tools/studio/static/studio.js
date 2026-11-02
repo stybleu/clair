@@ -1,4 +1,4 @@
-// Clair Studio (V0.58 a V0.60) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.61) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -6,7 +6,7 @@
   let fichier = null;            // le nom du fichier ouvert
   let sauve = true, minuterie = 0;
   let enCours = null;            // le numero du programme qui tourne
-  let enTests = false, texteTests = "";
+  let enTests = false, texteTests = "", enAttente = "";
   let lignesErr = new Set();     // les lignes d'une erreur au dernier lancement
   let lignesVerif = new Map();   // V0.59 : les lignes des erreurs trouvees en tapant -> leur message
   let lignesGit = new Map();     // V0.60 : les lignes changees depuis la derniere version -> "a", "m" ou "d"
@@ -275,9 +275,132 @@
   }
 
   // ---- lancer ----
+  // V0.61 : plot.show() ecrit une ligne ESC[clair:plot NOM] : la figure prend sa place dans la console
+  const MARQUE = /\x1b\[clair:(plot|anim|image) ([^\]\n]*)\]\n?/;
   function ecrireSortie(texte, classe, cible) {
     cible = cible || sortie;
     const bas = cible.scrollTop + cible.clientHeight >= cible.scrollHeight - 4;
+    let reste = texte, m;
+    while ((m = MARQUE.exec(reste))) {
+      if (m.index) ecrireTexte(reste.slice(0, m.index), classe, cible);
+      ajouterFigure(m[1], m[2], cible);
+      reste = reste.slice(m.index + m[0].length);
+    }
+    if (reste) ecrireTexte(reste, classe, cible);
+    if (bas) cible.scrollTop = cible.scrollHeight;
+  }
+
+  // une figure : le SVG de plot, sans rien qui puisse s'executer, a la largeur de la console
+  function nettoyerSvg(texte) {
+    const doc = new DOMParser().parseFromString(texte, "image/svg+xml");
+    const svg = doc.documentElement;
+    if (!svg || svg.nodeName !== "svg" || doc.querySelector("parsererror")) return null;
+    for (const e of svg.querySelectorAll("script, foreignObject, iframe, a")) e.remove();
+    for (const e of [svg, ...svg.querySelectorAll("*")]) {
+      for (const a of [...e.attributes]) {
+        const n = a.name.toLowerCase(), v = a.value.trim().toLowerCase();
+        if (n.startsWith("on") || (/href$/.test(n) && !v.startsWith("#") && !v.startsWith("data:image/png"))) e.removeAttribute(a.name);
+      }
+    }
+    svg.removeAttribute("width");
+    svg.removeAttribute("height");
+    return document.importNode(svg, true);
+  }
+
+  function ajouterFigure(sorte, nom, cible) {
+    const boite = document.createElement("div");
+    boite.className = "figure";
+    cible.appendChild(boite);
+    if (sorte === "image") {
+      const img = document.createElement("img");
+      img.src = "/api/image/" + enc(nom);
+      img.alt = nom;
+      img.addEventListener("click", () => agrandir(img.cloneNode(), null, nom));
+      boite.appendChild(img);
+      return;
+    }
+    fetch("/api/figure/" + enc(nom)).then((r) => (r.ok ? r.text() : Promise.reject(r.status))).then((t) => {
+      const bas = cible.scrollTop + cible.clientHeight >= cible.scrollHeight - 4;
+      const svg = nettoyerSvg(t);
+      if (!svg) throw new Error("svg");
+      boite.appendChild(svg);
+      if (sorte === "anim") controlesAnimation(boite, svg);
+      svg.addEventListener("click", () => agrandir(nettoyerSvg(t), t, nom));
+      if (bas) cible.scrollTop = cible.scrollHeight;
+    }).catch(() => { boite.textContent = "(figure " + nom + " illisible)"; });
+  }
+
+  // une animation : lecture, pause, et un curseur pour aller a une image
+  function controlesAnimation(boite, svg) {
+    const n = +svg.getAttribute("data-frames") || 1, fps = +svg.getAttribute("data-fps") || 10;
+    const barre = document.createElement("div");
+    barre.className = "anim-controles";
+    const bouton = document.createElement("button");
+    bouton.textContent = "❚❚";
+    bouton.setAttribute("aria-label", "Pause");
+    const curseur = document.createElement("input");
+    curseur.type = "range";
+    curseur.min = "0";
+    curseur.max = String(n - 1);
+    curseur.value = "0";
+    const info = document.createElement("span");
+    info.className = "discret";
+    barre.append(bouton, curseur, info);
+    boite.appendChild(barre);
+    let lecture = true;
+    bouton.addEventListener("click", () => {
+      if (lecture) svg.pauseAnimations(); else svg.unpauseAnimations();
+      lecture = !lecture;
+      bouton.textContent = lecture ? "❚❚" : "▶";
+    });
+    curseur.addEventListener("input", () => {
+      svg.pauseAnimations();
+      lecture = false;
+      bouton.textContent = "▶";
+      svg.setCurrentTime((+curseur.value + 0.5) / fps);
+      info.textContent = +curseur.value + 1 + " / " + n;
+    });
+    (function suivreAnimation() {
+      if (!boite.isConnected) return;
+      if (lecture) {
+        const k = Math.floor(svg.getCurrentTime() * fps) % n;
+        curseur.value = String(k);
+        info.textContent = k + 1 + " / " + n;
+      }
+      requestAnimationFrame(suivreAnimation);
+    })();
+  }
+
+  // une figure en grand : zoom, et l'enregistrer dans le dossier
+  let figureTexte = null;
+  function agrandir(element, texte, nom) {
+    if (!element) return;
+    figureTexte = texte;
+    const corps = $("figure-corps");
+    corps.textContent = "";
+    corps.appendChild(element);
+    corps.style.setProperty("--zoom", "1");
+    if (texte && element.getAttribute("data-frames")) controlesAnimation(corps, element);
+    $("b-figure-garder").hidden = !texte;
+    $("figure-info").textContent = "";
+    $("fenetre-figure").hidden = false;
+  }
+  $("b-fermer-figure").addEventListener("click", () => { $("fenetre-figure").hidden = true; $("figure-corps").textContent = ""; });
+  for (const [id, f] of [["b-figure-plus", 1.5], ["b-figure-moins", 1 / 1.5]]) {
+    $(id).addEventListener("click", () => {
+      const c = $("figure-corps"), z = Math.min(6, Math.max(1, (+c.style.getPropertyValue("--zoom") || 1) * f));
+      c.style.setProperty("--zoom", String(z));
+    });
+  }
+  $("b-figure-garder").addEventListener("click", async () => {
+    if (!figureTexte) return;
+    const nom = nomValide(prompt("Nom du fichier de la figure :", "figure.svg"));
+    if (!nom) return;
+    await api("/api/ecrire/" + enc(nom), figureTexte);
+    $("figure-info").textContent = "enregistrée : " + nom;
+  });
+
+  function ecrireTexte(texte, classe, cible) {
     const morceaux = texte.split(/(\((?:in )?(?:[^()\n,]+, )?line \d+\)|error at \d+:\d+)/);
     for (const m of morceaux) {
       if (!m) continue;
@@ -300,7 +423,6 @@
         }
       }
     }
-    if (bas) cible.scrollTop = cible.scrollHeight;
   }
 
   sortie.addEventListener("click", (e) => {
@@ -332,6 +454,7 @@
     if (!fichier || enCours) return;
     await enregistrer();
     sortie.textContent = "";
+    enAttente = "";
     lignesErr = new Set();
     $("console").hidden = false;
     etat("Compilation…");
@@ -375,9 +498,17 @@
       setTimeout(suivre, 500);
       return;
     }
-    if (r.sortie) {
-      if (enTests) texteTests += r.sortie;
-      ecrireSortie(r.sortie);
+    // une ligne ESC[clair:... coupee entre deux lectures attend la suite
+    let texte = enAttente + (r.sortie || "");
+    enAttente = "";
+    const coupe = texte.lastIndexOf("\x1b[");
+    if (!r.fini && coupe >= 0 && texte.indexOf("\n", coupe) < 0) {
+      enAttente = texte.slice(coupe);
+      texte = texte.slice(0, coupe);
+    }
+    if (texte) {
+      if (enTests) texteTests += texte;
+      ecrireSortie(texte);
     }
     if (r.fini) {
       const duree = ((performance.now() - debut) / 1000).toFixed(2);
@@ -559,7 +690,7 @@
     return m ? m.analyse : null;
   }
   async function chargerModule(nom) {
-    const integre = nom === "os" || nom === "web" || nom === "gfx";
+    const integre = nom === "os" || nom === "web" || nom === "plot";
     const m = modules.get(nom) || { analyse: null };
     m.enCours = true;
     m.quand = performance.now();

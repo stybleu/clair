@@ -1,4 +1,4 @@
-// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58 a V0.60).
+// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58 a V0.61).
 // Le serveur est ce programme (modules web et os) ; l'editeur s'ouvre dans le navigateur.
 //   sh ~/clair/tools/studio/studio.sh [dossier] [port]
 import web
@@ -232,7 +232,7 @@ def module_source(req: Request, nom: string) -> Response {
         return refus()
     }
     let chemin: string = os.join(racine(), "src/clair_" + nom + ".cl")
-    if (nom != "os" and nom != "web" and nom != "gfx") or not os.is_file(chemin) {
+    if (nom != "os" and nom != "web" and nom != "plot") or not os.is_file(chemin) {
         return web.error(404, "pas de module " + nom)
     }
     return web.text(read_text(chemin))
@@ -285,6 +285,55 @@ def code_c(req: Request, nom: string) -> Response {
         return web.text("// Lance d'abord le programme : le C apparait apres la compilation.\n")
     }
     return web.text(read_text(chemin))
+}
+
+// ---- V0.61 : les figures de plot.show() ----
+// Les programmes lances par le Studio ecrivent leurs figures dans ce dossier (CLAIR_PLOT_DIR)
+// et une ligne ESC[clair:plot NOM] que l'editeur remplace par l'image.
+
+def dossier_figures() -> string {
+    return os.join(os.join(os.env("TMPDIR", "/tmp"), "clair_studio"), "figures")
+}
+
+// 123_4_56.svg, 123_a1_56.svg : rien d'autre
+def figure_valide(nom: string) -> bool {
+    if len(nom) < 5 or len(nom) > 60 or nom[len(nom) - 4:len(nom)] != ".svg" {
+        return false
+    }
+    for i in range(0, len(nom) - 4) {
+        let c: int = ord(nom[i:i + 1])
+        if not ((c >= 48 and c <= 57) or c == 95 or c == 97) {
+            return false
+        }
+    }
+    return true
+}
+
+@web.route("/api/figure/<nom>")
+def figure(req: Request, nom: string) -> Response {
+    if not autorise(req) or not figure_valide(nom) {
+        return refus()
+    }
+    let chemin: string = os.join(dossier_figures(), nom)
+    if not os.is_file(chemin) {
+        return web.error(404, "pas de figure " + nom)
+    }
+    return web.text(read_text(chemin))
+}
+
+// plot.image("photo.png") : une image du dossier des programmes
+@web.route("/api/image/<chemin>")
+def image(req: Request, chemin: string) -> Response {
+    if not autorise(req) or not chemin_valide(chemin) {
+        return refus()
+    }
+    let ext: string = os.extension(chemin)
+    let ok: bool = ext == ".png" or ext == ".jpg" or ext == ".jpeg" or ext == ".gif" or ext == ".svg" or ext == ".webp"
+    let fichier: string = os.join(dossier(), chemin)
+    if not ok or not os.is_file(fichier) {
+        return web.error(404, "pas d'image " + chemin)
+    }
+    return web.file(fichier)
 }
 
 // ---- V0.60 : Git (les modifications et les versions du dossier) ----
@@ -501,6 +550,13 @@ def main() -> int {
     }
     web.save("dossier", d)
     os.set_env("GIT_TERMINAL_PROMPT", "0")       // V0.60 : git ne pose jamais de question au terminal
+    // V0.61 : les figures des programmes, effacees a chaque demarrage du Studio
+    let figures: string = dossier_figures()
+    os.mkdir(figures)
+    for f in os.listdir(figures) {
+        os.remove(os.join(figures, f))
+    }
+    os.set_env("CLAIR_PLOT_DIR", figures)
     if len(os.listdir(d)) == 0 {
         write_file(os.join(d, "bonjour.cl"), "def main() -> int {\n    let nom: string = \"Clair\"\n    print(\"Bonjour depuis \" + nom)\n    for i in range(1, 6) {\n        print(str(i) + \" au carre = \" + str(i * i))\n    }\n    return 0\n}\n")
     }
