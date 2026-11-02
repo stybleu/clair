@@ -93,7 +93,8 @@
     for (let k = premier; k < dernier; k++) {
       const n = k + 1;
       const cls = lignesErr.has(n) ? "err" : lignesVerif.has(n) ? "verif" : "";
-      html += '<span class="l' + (cls ? " " + cls : "") + '">' + (couleur(lignes[k]) || " ") + "</span>";
+      const h = surligne ? marquer(couleur(lignes[k]), lignes[k]) : couleur(lignes[k]);
+      html += '<span class="l' + (cls ? " " + cls : "") + '">' + (h || " ") + "</span>";
       const g = lignesGit.get(n);
       nums += '<span class="nl' + (cls ? " " + cls : "") + (g ? " g" + g : "") + '">' + n + "</span>";
     }
@@ -103,6 +104,59 @@
     numeros.innerHTML = nums;
     suivreDefilement();
   }
+
+  // ---- V0.71.3 : comme VS Code, le texte selectionne est surligne partout ou il revient ----
+  // Un mot entier (selectionne d'un double toucher) : les memes mots entiers. Un autre morceau d'une ligne
+  // (2 caracteres au moins) : partout ou il apparait. Seules les lignes visibles sont touchees.
+  let surligne = null;                              // { texte, re }
+  const LETTRE = /[\p{L}\p{N}_]/u;
+  function majSurligne() {
+    const a = code.selectionStart, b = code.selectionEnd, v = code.value;
+    const t = a < b ? v.slice(a, b) : "";
+    let nouveau = null;
+    if (t && t.length <= 200 && !t.includes("\n") && t.trim() === t) {
+      const mot = /^[\p{L}\p{N}_]+$/u.test(t) && !LETTRE.test(v[a - 1] || "") && !LETTRE.test(v[b] || "");
+      if (mot || t.length >= 2) {
+        const e = t.replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&");
+        nouveau = { texte: (mot ? "mot:" : "") + t, re: new RegExp(mot ? "(?<![\\p{L}\\p{N}_])" + e + "(?![\\p{L}\\p{N}_])" : e, "gu") };
+      }
+    }
+    if ((nouveau ? nouveau.texte : null) === (surligne ? surligne.texte : null)) return;
+    surligne = nouveau;
+    redessiner();
+  }
+
+  // la ligne coloriee (html) avec <mark class="meme"> autour de chaque endroit trouve dans le texte de la ligne ;
+  // une marque qui traverse une couleur est fermee avant la balise et rouverte apres
+  function marquer(html, ligne) {
+    const re = surligne.re, zones = [];
+    re.lastIndex = 0;
+    for (let m; (m = re.exec(ligne)); ) zones.push([m.index, m.index + m[0].length]);
+    if (!zones.length) return html;
+    const OUVRE = '<mark class="meme">';
+    let out = "", i = 0, pos = 0, z = 0, ouvert = false;
+    while (i < html.length) {
+      if (html[i] === "<") {                       // une balise : pas un caractere du texte
+        const j = html.indexOf(">", i) + 1;
+        if (ouvert) { out += "</mark>"; ouvert = false; }
+        out += html.slice(i, j);
+        i = j;
+        continue;
+      }
+      while (z < zones.length && pos >= zones[z][1]) z++;
+      const dans = z < zones.length && pos >= zones[z][0];
+      if (dans && !ouvert) { out += OUVRE; ouvert = true; }
+      if (!dans && ouvert) { out += "</mark>"; ouvert = false; }
+      const j = html[i] === "&" ? html.indexOf(";", i) + 1 : i + 1;   // &amp; &lt; &gt; : un caractere
+      out += html.slice(i, j);
+      i = j;
+      pos++;
+    }
+    if (ouvert) out += "</mark>";
+    return out;
+  }
+  document.addEventListener("selectionchange", () => { if (document.activeElement === code) majSurligne(); });
+  for (const ev of ["select", "keyup", "mouseup", "touchend"]) code.addEventListener(ev, majSurligne);
 
   function suivreDefilement() {
     couleurs.scrollTop = code.scrollTop;

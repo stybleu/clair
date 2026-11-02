@@ -67,6 +67,9 @@ button:active { filter: brightness(0.9); }
 .couleurs .l.err { background: var(--erreur-fond); }
 .couleurs .l.verif { text-decoration: underline wavy var(--rouge); text-decoration-skip-ink: none; text-underline-offset: 4px; }
 .couleurs .largeur { display: block; height: 0; }
+/* V0.71.3 : le texte selectionne, surligne partout ou il revient (comme VS Code) */
+.couleurs mark.meme { color: inherit; background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 2px;
+         box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 .couleurs .vide { display: block; }
 #numeros .verif { color: var(--rouge); }
 .k { color: var(--mot); font-weight: 600; } .t { color: var(--type); } .s { color: var(--chaine); }
