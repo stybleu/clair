@@ -1,4 +1,4 @@
-/* Clair Studio (V0.58 a V0.62) */
+/* Clair Studio (V0.58 a V0.64.1) */
 :root {
   --fond: #ffffff; --fond2: #f3f4f6; --bord: #d9dce1; --texte: #1d2129; --discret: #6b7280;
   --accent: #2563eb; --vert: #15803d; --rouge: #b91c1c; --erreur-fond: #fde8e8;
@@ -25,6 +25,15 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--fond); color: var(--texte); font-family: system-ui, sans-serif; }
 #app { display: flex; flex-direction: column; height: 100dvh; }
+/* V0.64.1 : la barre des touches et l'aide restent juste au-dessus du clavier. Si le navigateur pose le clavier
+   par-dessus la page au lieu de la rapetisser, studio.js met la page a la taille de ce qui se voit. */
+#app.ajuste { position: fixed; top: 0; left: 0; right: 0; height: var(--visible); transform: translateY(var(--decalage)); }
+/* clavier ouvert : dans le code, la console se cache (elle revient quand le clavier se ferme) ;
+   dans l'entree d'un programme, c'est l'editeur, l'aide et les touches qui laissent la place a la console */
+#app.clavier.dans-code .console { display: none; }
+#app.clavier.dans-entree .editeur, #app.clavier.dans-entree .aide, #app.clavier.dans-entree .touches,
+#app.clavier.dans-entree .diag { display: none; }
+#app.clavier.dans-entree .console { flex: 1; max-height: none; min-height: 0; }
 button { font: inherit; color: inherit; background: var(--fond2); border: 1px solid var(--bord); border-radius: 8px;
          min-height: 40px; padding: 0 12px; cursor: pointer; touch-action: manipulation; }
 button:active { filter: brightness(0.9); }

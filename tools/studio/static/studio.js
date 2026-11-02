@@ -1,4 +1,4 @@
-// Clair Studio (V0.58 a V0.64) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.64.1) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -160,7 +160,7 @@
   code.addEventListener("scroll", () => { suivreDefilement(); redessiner(); });
   for (const ev of ["click", "keyup", "select"]) code.addEventListener(ev, (e) => { if (e.key !== "Escape") planifierAide(); });
   window.addEventListener("resize", () => { mesurer(); redessiner(); });
-  if (window.ResizeObserver) new ResizeObserver(redessiner).observe(code);   // la console s'ouvre, le clavier aussi
+  if (window.ResizeObserver) new ResizeObserver(() => codeRedimensionne()).observe(code);   // la console s'ouvre, le clavier aussi
 
   for (const b of document.querySelectorAll("#touches button")) {
     b.addEventListener("pointerdown", (e) => e.preventDefault());      // le clavier reste ouvert
@@ -169,6 +169,62 @@
       inserer(b.dataset.t);
     });
   }
+
+  // ---- V0.64.1 : la barre des touches et l'aide suivent le clavier ----
+  // Un navigateur qui suit interactive-widget=resizes-content (index.html) rapetisse deja la page quand le
+  // clavier s'ouvre. D'autres posent le clavier par-dessus la page : elle prend alors la taille de ce qui se
+  // voit (visualViewport), sauf pendant un zoom. Clavier ouvert dans le code : la console se cache pour laisser
+  // de la place ; dans l'entree d'un programme : l'editeur se cache, la console prend la place.
+  const vue = window.visualViewport;
+  let hauteurPleine = 0, largeurVue = 0, hauteurAvant = 0;
+  function suivreClavier() {
+    const app = $("app"), champ = document.activeElement;
+    const page = document.documentElement.clientHeight;
+    const zoom = vue && Math.abs(vue.scale - 1) > 0.01;
+    const recouvre = !!vue && !zoom && (page - vue.height > 1 || vue.offsetTop > 1);
+    app.classList.toggle("ajuste", recouvre);
+    if (recouvre) {
+      app.style.setProperty("--visible", vue.height + "px");
+      app.style.setProperty("--decalage", vue.offsetTop + "px");
+    }
+    const visible = recouvre ? vue.height : page;
+    const largeur = document.documentElement.clientWidth;
+    if (Math.abs(largeur - largeurVue) > 1) { largeurVue = largeur; hauteurPleine = 0; }   // l'ecran a tourne
+    hauteurPleine = Math.max(hauteurPleine, visible);
+    const clavier = (champ === code || champ === $("entree")) && visible < hauteurPleine * 0.8;
+    app.classList.toggle("clavier", clavier);
+    app.classList.toggle("dans-code", clavier && champ === code);
+    app.classList.toggle("dans-entree", clavier && champ !== code);
+    if (clavier && champ === code && visible < hauteurAvant - 1) requestAnimationFrame(montrerCurseur);
+    hauteurAvant = visible;
+  }
+  // la ligne du curseur reste visible quand l'editeur rapetisse (le clavier, l'aide ou une erreur apparaissent)
+  function hautCurseur() {
+    const v = code.value, fin = code.selectionEnd;
+    let n = 0;
+    for (let i = v.indexOf("\n"); i >= 0 && i < fin; i = v.indexOf("\n", i + 1)) n++;
+    return 8 + n * hauteur;                        // 8 : le haut de la zone de texte
+  }
+  function montrerCurseur() {
+    const y = hautCurseur();
+    if (y < code.scrollTop) code.scrollTop = Math.max(0, y - hauteur);
+    else if (y + hauteur > code.scrollTop + code.clientHeight) code.scrollTop = y + 2 * hauteur - code.clientHeight;
+  }
+  let hauteurCode = 0;
+  function codeRedimensionne() {
+    const avant = hauteurCode;
+    hauteurCode = code.clientHeight;
+    if (document.activeElement === code && hauteurCode < avant) {
+      const y = hautCurseur();
+      if (y >= code.scrollTop && y + hauteur <= code.scrollTop + avant) montrerCurseur();   // il se voyait
+    }
+    redessiner();
+  }
+  if (vue) { vue.addEventListener("resize", suivreClavier); vue.addEventListener("scroll", suivreClavier); }
+  window.addEventListener("resize", suivreClavier);
+  document.addEventListener("focusin", suivreClavier);
+  document.addEventListener("focusout", () => setTimeout(suivreClavier, 0));
+  suivreClavier();
 
   function modifie() {
     if (lignesErr.size) lignesErr = new Set();
