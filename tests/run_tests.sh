@@ -1225,6 +1225,7 @@ printf '%s\n' 'nbody_tree.cl : OK -> sphere de Plummer (equilibre, rayon de demi
 ./build/clair tests/gui_module.cl -o build/test_gui_module
 ./build/clair tests/nbody_fenetre.cl -o build/test_nbody_fenetre
 ./build/clair tests/nbody_ias15_fenetre.cl -o build/test_nbody_ias15_fenetre
+./build/clair tests/nbody_fil.cl -o build/test_nbody_fil
 ./build/clair tests/gui_sans_sdl.cl -o build/test_gui_sans_sdl
 rm -rf build/gui_test
 mkdir -p build/gui_test
@@ -1247,7 +1248,9 @@ else
     cmp -s build/gui_test/fenetre.out tests/nbody_fenetre.expected || { diff tests/nbody_fenetre.expected build/gui_test/fenetre.out | head -n 6 >&2; gui_echec nbody_fenetre.cl "sortie"; }
     (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=30 ../test_nbody_ias15_fenetre > ias15.out 2> ias15.err) || gui_echec nbody_ias15_fenetre.cl "$(tail -n 3 build/gui_test/ias15.err)"
     cmp -s build/gui_test/ias15.out tests/nbody_ias15_fenetre.expected || { diff tests/nbody_ias15_fenetre.expected build/gui_test/ias15.out | head -n 6 >&2; gui_echec nbody_ias15_fenetre.cl "sortie"; }
-    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre'
+    (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=40 CLAIR_NBODY_THREAD=1 ../test_nbody_fil > fil.out 2> fil.err) || gui_echec nbody_fil.cl "$(tail -n 3 build/gui_test/fil.err)"
+    cmp -s build/gui_test/fil.out tests/nbody_fil.expected || { diff tests/nbody_fil.expected build/gui_test/fil.out | head -n 6 >&2; gui_echec nbody_fil.cl "sortie"; }
+    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre, calcul dans un fil a part'
 fi
 if printf '#include <SDL3/SDL.h>\n' | clang -E -x c - > /dev/null 2>&1; then
     clang -std=c11 -Wall -Wextra -Wno-unused-function tests/gui_abi.c -o build/gui_abi -ldl -lm 2> build/gui_abi.err || gui_echec tests/gui_abi.c "$(grep -m 2 error build/gui_abi.err)"

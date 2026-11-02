@@ -337,22 +337,29 @@ static void clair_bh_walk(size_t i, const double p[3], double G, double eps2, do
     *phi += ph;
 }
 
-typedef struct { size_t lo, hi; double G, eps2, phi; int want_phi; } ClairBhWork;
+/* V0.70.1: the work is cut in pieces of 64 bodies; each core takes the next piece as soon as it is done
+   with one (the cores of a phone are not all as fast: equal shares would wait for the slowest) */
+#define CLAIR_BH_PIECE 64
+
+typedef struct { size_t n; double G, eps2; int want_phi; size_t next; double *phi; } ClairBhWork;
 
 /* the bodies in the order of the leaves (neighbours together: the same cubes stay in the cache) */
 static void *clair_bh_worker(void *arg) {
     ClairBhWork *w = arg;
     const double *m = CLAIR_NB(m);
-    double total = 0;
-    for (size_t q = w->lo; q < w->hi; q++) {
-        size_t i = clair_bf.bidx[q];
-        const double *p = clair_bf.bp + 4 * q;
-        double a[3] = { 0, 0, 0 }, phi = 0;
-        clair_bh_walk(i, p, w->G, w->eps2, a, &phi);
-        if (w->want_phi) total += 0.5 * m[i] * phi;
-        else { clair_nb.ax[i] = a[0]; clair_nb.ay[i] = a[1]; clair_nb.az[i] = a[2]; }
+    for (;;) {
+        size_t lo = __atomic_fetch_add(&w->next, CLAIR_BH_PIECE, __ATOMIC_RELAXED);
+        if (lo >= w->n) break;
+        size_t hi = lo + CLAIR_BH_PIECE < w->n ? lo + CLAIR_BH_PIECE : w->n;
+        for (size_t q = lo; q < hi; q++) {
+            size_t i = clair_bf.bidx[q];
+            const double *p = clair_bf.bp + 4 * q;
+            double a[3] = { 0, 0, 0 }, phi = 0;
+            clair_bh_walk(i, p, w->G, w->eps2, a, &phi);
+            if (w->want_phi) w->phi[q] = 0.5 * m[i] * phi;
+            else { clair_nb.ax[i] = a[0]; clair_nb.ay[i] = a[1]; clair_nb.az[i] = a[2]; }
+        }
     }
-    w->phi = total;
     return NULL;
 }
 
@@ -368,29 +375,30 @@ static int clair_bh_cores(void) {
 /* the forces with the tree (want_phi: the potential energy instead), on every core */
 static double clair_bh_run(double G, double eps2, int want_phi) {
     size_t n = clair_nbody_n();
-    const double *r = CLAIR_NB(r);
     if (!want_phi) for (size_t i = 0; i < n; i++) clair_nb.ax[i] = clair_nb.ay[i] = clair_nb.az[i] = 0;
     clair_bh_build(0);                                /* every body still there: those without mass are pulled too */
     if (clair_bh.root >= 0) clair_bh_moments(clair_bh.root);
     clair_bf_build();
-    (void)r;
     n = clair_bf.nb;
+    static double *phis;
+    static size_t capphi;
+    if (want_phi && n > capphi) {
+        double *p = realloc(phis, n * sizeof(double));
+        if (!p) clair_nbody_die("out of memory");
+        phis = p;
+        capphi = n;
+    }
     int t = n >= 256 ? clair_bh_cores() : 1;
-    if ((size_t)t > n) t = n ? (int)n : 1;
-    ClairBhWork w[64];
+    if ((size_t)t > (n + CLAIR_BH_PIECE - 1) / CLAIR_BH_PIECE) t = (int)((n + CLAIR_BH_PIECE - 1) / CLAIR_BH_PIECE);
+    if (t < 1) t = 1;
+    ClairBhWork w = { n, G, eps2, want_phi, 0, phis };
     pthread_t th[64];
     int started[64] = { 0 };
-    for (int k = 0; k < t; k++) {
-        w[k] = (ClairBhWork){ n * (size_t)k / (size_t)t, n * (size_t)(k + 1) / (size_t)t, G, eps2, 0, want_phi };
-        if (k > 0) started[k] = pthread_create(&th[k], NULL, clair_bh_worker, &w[k]) == 0;
-    }
-    clair_bh_worker(&w[0]);
-    for (int k = 1; k < t; k++) {
-        if (started[k]) pthread_join(th[k], NULL);
-        else clair_bh_worker(&w[k]);              /* no thread: done here */
-    }
+    for (int k = 1; k < t; k++) started[k] = pthread_create(&th[k], NULL, clair_bh_worker, &w) == 0;
+    clair_bh_worker(&w);
+    for (int k = 1; k < t; k++) if (started[k]) pthread_join(th[k], NULL);
     double phi = 0;
-    for (int k = 0; k < t; k++) phi += w[k].phi;  /* in a fixed order: the same whatever the cores */
+    if (want_phi) for (size_t q = 0; q < n; q++) phi += phis[q];   /* in a fixed order: the same whatever the cores */
     return phi;
 }
 
@@ -987,7 +995,7 @@ static int64_t clair_ias_run(double duration, double G, double soft, int64_t fla
         }
         if (last) t = duration;                       /* the last step ends exactly there */
         else clair_ias_add(&t, &ct, done);
-        if (!last || trying < dt) dt = trying;        /* a last step cut short does not shrink the next ones */
+        if (!last || want >= dt || trying < want) dt = trying;   /* a last step cut short does not shrink the next ones */
         if (flags & 1) {
             int64_t k = clair_nbody_collide();
             if (k) { hits += k; clair_ias_forget(); }
@@ -1657,6 +1665,96 @@ static int clair_nbody_lighter(const void *a, const void *b) {
     return mi < mj ? -1 : mi > mj ? 1 : (i > j) - (i < j);
 }
 
+/* V0.70.1: in the window, the physics goes on in a thread of its own, at its own pace; each frame only
+   draws the last places it gave.  The window stays smooth (zoom, drag, buttons) even when a step of a
+   big cluster takes a tenth of a second.  For the tests (CLAIR_GUI_FRAMES), everything stays in one
+   thread, frame by frame, as before (the same numbers every time), unless CLAIR_NBODY_THREAD=1. */
+typedef struct {
+    pthread_mutex_t lock;
+    int quit, paused, slow;
+    double speed, h, G, soft, t, e0, e, cx, cy;
+    size_t n;
+    double *x, *y, *m, *r;                           /* the places given to the window */
+} ClairNbPhys;
+
+static double clair_nb_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec;
+}
+
+static void clair_nb_nap(long ms) {
+    struct timespec ts = { 0, ms * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* the places of now, for the window (the physics thread owns the lists) */
+static void clair_nb_publish(ClairNbPhys *P, double t, double e, double e0, double h, int slow) {
+    size_t n = P->n;
+    double cx = clair_nbody_sum(6), cy = clair_nbody_sum(7);
+    pthread_mutex_lock(&P->lock);
+    memcpy(P->x, CLAIR_NB(x), n * sizeof(double));
+    memcpy(P->y, CLAIR_NB(y), n * sizeof(double));
+    memcpy(P->m, CLAIR_NB(m), n * sizeof(double));
+    memcpy(P->r, CLAIR_NB(r), n * sizeof(double));
+    P->cx = cx; P->cy = cy; P->t = t; P->e = e; P->e0 = e0; P->h = h; P->slow = slow;
+    pthread_mutex_unlock(&P->lock);
+}
+
+static void *clair_nb_physics(void *arg) {
+    ClairNbPhys *P = arg;
+    pthread_mutex_lock(&P->lock);
+    double t = P->t, h = P->h, e0 = P->e0, e = P->e, G = P->G, soft = P->soft;
+    pthread_mutex_unlock(&P->lock);
+    double last = clair_nb_now(), owed = 0, next_energy = last + 0.5;
+    int64_t chunk = 1;
+    int slow = 0;
+    for (;;) {
+        pthread_mutex_lock(&P->lock);
+        int quit = P->quit, paused = P->paused;
+        double speed = P->speed;
+        pthread_mutex_unlock(&P->lock);
+        if (quit) break;
+        double now = clair_nb_now(), dt = now - last;
+        last = now;
+        if (dt > 0.1) dt = 0.1;
+        if (paused) { owed = 0; slow = 0; clair_nb_nap(5); continue; }
+        owed += speed * dt;
+        double done = 0, start = now;
+        int64_t hits = 0;
+        if (clair_nb.flags & 4) {                    /* IAS15 chooses its steps: it is asked for a time */
+            if (owed >= h) {
+                hits = clair_ias_run(owed, G, soft, clair_nb.flags, clair_nb.epsilon, h, 20000000ull);
+                h = clair_ias.out[0];
+                done = clair_ias.out[1];
+            }
+        } else {
+            int64_t k = (int64_t)(owed / h);
+            if (k > chunk) k = chunk;
+            if (k > 0) {
+                hits = clair_nbody_step(h, k, G, soft, clair_nb.flags);
+                done = (double)k * h;
+                double spent = clair_nb_now() - start;   /* about 20 ms of work at a time */
+                if (spent < 0.005 && chunk < (1 << 20)) chunk *= 2;
+                else if (spent > 0.03 && chunk > 1) chunk /= 2;
+            }
+        }
+        owed -= done;
+        t += done;
+        if (owed > speed * 0.25 + 2 * h) { owed = 0; slow = 1; }     /* too far behind: it cannot keep up */
+        else if (done > 0 && owed < h) slow = 0;
+        if (hits > 0) e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2);   /* a collision changes the energy */
+        now = clair_nb_now();
+        if (now >= next_energy) { e = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2); next_energy = now + 0.5; }
+        if (done > 0) clair_nb_publish(P, t, e, e0, h, slow);
+        else clair_nb_nap(2);
+    }
+    pthread_mutex_lock(&P->lock);
+    P->t = t; P->h = h;
+    pthread_mutex_unlock(&P->lock);
+    return NULL;
+}
+
 static double clair_nbody_show(void) {
     size_t n = clair_nbody_n();
     if (!n) clair_nbody_die("s.show(): no body (s.add(...) first)");
@@ -1682,9 +1780,29 @@ static double clair_nbody_show(void) {
     ClairNbodyView v = { 0, 0, 1, 0, 0 };
     size_t *order = NULL, order_cap = 0;
     int follow = -2;                                       /* -2: the center of mass, -1: nothing, i: the body i */
-    int paused = 0, trails = T > 0, slow = 0, fit = 1, quit = 0;
+    int paused = 0, trails = T > 0 && n <= 500, slow = 0, fit = 1, quit = 0;   /* V0.70.1: many bodies: no trails at first */
     double acc = 0, e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2), e_shown = e0;
     long frame_no = 0;
+    const char *want_thread = getenv("CLAIR_NBODY_THREAD");
+    int threaded = want_thread ? want_thread[0] == '1' : !clair_gui.stop_after;
+    ClairNbPhys P;
+    pthread_t phys_thread;
+    double *ux = NULL, *uy = NULL, *um = NULL, *ur = NULL, cx = 0, cy = 0;
+    ClairSdlFRect *dots = NULL;
+    size_t ndots = 0;
+    if (threaded) {
+        memset(&P, 0, sizeof(P));
+        P.n = n;
+        P.x = malloc(n * sizeof(double)); P.y = malloc(n * sizeof(double)); P.m = malloc(n * sizeof(double)); P.r = malloc(n * sizeof(double));
+        ux = malloc(n * sizeof(double)); uy = malloc(n * sizeof(double)); um = malloc(n * sizeof(double)); ur = malloc(n * sizeof(double));
+        if (!P.x || !P.y || !P.m || !P.r || !ux || !uy || !um || !ur) clair_nbody_die("out of memory");
+        pthread_mutex_init(&P.lock, NULL);
+        P.speed = speed; P.h = h; P.G = G; P.soft = soft;
+        clair_nb_publish(&P, t, e0, e0, h, 0);
+        if (pthread_create(&phys_thread, NULL, clair_nb_physics, &P) != 0) threaded = 0;
+    }
+    dots = malloc((n + 1) * sizeof(ClairSdlFRect));
+    if (!dots) clair_nbody_die("out of memory");
     float press_x = 0, press_y = 0, last_x = 0, last_y = 0, moved = 0;
     int pressing = 0, press_on_bar = 0;
     while (!quit && clair_gui_frame()) {
@@ -1696,9 +1814,19 @@ static double clair_nbody_show(void) {
         v.W = W;
         v.mid = bar_y / 2;
         n = clair_nbody_n();
-        x = CLAIR_NB(x); y = CLAIR_NB(y); m = CLAIR_NB(m); r = CLAIR_NB(r);
+        if (threaded) {                                    /* the last places the physics gave */
+            pthread_mutex_lock(&P.lock);
+            memcpy(ux, P.x, n * sizeof(double)); memcpy(uy, P.y, n * sizeof(double));
+            memcpy(um, P.m, n * sizeof(double)); memcpy(ur, P.r, n * sizeof(double));
+            t = P.t; e_shown = P.e; e0 = P.e0; slow = P.slow; cx = P.cx; cy = P.cy; h = P.h;
+            pthread_mutex_unlock(&P.lock);
+            x = ux; y = uy; m = um; r = ur;
+        } else {
+            x = CLAIR_NB(x); y = CLAIR_NB(y); m = CLAIR_NB(m); r = CLAIR_NB(r);
+            cx = clair_nbody_sum(6); cy = clair_nbody_sum(7);
+        }
         if (fit) {                                         /* everything in the window, around the center of mass */
-            double c0 = clair_nbody_sum(6), c1 = clair_nbody_sum(7), far = 0;
+            double c0 = cx, c1 = cy, far = 0;
             double *ds = n > 300 ? malloc(n * sizeof(double)) : NULL;
             size_t nd = 0;
             for (size_t i = 0; i < n; i++) {
@@ -1772,8 +1900,13 @@ static double clair_nbody_show(void) {
             pressing = 0;
         }
         if (!(v.scale > 0) || !isfinite(v.scale)) v.scale = 1;
-        /* the physics: the time of the simulation for this frame, within 14 ms */
-        if (!paused && (clair_nb.flags & 4)) {           /* V0.68: IAS15 chooses its steps; the frame asks for a time */
+        /* the physics: the time of the simulation for this frame, within 14 ms (V0.70.1: or its own thread) */
+        if (threaded) {
+            pthread_mutex_lock(&P.lock);
+            P.paused = paused;
+            P.speed = speed;
+            pthread_mutex_unlock(&P.lock);
+        } else if (!paused && (clair_nb.flags & 4)) {           /* V0.68: IAS15 chooses its steps; the frame asks for a time */
             double frame = clair_gui.dt > 0.1 ? 0.1 : clair_gui.dt;
             slow = 0;
             if (clair_ias_run(speed * frame, G, soft, clair_nb.flags, clair_nb.epsilon, h, 14000000ull) > 0)
@@ -1802,7 +1935,7 @@ static double clair_nbody_show(void) {
         }
         if (follow >= 0 && ((size_t)follow >= n || r[follow] < 0)) follow = -1;
         if (follow >= 0) { v.cx = x[follow]; v.cy = y[follow]; }
-        else if (follow == -2) { v.cx = clair_nbody_sum(6); v.cy = clair_nbody_sum(7); }
+        else if (follow == -2) { v.cx = cx; v.cy = cy; }
         for (size_t i = 0; T && i < n; i++) {             /* a new point of the trail every 2 pixels */
             if (r[i] < 0) continue;
             size_t last = (head[i] + T - 1) % T;
@@ -1868,6 +2001,8 @@ static double clair_nbody_show(void) {
             clair_gui_set_color(200, 205, 220, 255);
             clair_gui_text(name, lx, ly, fs);
         }
+        int dot_color = -1;                                 /* V0.70.1: the small ones drawn together, color by color */
+        ndots = 0;
         for (size_t q = 0; q < n; q++) {                    /* the bodies: the heaviest on top */
             size_t i = order[q];
             if (r[i] < 0) continue;
@@ -1877,6 +2012,18 @@ static double clair_nbody_show(void) {
             if (sx < -pr || sx > W + pr || sy < -pr || sy > bar_y) continue;     /* not over the buttons */
             uint8_t cr, cg, cb;
             clair_nbody_rgb(i, &cr, &cg, &cb);
+            int col = (cr << 16) | (cg << 8) | cb;
+            if (pr < 2.5 && follow != (int)i) {
+                if (col != dot_color && ndots) {
+                    clair_gui_set_color((dot_color >> 16) & 255, (dot_color >> 8) & 255, dot_color & 255, 255);
+                    clair_sdl.RenderFillRects(clair_gui.renderer, dots, (int)ndots);
+                    ndots = 0;
+                }
+                dot_color = col;
+                float side = pr < 1.5 ? 2.0f : (float)(2 * pr);
+                dots[ndots++] = (ClairSdlFRect){ (float)sx - side / 2, (float)sy - side / 2, side, side };
+                continue;
+            }
             if (follow == (int)i) {
                 clair_gui_set_color(255, 255, 255, 200);
                 clair_gui_circle(sx, sy, pr + 4 * ui, false);
@@ -1884,6 +2031,10 @@ static double clair_nbody_show(void) {
             clair_gui_set_color(cr, cg, cb, 255);
             if (pr < 2) clair_gui_rect(sx - 1, sy - 1, 2, 2, true);
             else clair_gui_circle(sx, sy, pr, true);
+        }
+        if (ndots) {
+            clair_gui_set_color((dot_color >> 16) & 255, (dot_color >> 8) & 255, dot_color & 255, 255);
+            clair_sdl.RenderFillRects(clair_gui.renderer, dots, (int)ndots);
         }
         /* what is going on */
         char line[160], a[40], b[40];
@@ -1895,7 +2046,7 @@ static double clair_nbody_show(void) {
         clair_nbody_num(b, sizeof(b), speed / clair_nb.tscale);
         snprintf(line, sizeof(line), "1 s = %s%s%s%s", b, clair_nb.tunit[0] ? " " : "", clair_nb.tunit, slow ? "  (ralenti)" : "");
         clair_gui_text(line, lx, ly + 1.5 * fs, fs);
-        if (n <= 2000 || frame_no % 30 == 0) e_shown = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2);
+        if (!threaded && (n <= 2000 || frame_no % 30 == 0)) e_shown = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2);
         frame_no++;
         double e = e_shown;
         size_t alive = 0;
@@ -1939,7 +2090,19 @@ static double clair_nbody_show(void) {
             }
         }
         clair_gui_present();
+        if (threaded && clair_gui.stop_after) clair_nb_nap(16);      /* the tests: frames at the pace of a screen */
     }
+    if (threaded) {                                         /* the physics stops, and gives its time and step */
+        pthread_mutex_lock(&P.lock);
+        P.quit = 1;
+        pthread_mutex_unlock(&P.lock);
+        pthread_join(phys_thread, NULL);
+        t = P.t;
+        h = P.h;
+        pthread_mutex_destroy(&P.lock);
+        free(P.x); free(P.y); free(P.m); free(P.r); free(ux); free(uy); free(um); free(ur);
+    }
+    free(dots);
     free(tx); free(ty); free(head); free(filled); free(px); free(py); free(labels); free(order);
     if (opened_here) clair_gui_close();
     clair_ias.out[0] = h;                                   /* V0.68: the step IAS15 got to */
