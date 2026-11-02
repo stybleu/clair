@@ -1,0 +1,9 @@
+date : 2026-11-02T19:19:06Z
+titre : deux amas
+clair : 20b6248 feat(nbody): arbre de Barnes et Hut sur tous les coeurs (verif
+processeur : aarch64, coeurs : 8
+android : 13
+clang : clang version 21.1.8
+---
+4000 etoiles, viriel au depart 0.97
+fin a t = 10.0, viriel 0.99
