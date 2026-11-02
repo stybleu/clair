@@ -26,6 +26,7 @@ static struct {
     double *ax, *ay, *az;
     size_t cap;
     double dt, speed, trail, tscale, lscale, G, soft, t, epsilon, theta_saved, hill;
+    double c;                                        /* V0.71.1: the speed of light (0: Newton only) */
     int flags;
     char tunit[32], lunit[32];
 } clair_nb;
@@ -705,6 +706,7 @@ static int64_t clair_nbody_param(int64_t which, double v) {
         case 10: clair_bh.theta = v > 0 ? v : 0; break;   /* V0.70: the tree (0: direct sums) */
         case 12: clair_nb.theta_saved = v; break;     /* V0.70: s.theta, kept even without the tree */
         case 13: clair_nb.hill = v > 0 ? v : 3; break;    /* V0.71: MERCURIUS, the critical distance in Hill radii */
+        case 14: clair_nb.c = v > 0 ? v : 0; break;       /* V0.71.1: general relativity (IAS15) */
         case 11: clair_bh.threads = (int)v; break;    /* V0.70: the cores (0: all) */
         default: break;
     }
@@ -743,7 +745,7 @@ static const double clair_ias_d[21] = { 5.6262560536922146465652191e-2, 3.165475
 static struct {
     size_t n3, cap;
     double *mem;
-    double *x0, *v0, *a0, *at, *csx, *csv, *xs;
+    double *x0, *v0, *a0, *at, *csx, *csv, *xs, *vs;
     double *g[7], *b[7], *e[7], *br[7], *er[7], *cb[7];   /* cb: what rounding took from the b */
     double dt_last;                                  /* the last step done (0: none yet) */
     const void *owner;                               /* the simulation the predictions belong to */
@@ -764,14 +766,14 @@ static double clair_nbody_stat(int64_t what) {
 
 /* the predictions start again from nothing (a collision, other bodies) */
 static void clair_ias_forget(void) {
-    if (clair_ias.mem) memset(clair_ias.mem, 0, clair_ias.cap * 49 * sizeof(double));
+    if (clair_ias.mem) memset(clair_ias.mem, 0, clair_ias.cap * 50 * sizeof(double));
     clair_ias.dt_last = 0;
 }
 
 static void clair_ias_ready(void) {
     size_t n3 = 3 * clair_nbody_n();
     if (n3 > clair_ias.cap) {
-        double *mem = calloc(n3 * 49, sizeof(double));      /* 7 vectors + 6 polynomials of 7 */
+        double *mem = calloc(n3 * 50, sizeof(double));      /* 8 vectors + 6 polynomials of 7 */
         if (!mem) clair_nbody_die("out of memory");
         free(clair_ias.mem);
         clair_ias.mem = mem;
@@ -786,6 +788,7 @@ static void clair_ias_ready(void) {
         clair_ias.g[k] = p + (7 + k) * c; clair_ias.b[k] = p + (14 + k) * c; clair_ias.e[k] = p + (21 + k) * c;
         clair_ias.br[k] = p + (28 + k) * c; clair_ias.er[k] = p + (35 + k) * c; clair_ias.cb[k] = p + (42 + k) * c;
     }
+    clair_ias.vs = p + 49 * c;
     if (clair_ias.owner != (const void *)clair_nb.x || clair_ias.n3 != n3) {   /* another simulation, or other bodies */
         clair_ias_forget();
         clair_ias.owner = clair_nb.x;
@@ -812,13 +815,44 @@ static void clair_ias_put(const double *pos) {
     for (size_t i = 0; i < n; i++) { x[i] = pos[3 * i]; y[i] = pos[3 * i + 1]; z[i] = pos[3 * i + 2]; }
 }
 
+static void clair_ias_put_v(const double *vel) {
+    size_t n = clair_nbody_n();
+    double *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    for (size_t i = 0; i < n; i++) { vx[i] = vel[3 * i]; vy[i] = vel[3 * i + 1]; vz[i] = vel[3 * i + 2]; }
+}
+
+/* V0.71.1: general relativity, the first post-Newtonian term of the first body (the star) on each of the
+   others: a = G M / (c^2 r^3) ((4 G M / r - v^2) r + 4 (r.v) v), r and v from the star (Schwarzschild, harmonic
+   coordinates; the precession of Mercury: 43" a century).  The star takes the opposite push, weighted by the
+   masses: the momentum is kept.  It needs the speeds: IAS15 predicts them inside its step. */
+static void clair_nbody_gr(double G) {
+    size_t n = clair_nbody_n();
+    if (n < 2 || !(clair_nb.c > 0)) return;
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    const double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    if (!(m[0] > 0) || r[0] < 0) return;
+    double GM = G * m[0], c2 = clair_nb.c * clair_nb.c, back[3] = { 0, 0, 0 };
+    for (size_t i = 1; i < n; i++) {
+        if (r[i] < 0) continue;
+        double dx = x[i] - x[0], dy = y[i] - y[0], dz = z[i] - z[0], ux = vx[i] - vx[0], uy = vy[i] - vy[0], uz = vz[i] - vz[0];
+        double d2 = dx * dx + dy * dy + dz * dz;
+        if (!(d2 > 0)) continue;
+        double d = sqrt(d2), f = GM / (c2 * d2 * d);
+        double A = 4 * GM / d - (ux * ux + uy * uy + uz * uz), B = 4 * (dx * ux + dy * uy + dz * uz);
+        double ax = f * (A * dx + B * ux), ay = f * (A * dy + B * uy), az = f * (A * dz + B * uz);
+        clair_nb.ax[i] += ax; clair_nb.ay[i] += ay; clair_nb.az[i] += az;
+        back[0] += m[i] * ax; back[1] += m[i] * ay; back[2] += m[i] * az;
+    }
+    clair_nb.ax[0] -= back[0] / m[0]; clair_nb.ay[0] -= back[1] / m[0]; clair_nb.az[0] -= back[2] / m[0];
+}
+
 static void (*clair_ias_hook)(double G, double eps2);   /* V0.71: other forces (MERCURIUS: the bodies of an encounter) */
 static int64_t (*clair_ias_collide_hook)(void);         /* V0.71: more collisions (MERCURIUS: with the star) */
 
 static void clair_ias_accel(double G, double eps2, double *out) {
     size_t n = clair_nbody_n();
     if (clair_ias_hook) clair_ias_hook(G, eps2);
-    else clair_nbody_forces(G, eps2);
+    else { clair_nbody_forces(G, eps2); clair_nbody_gr(G); }
     for (size_t i = 0; i < n; i++) { out[3 * i] = clair_nb.ax[i]; out[3 * i + 1] = clair_nb.ay[i]; out[3 * i + 2] = clair_nb.az[i]; }
 }
 
@@ -898,6 +932,21 @@ static int clair_ias_step(double G, double eps2, double epsilon, double *dt, dou
                 xs[k] = (d * ht - csx[k]) + x0[k];
             }
             clair_ias_put(xs);
+            if (clair_nb.c > 0 && !clair_ias_hook) {    /* V0.71.1: relativity needs the speeds there too */
+                double *vs = clair_ias.vs;
+                for (size_t k = 0; k < n3; k++) {
+                    double d = b[6][k] / 8;
+                    d = d * hs + b[5][k] / 7;
+                    d = d * hs + b[4][k] / 6;
+                    d = d * hs + b[3][k] / 5;
+                    d = d * hs + b[2][k] / 4;
+                    d = d * hs + b[1][k] / 3;
+                    d = d * hs + b[0][k] / 2;
+                    d = d * hs + a0[k];
+                    vs[k] = (d * ht - csv[k]) + v0[k];
+                }
+                clair_ias_put_v(vs);
+            }
             clair_ias_accel(G, eps2, at);
             int gi = st - 1, rbase = st * (st - 1) / 2, cbase = (st - 1) * (st - 2) / 2;
             double maxa = 0, maxdb = 0;
@@ -941,6 +990,7 @@ static int clair_ias_step(double G, double eps2, double epsilon, double *dt, dou
         dt_new = isnormal(best) ? sqrt(best) * dt_done * pow(epsilon * 5040.0, 1.0 / 7) : dt_done * 4;
         if (fabs(dt_new / dt_done) < 0.25) {          /* much too long: again, shorter */
             clair_ias_put(x0);
+            clair_ias_put_v(v0);
             clair_ias.rejected++;
             *dt = dt_new;
             if (clair_ias.dt_last != 0) clair_ias_predict(dt_new / clair_ias.dt_last);
@@ -1847,6 +1897,7 @@ static int64_t clair_nbody_save(const char *path, const char *integrator, const 
     fprintf(f, "time_unit %s\ntime_scale %.17g\nlength_unit %s\nlength_scale %.17g\n", tunit, clair_nb.tscale, lunit, clair_nb.lscale);
     fprintf(f, "gravity %s\ntheta %.17g\nthreads %d\n", gravity, clair_nb.theta_saved, clair_bh.threads);   /* V0.70 */
     fprintf(f, "hill %.17g\n", clair_nb.hill);       /* V0.71 */
+    if (clair_nb.c > 0) fprintf(f, "c %.17g\n", clair_nb.c);   /* V0.71.1 */
     fprintf(f, "bodies %zu\n", n);
     int crit = strcmp(integrator, "mercurius") == 0 && clair_mc_crit_ok(n, clair_nb.dt, clair_nb.G);   /* V0.71 */
     for (size_t i = 0; i < n; i++) {
@@ -1862,7 +1913,7 @@ static int64_t clair_nbody_save(const char *path, const char *integrator, const 
 }
 
 static struct {
-    double p[14];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale theta threads hill */
+    double p[15];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale theta threads hill c */
     char text[4][64];                                /* integrator, time unit, length unit, gravity */
     size_t n, cap;
     double *v;                                       /* 10 numbers per body (the 10th: MERCURIUS, or NAN) */
@@ -1880,8 +1931,8 @@ static int64_t clair_nbody_load(const char *path) {
     if (!f) { fprintf(stderr, "Clair runtime error: nbody: nbody.load(): cannot read %s\n", path); exit(EXIT_FAILURE); }
     for (size_t i = 0; i < clair_nl.n; i++) free(clair_nl.names[i]);
     clair_nl.n = 0;
-    static const char *keys[14] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale", "theta", "threads", "hill" };
-    static const double defaults[14] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1, 0.5, 0, 3 };
+    static const char *keys[15] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale", "theta", "threads", "hill", "c" };
+    static const double defaults[15] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1, 0.5, 0, 3, 0 };
     memcpy(clair_nl.p, defaults, sizeof(defaults));
     snprintf(clair_nl.text[0], 64, "leapfrog");
     snprintf(clair_nl.text[3], 64, "direct");
@@ -1922,7 +1973,7 @@ static int64_t clair_nbody_load(const char *path) {
                 continue;
             }
             int found = 0;
-            for (int k = 0; k < 14; k++) {
+            for (int k = 0; k < 15; k++) {
                 if (strcmp(line, keys[k]) != 0) continue;
                 char *end;
                 clair_nl.p[k] = strtod(val, &end);
@@ -1968,7 +2019,7 @@ static int64_t clair_nbody_load(const char *path) {
 /* body i, number k (0 m, 1-3 x y z, 4-6 vx vy vz, 7 r, 8 color, 9 the critical distance of MERCURIUS or
    NAN); i = -1: the settings */
 static double clair_nbody_loaded(int64_t i, int64_t k) {
-    if (i < 0) return k >= 0 && k < 14 ? clair_nl.p[k] : 0;
+    if (i < 0) return k >= 0 && k < 15 ? clair_nl.p[k] : 0;
     if ((size_t)i >= clair_nl.n || k < 0 || k > 9) return 0;
     return clair_nl.v[10 * i + k];
 }

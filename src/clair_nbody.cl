@@ -13,6 +13,8 @@
 //
 // V0.71: s.integrator = "mercurius": WHFast while the planets are apart, IAS15 for their close encounters
 // (s.hill: the critical distance, in Hill radii; s.crit: the critical distances, kept by the module).
+// V0.71.1: s.c = the speed of light in the units of the simulation (nbody.c_solar(), nbody.c()): IAS15 adds
+// general relativity (the first post-Newtonian term of the first body, the star, on the others).
 // V0.70: s.gravity = "tree": the tree of Barnes and Hut (N log N), on every core (s.threads: 0 = all);
 // s.add_plummer(...): a cluster of stars in equilibrium.
 // V0.69: s.integrator = "whfast": Wisdom-Holman (as in REBOUND), for planets over millions of years;
@@ -53,6 +55,7 @@ Class Simulation {
     threads: int
     hill: float
     crit: list[float]                                // V0.71: kept by MERCURIUS (its critical distances)
+    c: float                                         // V0.71.1: the speed of light (0: Newton only)
 
     // the C part works on the lists of this simulation (V0.70: and with its gravity: the tree or not)
     def bind() -> int {
@@ -70,6 +73,7 @@ Class Simulation {
         __nbody_param(11, float(self.threads))
         __nbody_param(12, self.theta)
         __nbody_param(13, self.hill)
+        __nbody_param(14, self.c)
         if self.integrator == "mercurius" and len(self.crit) != len(self.m) + 3 {
             self.crit = []                          // computed again at the first step (bodies were added)
             for i in range(len(self.m) + 3) {
@@ -186,6 +190,12 @@ Class Simulation {
         }
         if self.gravity == "tree" and self.integrator != "leapfrog" and self.integrator != "yoshida" {
             __nbody_fail("s.gravity = \"tree\" goes with s.integrator = \"leapfrog\" or \"yoshida\" (the forces of the tree are approximate)")
+        }
+        if self.c < 0.0 {
+            __nbody_fail("s.c: the speed of light, more than 0 (0: no relativity)")
+        }
+        if self.c > 0.0 and self.integrator != "ias15" {
+            __nbody_fail("s.c (general relativity) goes with s.integrator = \"ias15\" (the force depends on the speeds)")
         }
         if self.integrator == "ias15" {
             return f + 4
@@ -490,13 +500,22 @@ def G() -> float {
 
 // an empty simulation; g: the constant of gravitation in the units chosen (1.0, or nbody.G() in SI)
 def simulation(g: float) -> Simulation {
-    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9, "direct", 0.5, 0, 3.0, [])
+    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9, "direct", 0.5, 0, 3.0, [], 0.0)
 }
 
 // V0.68: the constant of gravitation in astronomical units, solar masses and years of 365.25 days:
 // GM of the Sun 1.32712440041e20 m^3/s^2 (IAU 2009, TDB), 1 au = 149597870700 m (IAU 2012)
 def G_solar() -> float {
     return 39.476926421093573
+}
+
+// V0.71.1: the speed of light, in m/s (SI: with nbody.G()) and in AU per year (with nbody.G_solar())
+def c() -> float {
+    return 299792458.0
+}
+
+def c_solar() -> float {
+    return 63241.07708426628
 }
 
 // an empty simulation in au, solar masses and years, with IAS15
@@ -529,6 +548,7 @@ def load(path: string) -> Simulation {
     s.theta = __nbody_loaded(-1, 11)
     s.threads = int(__nbody_loaded(-1, 12))
     s.hill = __nbody_loaded(-1, 13)
+    s.c = __nbody_loaded(-1, 14)
     let crit: bool = s.integrator == "mercurius" and n > 0
     for i in range(n) {
         s.add3(__nbody_loaded_text(i), __nbody_loaded(i, 0), __nbody_loaded(i, 1), __nbody_loaded(i, 2), __nbody_loaded(i, 3), __nbody_loaded(i, 4), __nbody_loaded(i, 5), __nbody_loaded(i, 6))

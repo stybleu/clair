@@ -1227,6 +1227,11 @@ printf '%s\n' 'nbody_tree.cl : OK -> sphere de Plummer (equilibre, rayon de demi
 (cd build && ./test_nbody_mercurius > nbody_mercurius.out) || gui_echec nbody_mercurius.cl "$(tail -n 2 build/nbody_mercurius.out)"
 cmp -s build/nbody_mercurius.out tests/nbody_mercurius.expected || { diff tests/nbody_mercurius.expected build/nbody_mercurius.out | head -n 6 >&2; gui_echec nbody_mercurius.cl "sortie"; }
 printf '%s\n' 'nbody_mercurius.cl : OK -> MERCURIUS : systeme solaire mille ans (comme REBOUND), comete qui frole Jupiter (comme REBOUND et IAS15, ordre 2 ; WHFast se trompe), trois planetes serrees (comme REBOUND), sauve et relu au dernier chiffre, deux simulations ensemble, collisions entre planetes et avec l etoile'
+# V0.71.1 : la relativite generale (s.c), comparee a Einstein (Mercure) et a REBOUNDx
+./build/clair tests/nbody_relativite.cl -o build/test_nbody_relativite
+(cd build && ./test_nbody_relativite > nbody_relativite.out) || gui_echec nbody_relativite.cl "$(tail -n 2 build/nbody_relativite.out)"
+cmp -s build/nbody_relativite.out tests/nbody_relativite.expected || { diff tests/nbody_relativite.expected build/nbody_relativite.out | head -n 6 >&2; gui_echec nbody_relativite.cl "sortie"; }
+printf '%s\n' 'nbody_relativite.cl : OK -> relativite generale : Mercure tourne de 42.98 secondes d arc par siecle (Einstein), systeme solaire cent ans comme REBOUNDx a 1 km, quantite de mouvement gardee, s.c sauve et relu'
 ./build/clair tests/gui_module.cl -o build/test_gui_module
 ./build/clair tests/nbody_fenetre.cl -o build/test_nbody_fenetre
 ./build/clair tests/nbody_ias15_fenetre.cl -o build/test_nbody_ias15_fenetre
