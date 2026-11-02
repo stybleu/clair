@@ -1207,8 +1207,14 @@ gui_echec() { printf '%s\n' "$1 : ECHEC -> $2" >&2; exit 1; }
 ./build/test_nbody_module > build/nbody_module.out || gui_echec nbody_module.cl "$(tail -n 2 build/nbody_module.out)"
 cmp -s build/nbody_module.out tests/nbody_module.expected || { diff tests/nbody_module.expected build/nbody_module.out | head -n 6 >&2; gui_echec nbody_module.cl "sortie"; }
 printf '%s\n' 'nbody_module.cl : OK -> orbite ronde (un tour, energie, moment cinetique, quantite de mouvement), ordre 4, corps sans masse, huit a trois corps, collision (masse, quantite de mouvement, volume), pas choisi seul, sans SDL3'
+# V0.68 : IAS15, les elements orbitaux, le systeme solaire (compares a REBOUND et a la solution de Kepler)
+./build/clair tests/nbody_ias15.cl -o build/test_nbody_ias15
+./build/test_nbody_ias15 > build/nbody_ias15.out || gui_echec nbody_ias15.cl "$(tail -n 2 build/nbody_ias15.out)"
+cmp -s build/nbody_ias15.out tests/nbody_ias15.expected || { diff tests/nbody_ias15.expected build/nbody_ias15.out | head -n 6 >&2; gui_echec nbody_ias15.cl "sortie"; }
+printf '%s\n' 'nbody_ias15.cl : OK -> IAS15 : Kepler e = 0.9 (cent tours, a et e a 1e-13), probleme pythagoricien (comme REBOUND), un pas seul ; elements orbitaux (ellipse, hyperbole, equation de Kepler) ; systeme solaire (JPL, cent ans, energie a 1e-14) ; collision'
 ./build/clair tests/gui_module.cl -o build/test_gui_module
 ./build/clair tests/nbody_fenetre.cl -o build/test_nbody_fenetre
+./build/clair tests/nbody_ias15_fenetre.cl -o build/test_nbody_ias15_fenetre
 ./build/clair tests/gui_sans_sdl.cl -o build/test_gui_sans_sdl
 rm -rf build/gui_test
 mkdir -p build/gui_test
@@ -1229,7 +1235,9 @@ else
     cmp -s build/gui_test/gui.out tests/gui_module.expected || { diff tests/gui_module.expected build/gui_test/gui.out | head -n 6 >&2; gui_echec gui_module.cl "sortie"; }
     (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=40 CLAIR_GUI_EVENTS='5:down:50:560;6:up:50:560;10:down:50:560;11:up:50:560;20:down:748:560;21:up:748:560' ../test_nbody_fenetre > fenetre.out 2> fenetre.err) || gui_echec nbody_fenetre.cl "$(tail -n 3 build/gui_test/fenetre.err)"
     cmp -s build/gui_test/fenetre.out tests/nbody_fenetre.expected || { diff tests/nbody_fenetre.expected build/gui_test/fenetre.out | head -n 6 >&2; gui_echec nbody_fenetre.cl "sortie"; }
-    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter'
+    (cd build/gui_test && SDL_VIDEO_DRIVER=offscreen CLAIR_GUI_FRAMES=30 ../test_nbody_ias15_fenetre > ias15.out 2> ias15.err) || gui_echec nbody_ias15_fenetre.cl "$(tail -n 3 build/gui_test/ias15.err)"
+    cmp -s build/gui_test/ias15.out tests/nbody_ias15_fenetre.expected || { diff tests/nbody_ias15_fenetre.expected build/gui_test/ias15.out | head -n 6 >&2; gui_echec nbody_ias15_fenetre.cl "sortie"; }
+    printf '%s\n' 'gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15'
 fi
 if printf '#include <SDL3/SDL.h>\n' | clang -E -x c - > /dev/null 2>&1; then
     clang -std=c11 -Wall -Wextra -Wno-unused-function tests/gui_abi.c -o build/gui_abi -ldl -lm 2> build/gui_abi.err || gui_echec tests/gui_abi.c "$(grep -m 2 error build/gui_abi.err)"

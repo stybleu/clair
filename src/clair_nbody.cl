@@ -10,6 +10,10 @@
 //
 // The bodies are in the lists of the simulation: s.x[i], s.y[i], s.vx[i], s.m[i]... (a body
 // absorbed by a collision has a mass of 0 and a radius of -1). In SI units: nbody.simulation(nbody.G()).
+//
+// V0.68: s.integrator = "ias15": the integrator of order 15 with its own time step (as in REBOUND),
+// precise to the last digits even when bodies pass close; s.add_orbit(...) and s.elements(i, j):
+// the orbital elements; nbody.solar_system(): the Sun and the eight planets (JPL), in AU and years.
 
 import gui
 
@@ -36,6 +40,8 @@ Class Simulation {
     time_scale: float
     length_unit: string
     length_scale: float
+    integrator: string
+    epsilon: float
 
     // the C part works on the lists of this simulation
     def bind() -> int {
@@ -122,14 +128,31 @@ Class Simulation {
         if self.merge {
             f += 1
         }
-        if self.order == 4 {
-            f += 2
+        if self.integrator == "ias15" {
+            return f + 4
+        }
+        if self.integrator == "yoshida" or (self.integrator == "leapfrog" and self.order == 4) {
+            return f + 2
+        }
+        if self.integrator != "leapfrog" {
+            __nbody_fail("s.integrator: \"leapfrog\", \"yoshida\" or \"ias15\", not \"" + self.integrator + "\"")
         }
         return f
     }
 
-    // one step of time: gives the number of collisions
+    def ias15() -> bool {
+        return self.flags() >= 4
+    }
+
+    // one step of time: gives the number of collisions (IAS15: a step of the length it chooses)
     def step() -> int {
+        if self.ias15() {
+            self.bind()
+            let k: int = __nbody_ias15(-1.0, self.G, self.soft, self.flags(), self.epsilon, self.dt)
+            self.dt = __nbody_out(0)
+            self.t += __nbody_out(1)
+            return k
+        }
         let h: float = self.time_step()
         self.bind()
         let n: int = __nbody_step(h, 1, self.G, self.soft, self.flags())
@@ -137,8 +160,18 @@ Class Simulation {
         return n
     }
 
-    // goes on for this time (in steps of dt): gives the number of collisions
+    // goes on for this time (in steps of dt; IAS15: exactly this time): gives the number of collisions
     def run(duration: float) -> int {
+        if self.ias15() {
+            if duration <= 0.0 {
+                return 0
+            }
+            self.bind()
+            let k: int = __nbody_ias15(duration, self.G, self.soft, self.flags(), self.epsilon, self.dt)
+            self.dt = __nbody_out(0)
+            self.t += duration
+            return k
+        }
         let h: float = self.time_step()
         let steps: int = int(duration / h + 0.5)
         if steps <= 0 {
@@ -231,10 +264,89 @@ Class Simulation {
         __nbody_param(6, self.soft)
         __nbody_param(7, float(self.flags()))
         __nbody_param(8, self.t)
+        __nbody_param(9, self.epsilon)
         __nbody_unit(0, self.time_unit)
         __nbody_unit(1, self.length_unit)
         self.t = __nbody_show()
+        if self.ias15() {
+            self.dt = __nbody_out(0)
+        }
         return 0
+    }
+
+    // V0.68: the IAS15 steps done (0), done again because they were too long (1)
+    def steps_done(what: int) -> int {
+        return int(__nbody_stat(what))
+    }
+
+    // a body on an orbit around the body around (-1: around the center of mass of all the bodies already
+    // there, as REBOUND does): a the semi-major axis (< 0 for a hyperbola), e the eccentricity, and in
+    // degrees: inc the inclination, node the longitude of the ascending node, peri the argument of the
+    // pericenter, f the true anomaly (from the mean anomaly: nbody.true_anomaly(M, e))
+    def add_orbit(name: string, m: float, around: int, a: float, e: float, inc: float, node: float, peri: float, f: float) -> int {
+        let n: int = len(self.m)
+        if around >= n or around < -1 {
+            __nbody_fail("add_orbit(): no body " + str(around) + " to turn around (" + name + ")")
+        }
+        let mc: float = 0.0
+        let c: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if around >= 0 {
+            mc = self.m[around]
+            c = [self.x[around], self.y[around], self.z[around], self.vx[around], self.vy[around], self.vz[around]]
+        } else {
+            for k in range(n) {
+                if self.r[k] >= 0.0 {
+                    mc += self.m[k]
+                    c[0] = c[0] + self.m[k] * self.x[k]
+                    c[1] = c[1] + self.m[k] * self.y[k]
+                    c[2] = c[2] + self.m[k] * self.z[k]
+                    c[3] = c[3] + self.m[k] * self.vx[k]
+                    c[4] = c[4] + self.m[k] * self.vy[k]
+                    c[5] = c[5] + self.m[k] * self.vz[k]
+                }
+            }
+            if mc <= 0.0 {
+                __nbody_fail("add_orbit(): no mass to turn around (" + name + ")")
+            }
+            for k in range(6) {
+                c[k] = c[k] / mc
+            }
+        }
+        __nbody_orbit(self.G * (mc + m), a, e, inc, node, peri, f)
+        return self.add3(name, m, c[0] + __nbody_out(0), c[1] + __nbody_out(1), c[2] + __nbody_out(2), c[3] + __nbody_out(3), c[4] + __nbody_out(4), c[5] + __nbody_out(5))
+    }
+
+    // the orbit of the body i around the body j (-1: the center of mass of the bodies before i):
+    // [a, e, inclination, node, pericenter, true anomaly, mean anomaly, period] (angles in degrees)
+    def elements(i: int, j: int) -> list[float] {
+        self.bind()
+        __nbody_elements(i, j, self.G)
+        return [__nbody_out(0), __nbody_out(1), __nbody_out(2), __nbody_out(3), __nbody_out(4), __nbody_out(5), __nbody_out(6), __nbody_out(7)]
+    }
+
+    def semi_major_axis(i: int, j: int) -> float {
+        self.bind()
+        __nbody_elements(i, j, self.G)
+        return __nbody_out(0)
+    }
+
+    def eccentricity(i: int, j: int) -> float {
+        self.bind()
+        __nbody_elements(i, j, self.G)
+        return __nbody_out(1)
+    }
+
+    def inclination(i: int, j: int) -> float {
+        self.bind()
+        __nbody_elements(i, j, self.G)
+        return __nbody_out(2)
+    }
+
+    // the time of one turn (0 when it does not come back: e >= 1)
+    def period(i: int, j: int) -> float {
+        self.bind()
+        __nbody_elements(i, j, self.G)
+        return __nbody_out(7)
     }
 }
 
@@ -245,5 +357,52 @@ def G() -> float {
 
 // an empty simulation; g: the constant of gravitation in the units chosen (1.0, or nbody.G() in SI)
 def simulation(g: float) -> Simulation {
-    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0)
+    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9)
+}
+
+// V0.68: the constant of gravitation in astronomical units, solar masses and years of 365.25 days:
+// GM of the Sun 1.32712440041e20 m^3/s^2 (IAU 2009, TDB), 1 au = 149597870700 m (IAU 2012)
+def G_solar() -> float {
+    return 39.476926421093573
+}
+
+// an empty simulation in au, solar masses and years, with IAS15
+def simulation_solar() -> Simulation {
+    let s: Simulation = simulation(G_solar())
+    s.time_unit = "an"
+    s.length_unit = "UA"
+    s.integrator = "ias15"
+    return s
+}
+
+// the true anomaly (degrees) for the mean anomaly M (degrees): Kepler's equation
+def true_anomaly(M: float, e: float) -> float {
+    return __nbody_anomaly(M, e)
+}
+
+// the Sun and the eight planets on January 1st, 2000 at 12:00 (J2000), around the center of mass, in
+// the plane of the ecliptic: the elements of JPL valid from 1800 to 2050 (E. M. Standish, "Keplerian
+// elements for approximate positions of the major planets"), the masses of the IAU (2009); the Earth
+// is the Earth and the Moon together.  Approximate places (to some minutes of arc), for real dynamics.
+def solar_system() -> Simulation {
+    let s: Simulation = simulation_solar()
+    let soleil: int = s.add("Soleil", 1.0, 0.0, 0.0, 0.0, 0.0)
+    s.radius(soleil, 0.00465047)
+    s.color(soleil, "#fdd835")
+    let noms: list[string] = ["Mercure", "Vénus", "Terre", "Mars", "Jupiter", "Saturne", "Uranus", "Neptune"]
+    let rapports: list[float] = [6023600.0, 408523.71, 328900.5614, 3098708.0, 1047.3486, 3497.898, 22902.98, 19412.24]
+    let a: list[float] = [0.38709927, 0.72333566, 1.00000261, 1.52371034, 5.20288700, 9.53667594, 19.18916464, 30.06992276]
+    let e: list[float] = [0.20563593, 0.00677672, 0.01671123, 0.09339410, 0.04838624, 0.05386179, 0.04725744, 0.00859048]
+    let inc: list[float] = [7.00497902, 3.39467605, -0.00001531, 1.84969142, 1.30439695, 2.48599187, 0.77263783, 1.77004347]
+    let L: list[float] = [252.25032350, 181.97909950, 100.46457166, -4.55343205, 34.39644051, 49.95424423, 313.23810451, -55.12002969]
+    let varpi: list[float] = [77.45779628, 131.60246718, 102.93768193, -23.94362959, 14.72847983, 92.59887831, 170.95427630, 44.96476227]
+    let node: list[float] = [48.33076593, 76.67984255, 0.0, 49.55953891, 100.47390909, 113.66242448, 74.01692503, 131.78422574]
+    let couleurs: list[string] = ["#b0bec5", "#ffe082", "#4fc3f7", "#ff7043", "#ffb74d", "#ffe0b2", "#80deea", "#5c6bc0"]
+    for k in range(8) {
+        let f: float = true_anomaly(L[k] - varpi[k], e[k])
+        let i: int = s.add_orbit(noms[k], 1.0 / rapports[k], soleil, a[k], e[k], inc[k], node[k], varpi[k] - node[k], f)
+        s.color(i, couleurs[k])
+    }
+    s.center()
+    return s
 }
