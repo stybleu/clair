@@ -1,0 +1,10 @@
+date : 2026-11-02T19:38:20Z
+titre : deux amas
+clair : 8a4f397 perf(nbody): fenetre fluide (calcul dans un fil a part), trava
+processeur : aarch64, coeurs : 8
+android : 16
+clang : clang version 21.1.8
+---
+Clair runtime error: gui needs SDL3 (libSDL3.so.0 not found).
+In Termux: pkg install x11-repo && pkg install sdl3 termux-x11-nightly, and the app Termux:X11
+4000 etoiles, viriel au depart 0.97
