@@ -11,6 +11,8 @@
 // The bodies are in the lists of the simulation: s.x[i], s.y[i], s.vx[i], s.m[i]... (a body
 // absorbed by a collision has a mass of 0 and a radius of -1). In SI units: nbody.simulation(nbody.G()).
 //
+// V0.69: s.integrator = "whfast": Wisdom-Holman (as in REBOUND), for planets over millions of years;
+// s.save(path) and nbody.load(path).
 // V0.68: s.integrator = "ias15": the integrator of order 15 with its own time step (as in REBOUND),
 // precise to the last digits even when bodies pass close; s.add_orbit(...) and s.elements(i, j):
 // the orbital elements; nbody.solar_system(): the Sun and the eight planets (JPL), in AU and years.
@@ -110,7 +112,8 @@ Class Simulation {
         return -1
     }
 
-    // the time step (when dt is 0: a five hundredth of the time a pair of bodies takes to fall together)
+    // the time step (when dt is 0: a five hundredth of the time a pair of bodies takes to fall together;
+    // WHFast: a fortieth of the shortest orbit)
     def time_step() -> float {
         if self.dt <= 0.0 {
             self.bind()
@@ -118,7 +121,11 @@ Class Simulation {
             if tau <= 0.0 {
                 return 0.001
             }
-            self.dt = tau / 500.0
+            if self.integrator == "whfast" {
+                self.dt = tau * 2.0 * 3.141592653589793 / 40.0
+            } else {
+                self.dt = tau / 500.0
+            }
         }
         return self.dt
     }
@@ -131,17 +138,24 @@ Class Simulation {
         if self.integrator == "ias15" {
             return f + 4
         }
+        if self.integrator == "whfast" {
+            if self.merge {
+                __nbody_fail("s.merge: WHFast does not merge bodies (s.integrator = \"ias15\" does)")
+            }
+            return f + 8
+        }
         if self.integrator == "yoshida" or (self.integrator == "leapfrog" and self.order == 4) {
             return f + 2
         }
         if self.integrator != "leapfrog" {
-            __nbody_fail("s.integrator: \"leapfrog\", \"yoshida\" or \"ias15\", not \"" + self.integrator + "\"")
+            __nbody_fail("s.integrator: \"leapfrog\", \"yoshida\", \"ias15\" or \"whfast\", not \"" + self.integrator + "\"")
         }
         return f
     }
 
     def ias15() -> bool {
-        return self.flags() >= 4
+        let f: int = self.flags()
+        return f >= 4 and f < 8
     }
 
     // one step of time: gives the number of collisions (IAS15: a step of the length it chooses)
@@ -274,6 +288,23 @@ Class Simulation {
         return 0
     }
 
+    // V0.69: the whole simulation in a text file (nbody.load(path) gives it back, to the last digit)
+    def save(path: string) -> int {
+        self.bind()
+        __nbody_look(self.name, self.colors)
+        __nbody_param(0, self.dt)
+        __nbody_param(1, self.speed)
+        __nbody_param(2, float(self.trail))
+        __nbody_param(3, self.time_scale)
+        __nbody_param(4, self.length_scale)
+        __nbody_param(5, self.G)
+        __nbody_param(6, self.soft)
+        __nbody_param(7, float(self.flags()))
+        __nbody_param(8, self.t)
+        __nbody_param(9, self.epsilon)
+        return __nbody_save(path, self.integrator, self.time_unit, self.length_unit)
+    }
+
     // V0.68: the IAS15 steps done (0), done again because they were too long (1)
     def steps_done(what: int) -> int {
         return int(__nbody_stat(what))
@@ -372,6 +403,32 @@ def simulation_solar() -> Simulation {
     s.time_unit = "an"
     s.length_unit = "UA"
     s.integrator = "ias15"
+    return s
+}
+
+// V0.69: a simulation saved by s.save(path)
+def load(path: string) -> Simulation {
+    let n: int = __nbody_load(path)
+    let s: Simulation = simulation(__nbody_loaded(-1, 0))
+    s.t = __nbody_loaded(-1, 1)
+    s.dt = __nbody_loaded(-1, 2)
+    s.soft = __nbody_loaded(-1, 3)
+    s.epsilon = __nbody_loaded(-1, 4)
+    s.merge = __nbody_loaded(-1, 5) != 0.0
+    s.order = int(__nbody_loaded(-1, 6))
+    s.speed = __nbody_loaded(-1, 7)
+    s.trail = int(__nbody_loaded(-1, 8))
+    s.time_scale = __nbody_loaded(-1, 9)
+    s.length_scale = __nbody_loaded(-1, 10)
+    s.integrator = __nbody_loaded_text(-1)
+    s.time_unit = __nbody_loaded_text(-2)
+    s.length_unit = __nbody_loaded_text(-3)
+    for i in range(n) {
+        s.add3(__nbody_loaded_text(i), __nbody_loaded(i, 0), __nbody_loaded(i, 1), __nbody_loaded(i, 2), __nbody_loaded(i, 3), __nbody_loaded(i, 4), __nbody_loaded(i, 5), __nbody_loaded(i, 6))
+        s.r[i] = __nbody_loaded(i, 7)
+        s.colors[i] = int(__nbody_loaded(i, 8))
+    }
+    s.flags()
     return s
 }
 

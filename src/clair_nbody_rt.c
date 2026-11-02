@@ -1,6 +1,7 @@
 /*
  * V0.66: the module nbody (import nbody): N bodies pulled by Newton's gravity.
  * V0.68: IAS15 (s.integrator = "ias15"), the orbital elements, the solar system.
+ * V0.69: WHFast (s.integrator = "whfast"), s.save() and nbody.load().
  *
  * Copied into the C of the programs that import nbody (tools/embed_file.cmake), after the
  * runtime of gui (nbody imports gui: the window of s.show() is the window of gui).
@@ -131,9 +132,12 @@ static int64_t clair_nbody_collide(void) {
     return hits;
 }
 
-/* n steps of h; flags: 1 collisions, 2 Yoshida's fourth order. Gives the number of collisions. */
+static int64_t clair_nbody_whfast(double h, int64_t steps, double G, double soft);
+
+/* n steps of h; flags: 1 collisions, 2 Yoshida's fourth order, 8 WHFast (V0.69). Gives the number of collisions. */
 static int64_t clair_nbody_step(double h, int64_t steps, double G, double soft, int64_t flags) {
     if (!clair_nb.m) clair_nbody_die("no simulation");
+    if (flags & 8) return clair_nbody_whfast(h, steps, G, soft);
     double eps2 = soft * soft;
     int64_t hits = 0;
     static const double w1 = 1.3512071919596578, w0 = -1.7024143839193153;     /* 1/(2-2^(1/3)), -2^(1/3)/(2-2^(1/3)) */
@@ -584,6 +588,248 @@ static int64_t clair_nbody_ias15(double duration, double G, double soft, int64_t
     return clair_ias_run(duration, G, soft, flags, epsilon, dt, 0);
 }
 
+/* ---- V0.69: WHFast, the symplectic integrator of Wisdom and Holman (s.integrator = "whfast") ----
+ *
+ * After Wisdom & Holman (1991), "Symplectic maps for the N-body problem", AJ 102, 1528, and Rein &
+ * Tamayo (2015), "WHFast: a fast and unbiased implementation of a symplectic Wisdom-Holman integrator
+ * for long-term gravitational simulations", MNRAS 452, 376.  Written here from the articles and from
+ * Danby, "Fundamentals of Celestial Mechanics" (universal variables); REBOUND (GPL) was only used to
+ * compare the results.
+ *
+ * For a dominant body (the first one) and bodies that turn around it: in Jacobi coordinates (each body
+ * from the center of mass of those before it), each body follows its own Kepler orbit exactly (the
+ * drift), and the pulls of the bodies on one another are added as kicks between the drifts:
+ * half a drift, a kick, a drift, a kick, ... half a drift.  The energy does not drift away, even over
+ * millions of orbits; the error is about (mass of the planets / mass of the star) x (dt / period)^2.
+ * The step is fixed (s.dt): a twentieth of the shortest orbit or less.
+ */
+
+static struct {
+    size_t cap, n;                                   /* the bodies still there, in order */
+    size_t *idx;
+    double *jx, *jv, *ja, *eta;                      /* Jacobi positions, velocities, accelerations; masses up to i */
+} clair_wh;
+
+/* c0 .. c3 of Stumpff for z: c0 = cos(sqrt z), c1 = sin(sqrt z) / sqrt z, ... (any sign of z):
+   z is divided by 4 until small, the series is summed, then doubled back (Danby) */
+static void clair_wh_stumpff(double z, double c[4]) {
+    int k = 0;
+    while (fabs(z) > 0.1) { z /= 4; k++; }
+    /* c2 = sum (-z)^j / (2j+2)!, c3 = sum (-z)^j / (2j+3)! */
+    double c2 = 1.0 / 2, c3 = 1.0 / 6, term2 = c2, term3 = c3;
+    for (int j = 1; j < 12; j++) {
+        term2 *= -z / ((2.0 * j + 1) * (2.0 * j + 2));
+        term3 *= -z / ((2.0 * j + 2) * (2.0 * j + 3));
+        c2 += term2;
+        c3 += term3;
+    }
+    double c1 = 1 - z * c3, c0 = 1 - z * c2;
+    for (; k > 0; k--) {                             /* c(4z) from c(z) */
+        c3 = (c2 + c0 * c3) / 4;
+        c2 = c1 * c1 / 2;
+        c1 = c0 * c1;
+        c0 = 2 * c0 * c0 - 1;
+    }
+    c[0] = c0; c[1] = c1; c[2] = c2; c[3] = c3;
+}
+
+/* the Kepler orbit for mu = G M: the place x and the speed v after the time dt (in place) */
+static void clair_wh_kepler(double *x, double *v, double mu, double dt) {
+    double r0 = sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    if (!(r0 > 0) || mu == 0) {                      /* nothing pulls it: a straight line */
+        for (int k = 0; k < 3; k++) x[k] += dt * v[k];
+        return;
+    }
+    double v2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    double beta = 2 * mu / r0 - v2;                  /* mu / a: more than 0 for an ellipse */
+    double eta0 = x[0] * v[0] + x[1] * v[1] + x[2] * v[2];
+    double zeta0 = mu - beta * r0;
+    double c[4], G[4], X;
+    /* solve r0 X + eta0 G2 + zeta0 G3 = dt for the universal variable X (G_k = X^k c_k(beta X^2)) */
+    double t = dt;
+    if (beta > 0) {                                  /* a whole number of orbits does not change anything */
+        double period = 2 * 3.141592653589793238 * mu / (beta * sqrt(beta));
+        if (fabs(t) > period) t = fmod(t, period);
+        X = t / r0 * (1 - t * eta0 / (2 * r0 * r0));
+    } else {
+        X = t / r0;
+    }
+    int ok = 0;
+    double last = NAN, before = NAN;
+    for (int it = 0; it < 50; it++) {                /* Newton, then Laguerre-Conway if it wanders */
+        clair_wh_stumpff(beta * X * X, c);
+        G[0] = c[0]; G[1] = X * c[1]; G[2] = X * X * c[2]; G[3] = X * X * X * c[3];
+        double F = r0 * X + eta0 * G[2] + zeta0 * G[3] - t;
+        double F1 = r0 + eta0 * G[1] + zeta0 * G[2];
+        double F2 = eta0 * G[0] + zeta0 * G[1];
+        double Xn;
+        if (it < 8) Xn = X - F / F1;
+        else {
+            double d = sqrt(fabs(16 * F1 * F1 - 20 * F * F2));
+            Xn = X - 5 * F / (F1 + (F1 >= 0 ? d : -d));
+        }
+        if (!isfinite(Xn)) break;
+        before = last;
+        last = X;
+        X = Xn;
+        if (X == last || X == before) { ok = 1; break; }
+    }
+    if (!ok) {                                       /* bisection: slow but sure (F grows with X) */
+        double lo = 0, hi = 0, step = t / r0;
+        double sg = t >= 0 ? 1 : -1;
+        if (step == 0) return;
+        hi = step;
+        for (int it = 0; it < 200; it++) {
+            clair_wh_stumpff(beta * hi * hi, c);
+            double F = r0 * hi + eta0 * hi * hi * c[2] + zeta0 * hi * hi * hi * c[3] - t;
+            if (sg * F >= 0) break;
+            lo = hi;
+            hi *= 2;
+        }
+        for (int it = 0; it < 200; it++) {
+            double mid = (lo + hi) / 2;
+            if (mid == lo || mid == hi) break;
+            clair_wh_stumpff(beta * mid * mid, c);
+            double F = r0 * mid + eta0 * mid * mid * c[2] + zeta0 * mid * mid * mid * c[3] - t;
+            if (sg * F >= 0) hi = mid; else lo = mid;
+        }
+        X = (lo + hi) / 2;
+    }
+    clair_wh_stumpff(beta * X * X, c);
+    G[0] = c[0]; G[1] = X * c[1]; G[2] = X * X * c[2]; G[3] = X * X * X * c[3];
+    double r = r0 + eta0 * G[1] + zeta0 * G[2];
+    double fm1 = -mu * G[2] / r0;                   /* f - 1 */
+    double g = r0 * G[1] + eta0 * G[2];
+    double fd = -mu * G[1] / (r0 * r);
+    double gdm1 = -mu * G[2] / r;                   /* g' - 1 */
+    double nx[3], nv[3];
+    for (int k = 0; k < 3; k++) {
+        nx[k] = x[k] + (fm1 * x[k] + g * v[k]);
+        nv[k] = v[k] + (fd * x[k] + gdm1 * v[k]);
+    }
+    for (int k = 0; k < 3; k++) { x[k] = nx[k]; v[k] = nv[k]; }
+}
+
+/* the bodies still there, and their Jacobi coordinates */
+static void clair_wh_to_jacobi(void) {
+    size_t n = clair_nbody_n();
+    if (n > clair_wh.cap) {
+        size_t cap = n < 16 ? 16 : n;
+        size_t *idx = realloc(clair_wh.idx, cap * sizeof(size_t));
+        if (idx) clair_wh.idx = idx;
+        double *a = realloc(clair_wh.jx, 3 * cap * sizeof(double));
+        if (a) clair_wh.jx = a;
+        double *b = realloc(clair_wh.jv, 3 * cap * sizeof(double));
+        if (b) clair_wh.jv = b;
+        double *c = realloc(clair_wh.ja, 3 * cap * sizeof(double));
+        if (c) clair_wh.ja = c;
+        double *e = realloc(clair_wh.eta, cap * sizeof(double));
+        if (e) clair_wh.eta = e;
+        if (!idx || !a || !b || !c || !e) clair_nbody_die("out of memory");
+        clair_wh.cap = cap;
+    }
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    const double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    size_t q = 0;
+    for (size_t i = 0; i < n; i++) if (r[i] >= 0) clair_wh.idx[q++] = i;
+    clair_wh.n = q;
+    if (q == 0) return;
+    if (!(m[clair_wh.idx[0]] > 0)) clair_nbody_die("WHFast: the first body is the one the others turn around: it needs a mass");
+    double eta = 0, s[6] = { 0 };
+    for (size_t k = 0; k < q; k++) {
+        size_t i = clair_wh.idx[k];
+        double p[6] = { x[i], y[i], z[i], vx[i], vy[i], vz[i] };
+        if (k > 0)
+            for (int d = 0; d < 3; d++) { clair_wh.jx[3 * k + d] = p[d] - s[d] / eta; clair_wh.jv[3 * k + d] = p[3 + d] - s[3 + d] / eta; }
+        for (int d = 0; d < 6; d++) s[d] += m[i] * p[d];
+        eta += m[i];
+        clair_wh.eta[k] = eta;
+    }
+    for (int d = 0; d < 3; d++) { clair_wh.jx[d] = s[d] / eta; clair_wh.jv[d] = s[3 + d] / eta; }
+}
+
+/* back to the places (what = 0) or the speeds (what = 1) of the bodies */
+static void clair_wh_from_jacobi(int what) {
+    size_t q = clair_wh.n;
+    if (q == 0) return;
+    const double *m = CLAIR_NB(m);
+    double *out[3] = { what ? CLAIR_NB(vx) : CLAIR_NB(x), what ? CLAIR_NB(vy) : CLAIR_NB(y), what ? CLAIR_NB(vz) : CLAIR_NB(z) };
+    const double *J = what ? clair_wh.jv : clair_wh.jx;
+    double s[3];
+    for (int d = 0; d < 3; d++) s[d] = J[d] * clair_wh.eta[q - 1];        /* the sum of m x of all the bodies */
+    for (size_t k = q - 1; k > 0; k--) {
+        size_t i = clair_wh.idx[k];
+        for (int d = 0; d < 3; d++) {
+            double R = (s[d] - m[i] * J[3 * k + d]) / clair_wh.eta[k];    /* the center of mass of the bodies before */
+            double xi = J[3 * k + d] + R;
+            out[d][i] = xi;
+            s[d] -= m[i] * xi;
+        }
+    }
+    size_t i0 = clair_wh.idx[0];
+    for (int d = 0; d < 3; d++) out[d][i0] = s[d] / m[i0];
+}
+
+static void clair_wh_drift(double G, double h) {
+    for (size_t k = 1; k < clair_wh.n; k++) clair_wh_kepler(clair_wh.jx + 3 * k, clair_wh.jv + 3 * k, G * clair_wh.eta[k], h);
+    for (int d = 0; d < 3; d++) clair_wh.jx[d] += h * clair_wh.jv[d];    /* the center of mass goes straight */
+}
+
+/* the kick: the pulls of the bodies on one another, but not what the Kepler orbits already do */
+static void clair_wh_kick(double G, double eps2, double h) {
+    size_t q = clair_wh.n;
+    if (q < 2) return;
+    clair_wh_from_jacobi(0);
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m);
+    double *a = clair_wh.ja;
+    for (size_t k = 0; k < 3 * q; k++) a[k] = 0;
+    for (size_t k = 0; k < q; k++) {                 /* every pair but the first one (its Kepler orbit) */
+        size_t i = clair_wh.idx[k];
+        for (size_t l = k + 1; l < q; l++) {
+            if (k == 0 && l == 1) continue;
+            size_t j = clair_wh.idx[l];
+            double dx = x[j] - x[i], dy = y[j] - y[i], dz = z[j] - z[i];
+            double d2 = dx * dx + dy * dy + dz * dz + eps2;
+            if (d2 == 0) continue;
+            double inv = 1.0 / (d2 * sqrt(d2));
+            a[3 * k] += G * m[j] * inv * dx; a[3 * k + 1] += G * m[j] * inv * dy; a[3 * k + 2] += G * m[j] * inv * dz;
+            a[3 * l] -= G * m[i] * inv * dx; a[3 * l + 1] -= G * m[i] * inv * dy; a[3 * l + 2] -= G * m[i] * inv * dz;
+        }
+    }
+    double s[3] = { 0, 0, 0 };                       /* Jacobi accelerations: minus that of the center of mass before */
+    for (size_t k = 0; k < q; k++) {
+        size_t i = clair_wh.idx[k];
+        double aj[3];
+        for (int d = 0; d < 3; d++) aj[d] = k > 0 ? a[3 * k + d] - s[d] / clair_wh.eta[k - 1] : 0;
+        for (int d = 0; d < 3; d++) s[d] += m[i] * a[3 * k + d];
+        if (k == 0) continue;
+        double add = 0;
+        if (k > 1) {                                 /* what the Kepler orbit of this body counts, given back */
+            const double *r = clair_wh.jx + 3 * k;
+            double r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+            add = G * clair_wh.eta[k] / (r2 * sqrt(r2));
+        }
+        for (int d = 0; d < 3; d++) clair_wh.jv[3 * k + d] += h * (aj[d] + add * clair_wh.jx[3 * k + d]);
+    }
+}
+
+/* steps of h with WHFast: half a drift, then kick and drift, ..., the last drift by half */
+static int64_t clair_nbody_whfast(double h, int64_t steps, double G, double soft) {
+    if (!clair_nb.m) clair_nbody_die("no simulation");
+    if (steps <= 0) return 0;
+    double eps2 = soft * soft;
+    clair_wh_to_jacobi();
+    if (clair_wh.n == 0) return 0;
+    clair_wh_drift(G, h / 2);
+    for (int64_t st = 0; st < steps; st++) {
+        clair_wh_kick(G, eps2, h);
+        clair_wh_drift(G, st == steps - 1 ? h / 2 : h);
+    }
+    clair_wh_from_jacobi(0);
+    clair_wh_from_jacobi(1);
+    return 0;
+}
+
 /* ---- V0.68: the orbital elements ---- */
 
 #define CLAIR_NB_DEG (3.141592653589793238 / 180)
@@ -703,6 +949,153 @@ static int64_t clair_nbody_elements(int64_t i, int64_t j, double G) {
     clair_ias.out[6] = e < 1 ? clair_nbody_angle(Mean) : Mean / CLAIR_NB_DEG;
     clair_ias.out[7] = period; clair_ias.out[8] = rn;
     return 0;
+}
+
+/* ---- V0.69: s.save(path) and nbody.load(path): a simulation in a text file ----
+ * One "key value" per line, then one line per body: name <tab> m x y z vx vy vz r color.  The numbers
+ * are written with 17 digits: read back, they are the same doubles, to the last bit.  A run that goes on
+ * from a file gives the same numbers as a run that did not stop (leapfrog, Yoshida, WHFast; IAS15 starts
+ * its predictions again, which changes the last digits).
+ */
+
+static const char *clair_nbody_name(size_t i);
+
+static int64_t clair_nbody_save(const char *path, const char *integrator, const char *tunit, const char *lunit) {
+    if (!clair_nb.m) clair_nbody_die("no simulation");
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "Clair runtime error: nbody: s.save(): cannot write %s\n", path); exit(EXIT_FAILURE); }
+    size_t n = clair_nbody_n();
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    const double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    fprintf(f, "# Clair nbody 1\n");
+    fprintf(f, "G %.17g\nt %.17g\ndt %.17g\nsoft %.17g\nepsilon %.17g\n", clair_nb.G, clair_nb.t, clair_nb.dt, clair_nb.soft, clair_nb.epsilon);
+    fprintf(f, "integrator %s\nmerge %d\norder %d\n", integrator, clair_nb.flags & 1, (clair_nb.flags & 2) ? 4 : 2);
+    fprintf(f, "speed %.17g\ntrail %.17g\n", clair_nb.speed, clair_nb.trail);
+    fprintf(f, "time_unit %s\ntime_scale %.17g\nlength_unit %s\nlength_scale %.17g\n", tunit, clair_nb.tscale, lunit, clair_nb.lscale);
+    fprintf(f, "bodies %zu\n", n);
+    for (size_t i = 0; i < n; i++) {
+        for (const char *c = clair_nbody_name(i); *c; c++) fputc(*c == '\t' || *c == '\n' || *c == '\r' ? ' ' : *c, f);
+        int64_t col = -1;
+        if (clair_nb.colors && i < clair_nb.colors->len) col = ((int64_t *)clair_nb.colors->data)[i];
+        fprintf(f, "\t%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %lld\n", m[i], x[i], y[i], z[i], vx[i], vy[i], vz[i], r[i], (long long)col);
+    }
+    if (fclose(f) != 0) { fprintf(stderr, "Clair runtime error: nbody: s.save(): cannot write %s\n", path); exit(EXIT_FAILURE); }
+    return (int64_t)n;
+}
+
+static struct {
+    double p[11];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale */
+    char text[3][64];                                /* integrator, time unit, length unit */
+    size_t n, cap;
+    double *v;                                       /* 9 numbers per body */
+    char **names;
+} clair_nl;
+
+static _Noreturn void clair_nbody_load_fail(const char *path, long line, const char *what) {
+    fprintf(stderr, "Clair runtime error: nbody: nbody.load(): %s, line %ld: %s\n", path, line, what);
+    exit(EXIT_FAILURE);
+}
+
+/* reads the file; gives the number of bodies (then __nbody_loaded and __nbody_loaded_text) */
+static int64_t clair_nbody_load(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "Clair runtime error: nbody: nbody.load(): cannot read %s\n", path); exit(EXIT_FAILURE); }
+    for (size_t i = 0; i < clair_nl.n; i++) free(clair_nl.names[i]);
+    clair_nl.n = 0;
+    static const char *keys[11] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale" };
+    static const double defaults[11] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1 };
+    memcpy(clair_nl.p, defaults, sizeof(defaults));
+    snprintf(clair_nl.text[0], 64, "leapfrog");
+    clair_nl.text[1][0] = clair_nl.text[2][0] = '\0';
+    char line[4096];
+    long ln = 0, want = -1;
+    int header = 0;
+    while (fgets(line, sizeof(line), f)) {
+        ln++;
+        size_t len = strlen(line);
+        if (len && line[len - 1] != '\n' && !feof(f)) clair_nbody_load_fail(path, ln, "line too long");
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        if (ln == 1) {
+            if (strncmp(line, "# Clair nbody", 13) != 0) clair_nbody_load_fail(path, ln, "not a file of s.save()");
+            header = 1;
+            continue;
+        }
+        if (len == 0) continue;
+        if (want < 0) {                              /* "key value" */
+            char *sp = strchr(line, ' ');
+            const char *val = sp ? sp + 1 : "";
+            if (sp) *sp = '\0';
+            if (strcmp(line, "bodies") == 0) {
+                char *end;
+                long long k = strtoll(val, &end, 10);
+                if (*end || k < 0) clair_nbody_load_fail(path, ln, "bodies: a number");
+                want = k;
+                if ((size_t)want > clair_nl.cap) {
+                    size_t cap = (size_t)want;
+                    double *v = realloc(clair_nl.v, cap * 9 * sizeof(double));
+                    char **nm = v ? realloc(clair_nl.names, cap * sizeof(char *)) : NULL;
+                    if (v) clair_nl.v = v;
+                    if (!v || !nm) clair_nbody_die("out of memory");
+                    clair_nl.names = nm;
+                    clair_nl.cap = cap;
+                }
+                if (want == 0) break;
+                continue;
+            }
+            int found = 0;
+            for (int k = 0; k < 11; k++) {
+                if (strcmp(line, keys[k]) != 0) continue;
+                char *end;
+                clair_nl.p[k] = strtod(val, &end);
+                if (end == val || *end) clair_nbody_load_fail(path, ln, "a number is wanted");
+                found = 1;
+            }
+            const char *tkeys[3] = { "integrator", "time_unit", "length_unit" };
+            for (int k = 0; k < 3; k++) {
+                if (strcmp(line, tkeys[k]) != 0) continue;
+                snprintf(clair_nl.text[k], 64, "%s", val);
+                found = 1;
+            }
+            if (!found) clair_nbody_load_fail(path, ln, "unknown key");
+            continue;
+        }
+        char *tab = strchr(line, '\t');               /* a body */
+        if (!tab) clair_nbody_load_fail(path, ln, "a body: name <tab> m x y z vx vy vz r color");
+        *tab = '\0';
+        char *p = tab + 1, *end;
+        double *v = clair_nl.v + 9 * clair_nl.n;
+        for (int k = 0; k < 9; k++) {
+            v[k] = strtod(p, &end);
+            if (end == p) clair_nbody_load_fail(path, ln, "a body: name <tab> m x y z vx vy vz r color");
+            p = end;
+        }
+        while (*p == ' ') p++;
+        if (*p) clair_nbody_load_fail(path, ln, "a body: too many numbers");
+        char *name = malloc(strlen(line) + 1);
+        if (!name) clair_nbody_die("out of memory");
+        strcpy(name, line);
+        clair_nl.names[clair_nl.n++] = name;
+        if ((long)clair_nl.n == want) break;
+    }
+    fclose(f);
+    if (!header) clair_nbody_load_fail(path, 1, "empty file");
+    if (want < 0 || (long)clair_nl.n != want) clair_nbody_load_fail(path, ln, "fewer bodies than announced");
+    return (int64_t)clair_nl.n;
+}
+
+/* body i, number k (0 m, 1-3 x y z, 4-6 vx vy vz, 7 r, 8 color); i = -1: the settings */
+static double clair_nbody_loaded(int64_t i, int64_t k) {
+    if (i < 0) return k >= 0 && k < 11 ? clair_nl.p[k] : 0;
+    if ((size_t)i >= clair_nl.n || k < 0 || k > 8) return 0;
+    return clair_nl.v[9 * i + k];
+}
+
+/* the name of body i; -1 the integrator, -2 the time unit, -3 the length unit */
+static const char *clair_nbody_loaded_text(int64_t i) {
+    const char *s = i >= 0 ? ((size_t)i < clair_nl.n ? clair_nl.names[i] : "") : i >= -3 ? clair_nl.text[-i - 1] : "";
+    char *d = clair_rt_arena_alloc(strlen(s) + 1);
+    strcpy(d, s);
+    return d;
 }
 
 /* ---- s.show(): the window ---- */

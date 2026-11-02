@@ -1,0 +1,11 @@
+kepler, grand pas, orbite gardee : oui
+kepler, a l'heure a 1e-7 degre : oui
+hyperbole : oui
+systeme solaire, energie : ecart 1.37e-10 (l'erreur de la methode, bornee)
+comme le calcul en 80 bits a 1e-8 UA : oui
+centre de masse immobile : oui
+demi-grand axe de Jupiter : 5.2014 UA
+pas par defaut : 2.91 jours
+relu au dernier chiffre : oui
+la suite est la meme : oui
+IAS15 repris : oui

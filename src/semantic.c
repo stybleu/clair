@@ -1032,6 +1032,10 @@ static int check_module_call(Semantic *s, AstNode *n) {
         { "__nbody_anomaly", 2, { "float", "float" }, "float" },
         { "__nbody_orbit", 7, { "float", "float", "float", "float", "float", "float", "float" }, "int" },
         { "__nbody_elements", 3, { "int", "int", "float" }, "int" },
+        { "__nbody_save", 4, { "string", "string", "string", "string" }, "int" },                   /* V0.69 */
+        { "__nbody_load", 1, { "string" }, "int" },
+        { "__nbody_loaded", 2, { "int", "int" }, "float" },
+        { "__nbody_loaded_text", 1, { "int" }, "string" },
         { NULL, 0, { NULL }, NULL }
     };
     if (!n->file) return 0;
