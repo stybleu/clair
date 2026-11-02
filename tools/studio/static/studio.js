@@ -1,4 +1,4 @@
-// Clair Studio (V0.58 a V0.67) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.66) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -22,7 +22,7 @@
     "and", "or", "not", "true", "false", "break", "continue", "print", "absolue", "range", "test", "assert", "assert_equal"]);
   const TYPES = new Set(["int", "float", "string", "bool", "list", "dict", "measure", "bigint", "bigfloat", "certfloat",
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "float32", "matrix", "ptr", "uint1024",
-    "Request", "Response", "RunResult", "Process", "Window", "Color", "Event", "Image", "Simulation", "Control"]);
+    "Request", "Response", "RunResult", "Process", "Window", "Color", "Event", "Image", "Simulation"]);
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   function colorier(ligne) {
@@ -333,27 +333,10 @@
 
   async function ouvrir(nom) {
     await enregistrer();
-    if (window.ClairDesigner) await ClairDesigner.sauver();
     const r = await api("/api/lire/" + enc(nom));
     if (!r.ok) return false;
-    const texte = await r.text();
-    // V0.67 : une fenetre (.ui) s'ouvre dans le designer
-    if (window.ClairDesigner && /\.ui$/.test(nom)) {
-      if (!(await ClairDesigner.prendre(nom, texte))) return false;
-      fichier = nom;
-      code.value = "";
-      sauve = true;
-      montrerDiag([]);
-      cacherAide();
-      $("nom-fichier").textContent = nom;
-      $("etat-sauve").textContent = "";
-      document.title = nom + " · Clair Studio";
-      try { localStorage.setItem("clair-studio-fichier", nom); } catch (e) { /* rien */ }
-      return true;
-    }
-    if (window.ClairDesigner) ClairDesigner.cacher();
     fichier = nom;
-    code.value = texte;
+    code.value = await r.text();
     sauve = true;
     lignesErr = new Set();
     lignesVerif = new Map();
@@ -368,7 +351,6 @@
     dessiner();
     verifier();
     majLignesGit();
-    if (window.ClairDesigner) ClairDesigner.apresOuverture(nom, code.value);
     return true;
   }
 
@@ -426,7 +408,7 @@
 
   // ---- lancer ----
   // V0.61 : plot.show() ecrit une ligne ESC[clair:plot NOM] : la figure prend sa place dans la console
-  const MARQUE = /\x1b\[clair:(plot|anim|image|app) ([^\]\n]*)\]\n?/;     // V0.67 : app, l'adresse d'une application
+  const MARQUE = /\x1b\[clair:(plot|anim|image) ([^\]\n]*)\]\n?/;
   function ecrireSortie(texte, classe, cible) {
     cible = cible || sortie;
     const bas = cible.scrollTop + cible.clientHeight >= cible.scrollHeight - 4;
@@ -461,17 +443,6 @@
     const boite = document.createElement("div");
     boite.className = "figure";
     cible.appendChild(boite);
-    if (sorte === "app") {                 // V0.67 : forms.run() : un bouton pour ouvrir l'application
-      if (!/^http:\/\/127\.0\.0\.1:\d+\/$/.test(nom)) return;
-      boite.classList.add("appli");
-      const a = document.createElement("a");
-      a.href = nom;
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.textContent = "Ouvrir l'application ↗";
-      boite.appendChild(a);
-      return;
-    }
     if (sorte === "image") {
       const img = document.createElement("img");
       img.src = "/api/image/" + enc(joindre(dossierDe(fichierLance), nom));
@@ -603,24 +574,6 @@
 
   function etat(texte) { $("etat").textContent = texte; }
 
-  // V0.67 : ce que le designer (designer.js) emploie de l'editeur
-  window.ClairStudio = {
-    api, enc, joindre, ouvrir,
-    fichier: () => fichier,
-    texte: () => code.value,
-    remplacer(t) { code.value = t; sauve = true; dessiner(); verifier(); },
-    aLaLigne(n) {
-      const tout = code.value.split("\n");
-      let pos = 0;
-      for (let k = 0; k < n - 1 && k < tout.length; k++) pos += tout[k].length + 1;
-      pos += (tout[n - 1] || "").length;
-      code.focus();
-      code.setSelectionRange(pos, pos);
-      code.scrollTop = Math.max(0, (n - 4) * hauteur);
-      dessiner();
-    },
-  };
-
   function boutons(tourne) {
     $("b-lancer").disabled = tourne;
     $("b-tester").disabled = tourne;
@@ -646,11 +599,7 @@
     apercuCoupe = false;
     $("b-sauver-csv").hidden = true;
     enAttente = "";
-    let cible = fichier;                 // V0.67 : le dessin et le code d'une fenetre remis d'accord, puis son programme
-    if (window.ClairDesigner) {
-      try { cible = await ClairDesigner.avantLancement(fichier); } catch (e) { ecrireSortie(e.message + "\n", "err"); }
-    }
-    fichierLance = cible;
+    fichierLance = fichier;
     lignesErr = new Set();
     $("console").hidden = false;
     etat("Compilation…");
@@ -658,7 +607,7 @@
     $("b-tester").disabled = true;
     let r;
     try {
-      r = await (await api(chemin + enc(cible), "")).json();
+      r = await (await api(chemin + enc(fichier), "")).json();
     } catch (e) {
       etat("Le serveur ne répond pas");
       boutons(false);
@@ -963,7 +912,7 @@
     return m ? m.analyse : null;
   }
   async function chargerModule(nom) {
-    const integre = ["os", "web", "plot", "gui", "nbody", "forms"].includes(nom);
+    const integre = ["os", "web", "plot", "gui", "nbody"].includes(nom);
     const m = modules.get(nom) || { analyse: null };
     m.enCours = true;
     m.quand = performance.now();
@@ -1556,7 +1505,6 @@
   function icone(f) {
     if (f.dossier) return "📁";
     if (/\.cl$/.test(f.nom)) return "◆";
-    if (/\.ui$/.test(f.nom)) return "▣";
     if (IMAGES.test(f.nom)) return "🖼";
     return "📄";
   }
@@ -1764,13 +1712,6 @@
     } finally {
       bouton.disabled = false;
     }
-  });
-
-  // V0.67 : une nouvelle fenetre (une application), dessinee dans le designer
-  $("b-nouvelle-fenetre").addEventListener("click", async () => {
-    if (!window.ClairDesigner) return;
-    const ch = await ClairDesigner.nouvelle(dossierCourant);
-    if (ch && (await ouvrir(ch))) fermerTiroir();
   });
 
   $("b-nouveau-dossier").addEventListener("click", async () => {

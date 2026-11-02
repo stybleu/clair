@@ -146,14 +146,4 @@ add_custom_command(
     DEPENDS src/clair_nbody_rt.c tools/embed_file.cmake
     COMMENT "Embedding the module nbody (C part)")
 target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_nbody_runtime.h)
-# V0.67: the module forms (Clair only: no C part)
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_forms_module.h
-    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR} -DRAW=1
-            "-DIN=clair_forms.cl" -DNAME=clair_forms_module_text
-            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_forms_module.h
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
-    DEPENDS src/clair_forms.cl tools/embed_file.cmake
-    COMMENT "Embedding the module forms")
-target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_forms_module.h)
 target_include_directories(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
