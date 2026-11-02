@@ -1,0 +1,16 @@
+date : 2026-11-02T21:37:38Z
+titre : cometes
+clair : 563f2d1 feat(nbody): MERCURIUS, l'integrateur hybride de REBOUND (WHFa
+processeur : aarch64, coeurs : 4
+android : 16
+clang : clang version 21.1.8
+---
+t = 56.97 ans, 1436 pas avec rencontre
+comete 1 : a = 4.563 UA (3.5 au depart)
+comete 2 : a = 3.112 UA (3.5 au depart)
+comete 3 : a = 4.118 UA (3.5 au depart)
+comete 4 : a = 5.529 UA (3.5 au depart)
+comete 5 : a = 4.438 UA (3.5 au depart)
+comete 6 : a = 4.512 UA (3.5 au depart)
+comete 7 : a = 18.900 UA (3.5 au depart)
+comete 8 : a = 5.908 UA (3.5 au depart)
