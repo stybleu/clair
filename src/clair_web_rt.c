@@ -376,9 +376,7 @@ static int clair_web_read(int fd) {
 
 static void clair_web_dict_put(ClairDict d, const char *k, size_t kn, const char *v, size_t vn) {
     char *key = clair_web_dup(k, kn);
-    for (size_t i = 0; i < d->len; i++) {
-        if (strcmp(d->keys[i], key) == 0) { free(key); return; }       /* the first one wins, like Flask */
-    }
+    if (clair_rt_dict_find(d, key) >= 0) { free(key); return; }       /* the first one wins, like Flask */
     const char **slot = clair_rt_dict_set_slot(d, key);
     *slot = clair_web_text_of(v, vn);
     free(key);
@@ -1921,6 +1919,7 @@ static void clair_web_free_containers(void) {
         for (size_t k = 0; k < d->len; k++) free((char *)d->keys[k]);
         free(d->keys);
         free(d->values);
+        free(d->slots);             /* V0.64 */
         free(d);
     }
 #ifdef CLAIR_WEB_HAS_LISTS

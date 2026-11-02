@@ -64,7 +64,10 @@ try {
   <section class="console" id="console" hidden>
     <div class="console-tete">
       <span id="etat">Prêt</span>
-      <button id="b-fermer" class="icone petit" aria-label="Fermer la console">✕</button>
+      <span class="boutons">
+        <button id="b-copier" class="texte-petit" title="Copier tout ce que le programme a écrit">Copier</button>
+        <button id="b-fermer" class="icone petit" aria-label="Fermer la console">✕</button>
+      </span>
     </div>
     <pre id="sortie"></pre>
     <form id="f-entree" class="entree" hidden>

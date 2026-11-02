@@ -1,4 +1,4 @@
-// Clair Studio (V0.58 a V0.62) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.64) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -568,6 +568,29 @@
   $("b-tester").addEventListener("click", tester);
   $("b-arreter").addEventListener("click", () => { if (enCours) api("/api/arreter/" + enCours, ""); });
   $("b-fermer").addEventListener("click", () => { if (!enCours) $("console").hidden = true; });
+
+  // V0.64 : tout ce que le programme a ecrit (sans les figures), dans le presse-papiers
+  $("b-copier").addEventListener("click", async () => {
+    const copie = sortie.cloneNode(true);
+    for (const f of copie.querySelectorAll(".figure")) f.replaceWith("[figure]\n");
+    for (const t of copie.querySelectorAll(".test")) t.append("\n");
+    const texte = (($("etat").textContent || "") + "\n" + copie.textContent).trim() + "\n";
+    let ok = false;
+    try { await navigator.clipboard.writeText(texte); ok = true; } catch (e) { /* plus bas */ }
+    if (!ok) {                     // sans presse-papiers moderne : la vieille methode
+      const zone = document.createElement("textarea");
+      zone.value = texte;
+      zone.style.position = "fixed";
+      zone.style.opacity = "0";
+      document.body.appendChild(zone);
+      zone.select();
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      zone.remove();
+    }
+    const b = $("b-copier");
+    b.textContent = ok ? "Copié ✓" : "Échec";
+    setTimeout(() => { b.textContent = "Copier"; }, 1500);
+  });
   $("f-entree").addEventListener("submit", (e) => {
     e.preventDefault();
     if (!enCours) return;
