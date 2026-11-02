@@ -1,0 +1,40 @@
+date : 2026-11-02T21:32:35Z
+titre : mise a jour V0.71 (ok)
+clair : 563f2d1 feat(nbody): MERCURIUS, l'integrateur hybride de REBOUND (WHFa
+processeur : aarch64, coeurs : 8
+android : 16
+clang : clang version 21.1.8
+sdl3 : libSDL3.so
+--- resultat
+V0.71 APPLIQUEE, COMPILATION OK
+tests reussis : 278
+nbody_mercurius.cl : OK -> MERCURIUS : systeme solaire mille
+gui_module.cl : OK -> fenetre, rectangle, disque, anneau, li
+ TOUS LES TESTS SONT OK
+MERCURIUS, systeme solaire, 1 000 ans : 0.19 s
+MERCURIUS, trois planetes serrees, 1 326 pas : 0.03 s, 1326 pas avec r
+ENVOYE SUR GITHUB : 563f2d1 feat(nbody): MERCURIUS, l'integrateur hybride de REB
+--- erreurs
+--- compilation
+--- tests
+278
+nbody_mercurius.cl : OK -> MERCURIUS : systeme solaire mille ans (comme REBOUND), comete qui frole Jupiter (comme REBOUND et IAS15, ordre 2 ; WHFast se trompe), trois planetes serrees (comme REBOUND), sauve et relu au dernier chiffre, deux simulations ensemble, collisions entre planetes et avec l etoile
+gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre, calcul dans un fil a part (avec MERCURIUS)
+gui_abi.c : OK -> les declarations de SDL3 du module gui sont celles des en-tetes de SDL3
+tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot, sous-dossiers, reglages
+ TOUS LES TESTS SONT OK
+==================================================
+--- vitesse
+arbre, 1000 etoiles : 2.2 ms par pas (tous les coeurs), 4.4 ms (un coeur)
+arbre, 10000 etoiles : 22.9 ms par pas (tous les coeurs), 75.6 ms (un coeur)
+calcul direct, 2000 etoiles : 6.2 ms par pas
+IAS15, systeme solaire, 100 ans : 0.16 s
+WHFast, systeme solaire, 1 000 ans : 0.09 s
+MERCURIUS, systeme solaire, 1 000 ans : 0.19 s
+MERCURIUS, trois planetes serrees, 1 326 pas : 0.03 s, 1326 pas avec rencontre, 12353 pas d'IAS15
+MESA: error: ZINK: failed to choose pdev
+libEGL warning: egl: failed to create dri2 screen
+fenetre, 500 etoiles : 23 images par seconde (60 au plus), 49 pas de calcul par seconde
+MESA: error: ZINK: failed to choose pdev
+libEGL warning: egl: failed to create dri2 screen
+fenetre, 4000 etoiles : 36 images par seconde (60 au plus), 48 pas de calcul par seconde
