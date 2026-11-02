@@ -6,6 +6,17 @@
 <meta name="theme-color" content="#16181d">
 <title>Clair Studio</title>
 <link rel="stylesheet" href="/static/studio.css">
+<script>
+/* V0.62 : le theme et la taille du texte avant le premier affichage (sans eclair blanc) */
+try {
+  var r = JSON.parse(localStorage.getItem("clair-studio-reglages") || "{}");
+  if (r.theme === "clair" || r.theme === "sombre") document.documentElement.setAttribute("data-theme", r.theme);
+  if (r.taille >= 10 && r.taille <= 26) {
+    document.documentElement.style.setProperty("--taille", r.taille + "px");
+    document.documentElement.style.setProperty("--ligne", Math.round(r.taille * 1.5) + "px");
+  }
+} catch (e) {}
+</script>
 </head>
 <body>
 <div id="app">
@@ -66,13 +77,20 @@
 <aside class="tiroir" id="tiroir" hidden>
   <div class="tiroir-tete">
     <strong>Fichiers</strong>
-    <span class="discret" title="{{ dossier }}">{{ dossier }}</span>
+    <nav class="chemin" id="chemin" data-dossier="{{ dossier }}" title="{{ dossier }}" aria-label="Dossier"></nav>
   </div>
   <ul id="liste"></ul>
   <div class="tiroir-pied">
-    <button id="b-nouveau">+ Nouveau</button>
-    <button id="b-renommer">Renommer</button>
-    <button id="b-supprimer" class="danger">Supprimer</button>
+    <button id="b-nouveau">+ Fichier</button>
+    <button id="b-nouveau-dossier">+ Dossier</button>
+  </div>
+  <div class="reglages">
+    <div class="reglage"><span>Thème</span>
+      <div class="segments" id="r-theme"><button data-v="auto">Auto</button><button data-v="clair">Clair</button><button data-v="sombre">Sombre</button></div>
+    </div>
+    <div class="reglage"><span>Taille du texte</span>
+      <div class="segments"><button id="r-moins" aria-label="Texte plus petit">A−</button><span id="r-taille">14</span><button id="r-plus" aria-label="Texte plus grand">A+</button></div>
+    </div>
   </div>
 </aside>
 

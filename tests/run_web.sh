@@ -103,6 +103,15 @@ MP='--LIMITE\r\nContent-Disposition: form-data; name="legende"\r\n\r\nma photo\r
     $C tete /carre/6 | sed 's/Content-Length: [0-9]*/Content-Length: N/'
     $C tete /cadre | grep -c 'X-Frame-Options'
     $C tete /cadre | grep 'X-Frame-Options'
+    echo '### V0.62 : <path:chemin>'
+    $C GET /docs/a.cl | tail -n 1
+    $C GET /docs/sous/dossier/b.cl | tail -n 1
+    $C GET /docs/sous%2Fencode.cl | tail -n 1
+    $C GET /docs/liste | tail -n 1
+    $C GET /docs/v/2/x/y | tail -n 1
+    $C GET /docs/v/deux/x | tail -n 1
+    $C GET /docs | sed -n 1p
+    echo
     echo '### memoire'
     $C repete 300 /boucle/40
     $C GET /boucle/12

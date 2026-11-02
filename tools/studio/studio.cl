@@ -1,4 +1,4 @@
-// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58 a V0.61).
+// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58 a V0.62).
 // Le serveur est ce programme (modules web et os) ; l'editeur s'ouvre dans le navigateur.
 //   sh ~/clair/tools/studio/studio.sh [dossier] [port]
 import web
@@ -63,30 +63,73 @@ def accueil(req: Request) -> Response {
     return web.html(web.page("index.html", {"dossier": dossier()}))
 }
 
+// V0.62 : ce que contient un dossier (?d=sous/dossier, sinon le dossier des programmes) : dossiers puis fichiers
 @web.route("/api/fichiers")
 def fichiers(req: Request) -> Response {
     if not autorise(req) {
         return refus()
     }
+    let sous: string = req.arg("d", "")
+    if sous != "" and not chemin_valide(sous) {
+        return refus()
+    }
     let d: string = dossier()
+    if sous != "" {
+        d = os.join(d, sous)
+    }
+    if not os.is_dir(d) {
+        return web.error(404, "pas de dossier " + sous)
+    }
     let json: string = "["
     let premier: bool = true
-    for n in os.listdir(d) {
-        let chemin: string = os.join(d, n)
-        if valide(n) and os.is_file(chemin) {
-            if not premier {
-                json = json + ","
+    for genre in range(0, 2) {
+        for n in os.listdir(d) {
+            let chemin: string = os.join(d, n)
+            let est_dossier: bool = os.is_dir(chemin)
+            if valide(n) and ((genre == 0 and est_dossier) or (genre == 1 and os.is_file(chemin))) {
+                if not premier {
+                    json = json + ","
+                }
+                json = json + "{\"nom\":" + web.json_string(n) + ",\"dossier\":" + oui(est_dossier) + ",\"taille\":" + str(os.size(chemin)) + ",\"date\":" + str(os.modified(chemin)) + "}"
+                premier = false
             }
-            json = json + "{\"nom\":" + web.json_string(n) + ",\"taille\":" + str(os.size(chemin)) + ",\"date\":" + str(os.modified(chemin)) + "}"
-            premier = false
         }
     }
     return web.json(json + "]")
 }
 
-@web.route("/api/lire/<nom>")
+// V0.62 : un nouveau dossier
+@web.route("/api/dossier/<path:nom>", "POST")
+def nouveau_dossier(req: Request, nom: string) -> Response {
+    if not autorise(req) or not chemin_valide(nom) {
+        return refus()
+    }
+    let chemin: string = os.join(dossier(), nom)
+    if os.exists(chemin) {
+        return web.json("{\"ok\":false,\"erreur\":" + web.json_string(nom + " existe déjà") + "}")
+    }
+    let ok: bool = os.mkdir(chemin)
+    return web.json("{\"ok\":" + oui(ok) + ",\"erreur\":" + web.json_string(os.error()) + "}")
+}
+
+// V0.62 : les reglages de l'editeur (theme, taille du texte), gardes dans data/
+@web.route("/api/reglages", "GET POST")
+def reglages(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    if req.method == "POST" {
+        if len(req.body) > 2000 or req.body[0:1] != "{" {
+            return web.error(400, "des reglages en JSON")
+        }
+        web.save("reglages", req.body)
+    }
+    return web.json(web.load("reglages", "{}"))
+}
+
+@web.route("/api/lire/<path:nom>")
 def lire(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     let chemin: string = os.join(dossier(), nom)
@@ -96,27 +139,30 @@ def lire(req: Request, nom: string) -> Response {
     return web.text(read_text(chemin))
 }
 
-@web.route("/api/ecrire/<nom>", "POST")
+@web.route("/api/ecrire/<path:nom>", "POST")
 def ecrire(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     write_file(os.join(dossier(), nom), req.body)
     return web.json("{\"ok\":true}")
 }
 
-@web.route("/api/supprimer/<nom>", "POST")
+// un fichier, ou un dossier vide
+@web.route("/api/supprimer/<path:nom>", "POST")
 def supprimer(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     let ok: bool = os.remove(os.join(dossier(), nom))
     return web.json("{\"ok\":" + oui(ok) + ",\"erreur\":" + web.json_string(os.error()) + "}")
 }
 
-@web.route("/api/renommer/<nom>/<nouveau>", "POST")
-def renommer(req: Request, nom: string, nouveau: string) -> Response {
-    if not autorise(req) or not valide(nom) or not valide(nouveau) {
+// V0.62 : le nouveau chemin dans le corps de la requete (il peut changer de dossier)
+@web.route("/api/renommer/<path:nom>", "POST")
+def renommer(req: Request, nom: string) -> Response {
+    let nouveau: string = strip(req.body)
+    if not autorise(req) or not chemin_valide(nom) or not chemin_valide(nouveau) {
         return refus()
     }
     let vers: string = os.join(dossier(), nouveau)
@@ -138,8 +184,8 @@ Class Compilation {
 
 // V0.59 : ce qui decide du programme : le compilateur, puis chaque .cl du dossier
 // (les modules importes en font partie). La meme cle : pas besoin de recompiler.
-def cle_sources(mode: string) -> string {
-    let d: string = dossier()
+def cle_sources(nom: string, mode: string) -> string {
+    let d: string = os.dirname(os.join(dossier(), nom))
     let c: string = compilateur()
     let cle: string = mode + "|" + str(os.modified(c)) + "|" + str(os.size(c)) + "\n"
     for n in os.listdir(d) {
@@ -155,7 +201,7 @@ def cle_sources(mode: string) -> string {
 // compile nom vers sortie (mode "" ou "--test"), sauf si rien n'a change depuis la derniere fois
 def compiler(nom: string, sortie: string, mode: string) -> Compilation {
     os.mkdir(os.dirname(sortie))
-    let cle: string = cle_sources(mode)
+    let cle: string = cle_sources(nom, mode)
     let fichier_cle: string = sortie + ".cle"
     if os.is_file(sortie) and os.is_file(fichier_cle) {
         if read_text(fichier_cle) == cle {
@@ -177,12 +223,12 @@ def compiler(nom: string, sortie: string, mode: string) -> Compilation {
     return Compilation(true, "", duree, false)
 }
 
-// lance sortie dans le dossier des fichiers, sans l'attendre
-def demarrer(sortie: string, c: Compilation, entree: string) -> Response {
+// lance sortie dans le dossier du fichier, sans l'attendre
+def demarrer(nom: string, sortie: string, c: Compilation, entree: string) -> Response {
     if not c.ok {
         return web.json("{\"ok\":false,\"erreurs\":" + web.json_string(c.erreurs) + ",\"duree\":" + web.json_string(c.duree) + "}")
     }
-    let p: Process = os.start_merged(["sh", "-c", "cd \"$1\" && exec \"$2\"", "sh", dossier(), sortie])
+    let p: Process = os.start_merged(["sh", "-c", "cd \"$1\" && exec \"$2\"", "sh", os.dirname(os.join(dossier(), nom)), sortie])
     if entree != "" {
         p.write(entree)
     }
@@ -190,29 +236,29 @@ def demarrer(sortie: string, c: Compilation, entree: string) -> Response {
 }
 
 // compile (si besoin), puis lance le programme
-@web.route("/api/lancer/<nom>", "POST")
+@web.route("/api/lancer/<path:nom>", "POST")
 def lancer(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     let sortie: string = binaire(nom)
-    return demarrer(sortie, compiler(nom, sortie, ""), req.body)
+    return demarrer(nom, sortie, compiler(nom, sortie, ""), req.body)
 }
 
 // V0.59 : les blocs test "nom" { ... } du fichier, chacun a part (clair --test)
-@web.route("/api/tester/<nom>", "POST")
+@web.route("/api/tester/<path:nom>", "POST")
 def tester(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     let sortie: string = binaire(nom) + ".tests"
-    return demarrer(sortie, compiler(nom, sortie, "--test"), "")
+    return demarrer(nom, sortie, compiler(nom, sortie, "--test"), "")
 }
 
 // V0.59 : les erreurs du fichier, sans le compiler (clair --check : quelques millisecondes)
-@web.route("/api/verifier/<nom>", "POST")
+@web.route("/api/verifier/<path:nom>", "POST")
 def verifier(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     let source: string = os.join(dossier(), nom)
@@ -275,9 +321,9 @@ def arreter(req: Request, id: int) -> Response {
 }
 
 // le C que Clair a ecrit pour ce programme (apres le dernier lancement)
-@web.route("/api/c/<nom>")
+@web.route("/api/c/<path:nom>")
 def code_c(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     let chemin: string = binaire(nom) + ".generated.c"
@@ -322,7 +368,7 @@ def figure(req: Request, nom: string) -> Response {
 }
 
 // plot.image("photo.png") : une image du dossier des programmes
-@web.route("/api/image/<chemin>")
+@web.route("/api/image/<path:chemin>")
 def image(req: Request, chemin: string) -> Response {
     if not autorise(req) or not chemin_valide(chemin) {
         return refus()
@@ -394,7 +440,7 @@ def git_etat(req: Request) -> Response {
     if prefixe.code != 0 {
         return web.json("{\"git\":true,\"depot\":false}")
     }
-    let statut: RunResult = git(["status", "--porcelain=v1", "--branch", "--", "."])
+    let statut: RunResult = git(["status", "--porcelain=v1", "--branch", "--untracked-files=all", "--", "."])
     let distant: RunResult = git(["remote", "get-url", "origin"])
     let nom: string = strip(git(["config", "user.name"]).out)
     let email: string = strip(git(["config", "user.email"]).out)
@@ -427,7 +473,7 @@ def git_identite(req: Request) -> Response {
 }
 
 // ce qui a change dans un fichier depuis la derniere version (?nouveau=1 : un fichier que git ne suit pas)
-@web.route("/api/git/diff/<chemin>")
+@web.route("/api/git/diff/<path:chemin>")
 def git_diff(req: Request, chemin: string) -> Response {
     if not autorise(req) or not chemin_valide(chemin) {
         return refus()
@@ -440,9 +486,9 @@ def git_diff(req: Request, chemin: string) -> Response {
 }
 
 // les lignes changees du fichier ouvert, pour la marge de l'editeur
-@web.route("/api/git/lignes/<nom>")
+@web.route("/api/git/lignes/<path:nom>")
 def git_lignes(req: Request, nom: string) -> Response {
-    if not autorise(req) or not valide(nom) {
+    if not autorise(req) or not chemin_valide(nom) {
         return refus()
     }
     return git_reponse(git(["diff", "-U0", "HEAD", "--", nom]))
@@ -484,7 +530,7 @@ def git_voir(req: Request, version: string) -> Response {
 }
 
 // remet un fichier comme dans la derniere version (ses changements sont perdus)
-@web.route("/api/git/annuler/<chemin>", "POST")
+@web.route("/api/git/annuler/<path:chemin>", "POST")
 def git_annuler(req: Request, chemin: string) -> Response {
     if not autorise(req) or not chemin_valide(chemin) {
         return refus()
@@ -493,7 +539,7 @@ def git_annuler(req: Request, chemin: string) -> Response {
 }
 
 // remet un fichier comme dans une version plus ancienne
-@web.route("/api/git/restaurer/<version>/<chemin>", "POST")
+@web.route("/api/git/restaurer/<version>/<path:chemin>", "POST")
 def git_restaurer(req: Request, version: string, chemin: string) -> Response {
     if not autorise(req) or not version_valide(version) or not chemin_valide(chemin) {
         return refus()

@@ -1045,6 +1045,8 @@ expect_compile_error invalid_web_retour 'web error: f() answers a request: it gi
 expect_compile_error invalid_web_double 'web error: POST /a/<y> is already answered by f() of line 3 (line 8)'
 expect_compile_error invalid_web_import 'web error: @route(...) on f(): the only decorator is @web.route, after import web (line 1)'
 expect_compile_error invalid_web_methode "web error: unknown method 'FETCH' in @web.route: GET, POST, PUT, DELETE, PATCH or OPTIONS (line 3)"
+expect_compile_error invalid_web_path_milieu 'web error: <path:x> takes the rest of the path: it is the last part of "/a/<path:x>/b" (line 3)'
+expect_compile_error invalid_web_path_type 'web error: the parameter x of f() is the rest of the path (<path:x>): it is a string, not int (line 3)'
 
 # V0.56 : le module os (programmes, fichiers, dossiers, temps)
 ./build/clair tests/os_module.cl -o build/test_os_module
@@ -1172,7 +1174,7 @@ if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     tail -n 8 build/studio.log >&2
     exit 1
 fi
-printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot'
+printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot, sous-dossiers, reglages'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

@@ -1,18 +1,27 @@
-/* Clair Studio (V0.58 a V0.61) */
+/* Clair Studio (V0.58 a V0.62) */
 :root {
   --fond: #ffffff; --fond2: #f3f4f6; --bord: #d9dce1; --texte: #1d2129; --discret: #6b7280;
   --accent: #2563eb; --vert: #15803d; --rouge: #b91c1c; --erreur-fond: #fde8e8;
   --mot: #7c3aed; --type: #0f766e; --chaine: #b45309; --nombre: #1d4ed8; --comm: #6b7280; --fonc: #be185d;
   --code: ui-monospace, "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
-  --ligne: 21px;
+  --taille: 14px; --ligne: 21px;      /* V0.62 : reglables */
+  color-scheme: light dark;
 }
+/* V0.62 : le theme suit le telephone (auto), ou il est choisi : data-theme="clair" ou "sombre" */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="clair"]) {
     --fond: #16181d; --fond2: #1f2229; --bord: #30343c; --texte: #e6e8ec; --discret: #8b919c;
     --accent: #60a5fa; --vert: #4ade80; --rouge: #f87171; --erreur-fond: #4a1d1d;
     --mot: #c4a7ff; --type: #5eead4; --chaine: #fbbf24; --nombre: #93c5fd; --comm: #7d8590; --fonc: #f9a8d4;
   }
 }
+:root[data-theme="sombre"] {
+    --fond: #16181d; --fond2: #1f2229; --bord: #30343c; --texte: #e6e8ec; --discret: #8b919c;
+    --accent: #60a5fa; --vert: #4ade80; --rouge: #f87171; --erreur-fond: #4a1d1d;
+    --mot: #c4a7ff; --type: #5eead4; --chaine: #fbbf24; --nombre: #93c5fd; --comm: #7d8590; --fonc: #f9a8d4;
+  color-scheme: dark;
+}
+:root[data-theme="clair"] { color-scheme: light; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--fond); color: var(--texte); font-family: system-ui, sans-serif; }
 #app { display: flex; flex-direction: column; height: 100dvh; }
@@ -30,7 +39,7 @@ button:active { filter: brightness(0.9); }
 .lancer { background: var(--vert); color: #fff; border-color: transparent; width: 56px; font-size: 18px; }
 .arreter { color: var(--rouge); }
 
-.editeur { flex: 1; display: flex; min-height: 0; position: relative; font-family: var(--code); font-size: 14px; }
+.editeur { flex: 1; display: flex; min-height: 0; position: relative; font-family: var(--code); font-size: var(--taille); }
 .marge { width: 44px; overflow: hidden; background: var(--fond2); border-right: 1px solid var(--bord); color: var(--discret);
          text-align: right; flex: none; }
 #numeros { padding: 8px 0; line-height: var(--ligne); will-change: transform; }
@@ -61,7 +70,7 @@ button:active { filter: brightness(0.9); }
 #signature:empty, #suggestions:empty { display: none; }
 #signature b { color: var(--accent); }
 #suggestions { display: flex; gap: 4px; padding: 4px; overflow-x: auto; scrollbar-width: none; }
-.sug { flex: none; min-height: 34px; padding: 0 10px; font: 14px var(--code); display: flex; align-items: center; gap: 6px; }
+.sug { flex: none; min-height: 34px; padding: 0 10px; font: var(--taille) var(--code); display: flex; align-items: center; gap: 6px; }
 .sug span { color: var(--discret); font-size: 11px; }
 .sug.f { color: var(--fonc); } .sug.k { color: var(--mot); } .sug.t, .sug.c { color: var(--type); }
 .touches { display: flex; gap: 4px; padding: 4px; overflow-x: auto; border-top: 1px solid var(--bord); background: var(--fond2);
@@ -72,7 +81,7 @@ button:active { filter: brightness(0.9); }
 .console-tete { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-size: 13px;
                 background: var(--fond2); }
 .petit { min-height: 30px; width: 30px; }
-#sortie, #texte-c { margin: 0; padding: 8px 10px; overflow: auto; font: 13px/1.45 var(--code); white-space: pre-wrap;
+#sortie, #texte-c { margin: 0; padding: 8px 10px; overflow: auto; font: calc(var(--taille) - 1px)/1.45 var(--code); white-space: pre-wrap;
                     word-break: break-word; flex: 1; min-height: 60px; }
 #sortie .err { color: var(--rouge); }
 #sortie a { color: var(--rouge); text-decoration: underline; cursor: pointer; }
@@ -88,11 +97,27 @@ button:active { filter: brightness(0.9); }
 .voile { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); }
 .tiroir { position: fixed; top: 0; bottom: 0; left: 0; width: min(320px, 86vw); background: var(--fond); display: flex;
           flex-direction: column; border-right: 1px solid var(--bord); }
-.tiroir-tete { padding: 12px; display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--bord); }
-.tiroir-tete .discret { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tiroir-tete { padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--bord); }
+/* V0.62 : l'explorateur */
+.chemin { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 13px; }
+.chemin button { min-height: 30px; padding: 0 8px; background: none; border-color: transparent; color: var(--accent); }
+.chemin button:last-child { color: var(--texte); font-weight: 600; }
 #liste { list-style: none; margin: 0; padding: 4px 0; overflow: auto; flex: 1; }
-#liste li { padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+#liste li.fichier { padding: 4px 6px 4px 12px; cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 44px; }
+#liste li.vide { padding: 14px; }
 #liste li.actif { background: var(--fond2); font-weight: 600; }
+#liste .icone { width: 22px; text-align: center; flex: none; }
+#liste li.fichier .nom { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#liste li.est-dossier .nom { font-weight: 600; }
+#liste .plus { flex: none; background: none; border-color: transparent; font-size: 18px; }
+#liste .actions { flex-basis: 100%; display: flex; gap: 6px; padding: 2px 0 6px 30px; }
+#liste .actions button { flex: 1; min-height: 36px; font-size: 14px; }
+.reglages { border-top: 1px solid var(--bord); padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.reglage { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; }
+.segments { display: flex; align-items: center; gap: 4px; }
+.segments button { min-height: 34px; padding: 0 10px; font-size: 14px; }
+.segments button.actif { background: var(--accent); color: #fff; border-color: transparent; }
+#r-taille { min-width: 28px; text-align: center; font-variant-numeric: tabular-nums; }
 .tiroir-pied { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--bord); flex-wrap: wrap; }
 .tiroir-pied button { flex: 1; }
 .danger { color: var(--rouge); }
@@ -142,3 +167,21 @@ button:active { filter: brightness(0.9); }
 .figure-corps { flex: 1; overflow: auto; padding: 8px; --zoom: 1; }
 .figure-corps svg, .figure-corps img { display: block; width: calc(100% * var(--zoom)); height: auto; max-width: none; }
 .figure-corps .anim-controles { max-width: none; }
+
+/* V0.62 : les figures de plot suivent le theme choisi (leur propre style suit le telephone) */
+:root[data-theme="sombre"] .clair-plot { color: #e5e7eb; }
+:root[data-theme="sombre"] .clair-plot .cp-fond { fill: #16181d; }
+:root[data-theme="sombre"] .clair-plot .cp-grille { stroke: #2b2f37; }
+:root[data-theme="sombre"] .clair-plot .cp-axe { stroke: #8b919c; }
+:root[data-theme="sombre"] .clair-plot .cp-texte { fill: #e5e7eb; }
+:root[data-theme="sombre"] .clair-plot .cp-graduation { fill: #a3a9b3; }
+:root[data-theme="sombre"] .clair-plot .cp-legende { fill: #1f2229; stroke: #3a3f48; }
+:root[data-theme="sombre"] .clair-plot .cp-barre { stroke: #16181d; }
+:root[data-theme="clair"] .clair-plot { color: #1f2937; }
+:root[data-theme="clair"] .clair-plot .cp-fond { fill: #fff; }
+:root[data-theme="clair"] .clair-plot .cp-grille { stroke: #e5e7eb; }
+:root[data-theme="clair"] .clair-plot .cp-axe { stroke: #6b7280; }
+:root[data-theme="clair"] .clair-plot .cp-texte { fill: #1f2937; }
+:root[data-theme="clair"] .clair-plot .cp-graduation { fill: #4b5563; }
+:root[data-theme="clair"] .clair-plot .cp-legende { fill: #fff; stroke: #d1d5db; }
+:root[data-theme="clair"] .clair-plot .cp-barre { stroke: #fff; }

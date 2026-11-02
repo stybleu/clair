@@ -42,7 +42,7 @@ typedef struct {
     unsigned methods;              /* bit i: method_names[i] */
     size_t nseg;
     char *seg[WEB_SEGS_MAX];       /* a literal segment, or the name of a <variable> */
-    int kind[WEB_SEGS_MAX];        /* 0 literal, 1 int, 2 float, 3 string */
+    int kind[WEB_SEGS_MAX];        /* 0 literal, 1 int, 2 float, 3 string, 4 path (V0.62: the rest of the path) */
 } Route;
 
 static int failed = 0;
@@ -197,11 +197,23 @@ static int read_route(const AstNode *fn, const AstNode *call, int is_method, Rou
             return 0;
         }
         if (start[0] == '<') {
-            if (n < 3 || start[n - 1] != '>' || !is_name(start + 1, n - 2)) {
-                web_error(line, "write a part of the path that changes as <name>, got \"%.*s\"", (int)n, start);
+            /* V0.62: <path:name> takes the rest of the path, slashes included (as in Flask) */
+            int rest = n > 7 && strncmp(start, "<path:", 6) == 0;
+            const char *name_at = rest ? start + 6 : start + 1;
+            size_t name_len = rest ? n - 7 : n - 2;
+            if (n < 3 || start[n - 1] != '>' || !is_name(name_at, name_len)) {
+                web_error(line, "write a part of the path that changes as <name> (or <path:name> for the rest of the path), got \"%.*s\"", (int)n, start);
                 return 0;
             }
-            char *name = dup_n(start + 1, n - 2);
+            if (rest) {
+                const char *after = s;
+                while (*after == '/') after++;
+                if (*after) {
+                    web_error(line, "<path:%.*s> takes the rest of the path: it is the last part of \"%s\"", (int)name_len, name_at, path->text);
+                    return 0;
+                }
+            }
+            char *name = dup_n(name_at, name_len);
             if (!name) return 0;
             for (size_t i = 0; i < r->nseg; i++) {
                 if (r->kind[i] && strcmp(r->seg[i], name) == 0) {
@@ -218,6 +230,13 @@ static int read_route(const AstNode *fn, const AstNode *call, int is_method, Rou
             }
             const char *t = p->type_name ? p->type_name : "?";
             int kind = strcmp(t, "int") == 0 ? 1 : strcmp(t, "float") == 0 ? 2 : strcmp(t, "string") == 0 ? 3 : 0;
+            if (rest && kind != 3) {
+                web_error(line, "the parameter %s of %s() is the rest of the path (<path:%s>): it is a string, not %s",
+                          name, fn->text, name, t);
+                free(name);
+                return 0;
+            }
+            if (rest) kind = 4;
             if (!kind || p->unit) {
                 web_error(line, "the parameter %s of %s() comes from the path: it is a string, an int or a float%s, not %s",
                           name, fn->text, p->unit ? " without unit" : "", t);
@@ -267,10 +286,14 @@ static int read_route(const AstNode *fn, const AstNode *call, int is_method, Rou
     return 1;
 }
 
-/* the most precise route first: a literal before a variable, int before float before string */
+static int ends_with_path(const Route *r) { return r->nseg && r->kind[r->nseg - 1] == 4; }
+
+/* the most precise route first: a literal before a variable, int before float before string,
+   and the routes that take the rest of the path (<path:name>) after all the others */
 static int route_cmp(const void *a, const void *b) {
     const Route *x = a, *y = b;
-    if (x->nseg != y->nseg) return x->nseg < y->nseg ? -1 : 1;
+    if (ends_with_path(x) != ends_with_path(y)) return ends_with_path(x) ? 1 : -1;
+    if (x->nseg != y->nseg) return ends_with_path(x) ? (x->nseg > y->nseg ? -1 : 1) : (x->nseg < y->nseg ? -1 : 1);
     for (size_t i = 0; i < x->nseg; i++) {
         if (x->kind[i] != y->kind[i]) return x->kind[i] < y->kind[i] ? -1 : 1;
         if (x->kind[i] == 0) {
@@ -295,19 +318,19 @@ static void shape_text(const Route *r, char *out, size_t n) {
     out[0] = '\0';
     if (r->nseg == 0) { snprintf(out, n, "/"); return; }
     for (size_t i = 0; i < r->nseg && w + 2 < n; i++) {
-        int k = snprintf(out + w, n - w, r->kind[i] ? "/<%s>" : "/%s", r->seg[i]);
+        int k = snprintf(out + w, n - w, r->kind[i] == 4 ? "/<path:%s>" : r->kind[i] ? "/<%s>" : "/%s", r->seg[i]);
         if (k < 0) break;
         w += (size_t)k;
     }
 }
 
 static void write_route(Text *t, const Route *r) {
-    putf(t, "    if __n == %zu", r->nseg);
+    putf(t, ends_with_path(r) ? "    if __n >= %zu" : "    if __n == %zu", r->nseg);
     for (size_t i = 0; i < r->nseg; i++) {
         if (r->kind[i] == 0) {
             putf(t, " and __p[%zu] == ", i);
             put_literal(t, r->seg[i]);
-        } else if (r->kind[i] != 3) {
+        } else if (r->kind[i] == 1 || r->kind[i] == 2) {
             putf(t, " and __web.__number(__p[%zu], %d)", i, r->kind[i] - 1);
         }
     }
@@ -339,6 +362,7 @@ static void write_route(Text *t, const Route *r) {
             if (!r->kind[k] || strcmp(r->seg[k], p->text) != 0) continue;
             if (r->kind[k] == 1) putf(t, "int(__p[%zu])", k);
             else if (r->kind[k] == 2) putf(t, "float(__p[%zu])", k);
+            else if (r->kind[k] == 4) putf(t, "__web.__rest(__p, %zu)", k);
             else putf(t, "__p[%zu]", k);
         }
     }

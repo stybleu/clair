@@ -4,6 +4,7 @@
 # V0.59 : cache de compilation, verification sans compiler, tests, sources des modules.
 # V0.60 : Git : depot, etat, differences, versions, historique, restaurer, annuler, envoyer, recuperer.
 # V0.61 : les figures de plot.show() et les images de plot.image().
+# V0.62 : sous-dossiers (explorateur), reglages.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -11,6 +12,7 @@ cd "$ROOT"
 ./build/clair tools/studio/studio.cl -o build/studio_test_bin || exit 1
 rm -rf build/studio_test build/studio_projets
 cp -r tools/studio build/studio_test
+rm -rf build/studio_test/data            # le jeton et les reglages du vrai Studio ne servent pas ici
 mkdir -p build/studio_projets
 cd build/studio_test
 # le dossier des programmes est dans build/, donc dans le depot de Clair : git ne doit pas le voir
@@ -125,6 +127,41 @@ $C GET /api/module/os "$S" | grep -q '^def run(command: list\[string\]) -> RunRe
 [ "$($C GET /api/module/secret "$S" | code)" = 404 ] || echec "un module qui n'existe pas"
 [ "$($C GET /api/module/os | code)" = 403 ] || echec "la source d'un module sans jeton"
 
+# V0.62 : des sous-dossiers : creer, lister, ecrire, lancer (dans son dossier, avec un module a cote), deplacer
+$C POST /api/dossier/meteo 'corps=' "$S" | corps | grep -q '"ok":true' || echec "creer un dossier"
+$C POST /api/dossier/meteo/donnees 'corps=' "$S" | corps | grep -q '"ok":true' || echec "creer un sous-dossier"
+$C POST /api/dossier/meteo 'corps=' "$S" | corps | grep -q '"ok":false' || echec "un dossier qui existe deja"
+$C POST /api/ecrire/meteo/outil.cl 'corps=def double(x: int) -> int {\n    return 2 * x\n}\n' "$S" > /dev/null
+$C POST /api/ecrire/meteo/releve.txt 'corps=12' "$S" > /dev/null
+$C POST /api/ecrire/meteo/station.cl 'corps=import outil\n\ndef main() -> int {\n    print(outil.double(int(strip(read_text("releve.txt")))))\n    return 0\n}\n' "$S" | corps | grep -q '"ok":true' || echec "ecrire dans un sous-dossier"
+$C GET /api/fichiers "$S" | corps | grep -q '^\[{"nom":"meteo","dossier":true,' || echec "les dossiers d'abord : $($C GET /api/fichiers "$S" | corps)"
+$C GET '/api/fichiers?d=meteo' "$S" | corps | grep -q '^\[{"nom":"donnees","dossier":true,.*{"nom":"outil.cl","dossier":false,.*"nom":"station.cl"' || echec "lister un sous-dossier : $($C GET '/api/fichiers?d=meteo' "$S" | corps)"
+[ "$($C GET '/api/fichiers?d=..%2F..' "$S" | code)" = 403 ] || echec "lister hors du dossier"
+[ "$($C GET '/api/fichiers?d=meteo%2F.cache' "$S" | code)" = 403 ] || echec "lister un dossier cache"
+$C GET /api/lire/meteo/station.cl "$S" | corps | grep -q '^import outil$' || echec "lire dans un sous-dossier"
+$C POST /api/verifier/meteo/station.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "verifier dans un sous-dossier"
+ID="$($C POST /api/lancer/meteo/station.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+[ -n "$ID" ] || echec "lancer dans un sous-dossier"
+for _ in $(seq 1 200); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    printf '%s' "$R" | grep -q '"fini":true' && break
+    sleep 0.05
+done
+printf '%s' "$R" | grep -q '"sortie":"24\\n"' || echec "un programme d'un sous-dossier tourne dans son dossier : $R"
+$C POST /api/renommer/meteo/releve.txt 'corps=meteo/donnees/releve.txt' "$S" | corps | grep -q '"ok":true' || echec "deplacer dans un sous-dossier"
+[ -f "$ROOT/build/studio_projets/meteo/donnees/releve.txt" ] || echec "le fichier deplace"
+$C POST /api/supprimer/meteo/donnees 'corps=' "$S" | corps | grep -q '"ok":false' || echec "un dossier plein ne se supprime pas"
+$C POST /api/supprimer/meteo/donnees/releve.txt 'corps=' "$S" > /dev/null
+$C POST /api/supprimer/meteo/donnees 'corps=' "$S" | corps | grep -q '"ok":true' || echec "supprimer un dossier vide"
+[ "$($C POST /api/dossier/..%2Fdehors 'corps=' "$S" | code)" != 200 ] || echec "un dossier hors du dossier"
+[ ! -e "$ROOT/build/dehors" ] || echec "un dossier a ete cree hors du dossier"
+[ "$($C POST /api/renommer/meteo/outil.cl 'corps=../outil.cl' "$S" | code)" = 403 ] || echec "deplacer hors du dossier"
+# V0.62 : les reglages de l'editeur
+$C GET /api/reglages "$S" | corps | grep -qx '{}' || echec "reglages au depart"
+$C POST /api/reglages 'corps={"theme":"sombre","taille":16}' "$S" > /dev/null
+$C GET /api/reglages "$S" | corps | grep -qx '{"theme":"sombre","taille":16}' || echec "reglages gardes"
+[ "$($C POST /api/reglages 'corps=pas du json' "$S" | code)" = 400 ] || echec "des reglages qui ne sont pas du JSON"
+
 # V0.61 : les figures de plot.show() dans la console
 $C POST /api/ecrire/courbe.cl 'corps=import plot\n\ndef main() -> int {\n    print("avant")\n    plot.line([0.0, 1.0, 2.0], [0.0, 1.0, 4.0])\n    plot.show()\n    plot.image("dessin.svg")\n    print("apres")\n    return 0\n}\n' "$S" > /dev/null
 $C POST /api/ecrire/dessin.svg 'corps=<svg xmlns="http://www.w3.org/2000/svg"/>' "$S" > /dev/null
@@ -191,11 +228,11 @@ if command -v git > /dev/null; then
 fi
 
 # renommer, supprimer, et rien en dehors du dossier
-$C POST /api/renommer/essai.cl/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "renommer"
-$C POST /api/renommer/autre.cl/bonjour.cl 'corps=' "$S" | corps | grep -q '"ok":false' || echec "renommer sur un fichier qui existe"
+$C POST /api/renommer/essai.cl 'corps=autre.cl' "$S" | corps | grep -q '"ok":true' || echec "renommer"
+$C POST /api/renommer/autre.cl 'corps=bonjour.cl' "$S" | corps | grep -q '"ok":false' || echec "renommer sur un fichier qui existe"
 $C POST /api/supprimer/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "supprimer"
 [ ! -e "$ROOT/build/studio_projets/autre.cl" ] || echec "autre.cl devrait etre supprime"
-[ "$($C GET /api/lire/..%2F..%2Fsrc%2Fmain.c "$S" | code)" = 404 ] || echec "un fichier hors du dossier"
+[ "$($C GET /api/lire/..%2F..%2Fsrc%2Fmain.c "$S" | code)" = 403 ] || echec "un fichier hors du dossier"
 [ "$($C GET /api/lire/.secret "$S" | code)" = 403 ] || echec "un fichier cache"
 [ "$($C POST /api/ecrire/pirate.cl 'corps=x' "$S" 'Sec-Fetch-Site: cross-site' | code)" = 403 ] || echec "une page d'un autre site"
 kill $PID 2> /dev/null

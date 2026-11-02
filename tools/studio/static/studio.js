@@ -1,4 +1,4 @@
-// Clair Studio (V0.58 a V0.61) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.62) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -6,12 +6,16 @@
   let fichier = null;            // le nom du fichier ouvert
   let sauve = true, minuterie = 0;
   let enCours = null;            // le numero du programme qui tourne
-  let enTests = false, texteTests = "", enAttente = "";
+  let enTests = false, texteTests = "", enAttente = "", fichierLance = null;
   let lignesErr = new Set();     // les lignes d'une erreur au dernier lancement
   let lignesVerif = new Map();   // V0.59 : les lignes des erreurs trouvees en tapant -> leur message
   let lignesGit = new Map();     // V0.60 : les lignes changees depuis la derniere version -> "a", "m" ou "d"
   let debut = 0;
-  const enc = encodeURIComponent;
+  // V0.62 : un fichier peut etre dans un sous-dossier : "meteo/station.cl" (chaque morceau encode, / garde)
+  const enc = (chemin) => String(chemin).split("/").map(encodeURIComponent).join("/");
+  const dossierDe = (chemin) => (chemin && chemin.includes("/") ? chemin.slice(0, chemin.lastIndexOf("/")) : "");
+  const nomDe = (chemin) => (chemin || "").slice((chemin || "").lastIndexOf("/") + 1);
+  const joindre = (d, n) => (d ? d + "/" + n : n);
 
   // ---- les couleurs du code ----
   const MOTS = new Set(["def", "let", "return", "if", "else", "while", "for", "in", "Class", "import", "from", "as",
@@ -220,11 +224,6 @@
     return true;
   }
 
-  async function listerFichiers() {
-    const r = await api("/api/fichiers");
-    return r.json();
-  }
-
   // ---- V0.59 : les erreurs pendant qu'on tape (clair --check, sans compiler) ----
   // "semantic error: ... (line 3)", "(orbite.cl, line 3)", "parse error at 3:5: ..."
   function lireErreurs(texte) {
@@ -238,7 +237,10 @@
       let message = l.replace(/^[a-z ]*error( at \d+:\d+)?: /, "").replace(m[0], "").trim();
       liste.push({ fichier: avecFichier ? m[1] || null : null, ligne: +(avecFichier ? m[2] : m[1]), message });
     }
-    for (const e of liste) if (e.fichier === fichier) e.fichier = null;
+    for (const e of liste) {
+      if (e.fichier === nomDe(fichier)) e.fichier = null;
+      else if (e.fichier && !e.fichier.includes("/")) e.fichier = joindre(dossierDe(fichier), e.fichier);
+    }
     return liste;
   }
 
@@ -313,7 +315,7 @@
     cible.appendChild(boite);
     if (sorte === "image") {
       const img = document.createElement("img");
-      img.src = "/api/image/" + enc(nom);
+      img.src = "/api/image/" + enc(joindre(dossierDe(fichierLance), nom));
       img.alt = nom;
       img.addEventListener("click", () => agrandir(img.cloneNode(), null, nom));
       boite.appendChild(img);
@@ -409,7 +411,7 @@
         const a = document.createElement("a");
         a.textContent = m;
         a.dataset.ligne = ici ? ici[2] : at[1];
-        const autre = ici && ici[1] && ici[1] !== fichier ? ici[1] : "";
+        const autre = ici && ici[1] && ici[1] !== nomDe(fichier) ? joindre(dossierDe(fichier), ici[1]) : "";
         if (autre) a.dataset.fichier = autre;
         else lignesErr.add(+a.dataset.ligne);
         cible.appendChild(a);
@@ -455,6 +457,7 @@
     await enregistrer();
     sortie.textContent = "";
     enAttente = "";
+    fichierLance = fichier;
     lignesErr = new Set();
     $("console").hidden = false;
     etat("Compilation…");
@@ -696,7 +699,7 @@
     m.quand = performance.now();
     modules.set(nom, m);
     try {
-      const r = await fetch(integre ? "/api/module/" + nom : "/api/lire/" + enc(nom + ".cl"));
+      const r = await fetch(integre ? "/api/module/" + nom : "/api/lire/" + enc(joindre(dossierDe(fichier), nom + ".cl")));
       if (r.ok) m.analyse = analyser(await r.text(), true);
       m.fixe = integre && r.ok;
     } catch (e) { /* rien */ }
@@ -1270,29 +1273,147 @@
   });
   $("b-fermer-c").addEventListener("click", () => { $("fenetre-c").hidden = true; });
 
-  // ---- les fichiers ----
-  async function montrerFichiers() {
-    const liste = await listerFichiers();
+  // ---- V0.62 : l'explorateur de fichiers, avec les sous-dossiers ----
+  let dossierCourant = "";
+
+  async function listerFichiers(d) {
+    const r = await api("/api/fichiers" + (d ? "?d=" + encodeURIComponent(d) : ""));
+    if (!r.ok) return null;
+    return r.json();
+  }
+
+  const IMAGES = /\.(png|jpe?g|gif|svg|webp)$/i;
+  function icone(f) {
+    if (f.dossier) return "📁";
+    if (/\.cl$/.test(f.nom)) return "◆";
+    if (IMAGES.test(f.nom)) return "🖼";
+    return "📄";
+  }
+  const taille = (n) => (n < 1024 ? n + " o" : n < 1048576 ? Math.round(n / 1024) + " Ko" : (n / 1048576).toFixed(1) + " Mo");
+
+  async function montrerFichiers(d) {
+    if (d !== undefined) dossierCourant = d;
+    let liste = await listerFichiers(dossierCourant);
+    if (!liste) { dossierCourant = ""; liste = (await listerFichiers("")) || []; }
+    // le chemin : chaque dossier se touche pour y revenir
+    const chemin = $("chemin");
+    chemin.textContent = "";
+    const racine = document.createElement("button");
+    racine.textContent = $("chemin").dataset.racine || "dossier";
+    racine.addEventListener("click", () => montrerFichiers(""));
+    chemin.appendChild(racine);
+    let acc = "";
+    for (const morceau of dossierCourant ? dossierCourant.split("/") : []) {
+      acc = joindre(acc, morceau);
+      const sep = document.createElement("span");
+      sep.textContent = "/";
+      sep.className = "discret";
+      const b = document.createElement("button");
+      b.textContent = morceau;
+      const cible = acc;
+      b.addEventListener("click", () => montrerFichiers(cible));
+      chemin.append(sep, b);
+    }
     const ul = $("liste");
     ul.textContent = "";
-    for (const f of liste) {
+    if (dossierCourant) {
       const li = document.createElement("li");
-      li.textContent = f.nom;
-      const t = document.createElement("span");
-      t.className = "discret";
-      t.textContent = f.taille < 1024 ? f.taille + " o" : Math.round(f.taille / 1024) + " Ko";
-      li.appendChild(t);
-      if (f.nom === fichier) li.className = "actif";
-      li.addEventListener("click", async () => { await ouvrir(f.nom); fermerTiroir(); });
+      li.className = "fichier";
+      li.innerHTML = '<span class="icone">↩</span><span class="nom">..</span>';
+      li.addEventListener("click", () => montrerFichiers(dossierDe(dossierCourant)));
+      ul.appendChild(li);
+    }
+    if (!liste.length) {
+      const li = document.createElement("li");
+      li.className = "discret vide";
+      li.textContent = "Ce dossier est vide.";
+      ul.appendChild(li);
+    }
+    for (const f of liste) {
+      const complet = joindre(dossierCourant, f.nom);
+      const li = document.createElement("li");
+      li.className = "fichier" + (complet === fichier ? " actif" : "") + (f.dossier ? " est-dossier" : "");
+      const ic = document.createElement("span");
+      ic.className = "icone";
+      ic.textContent = icone(f);
+      const nom = document.createElement("span");
+      nom.className = "nom";
+      nom.textContent = f.nom;
+      const info = document.createElement("span");
+      info.className = "discret";
+      info.textContent = f.dossier ? "" : taille(f.taille);
+      const plus = document.createElement("button");
+      plus.className = "plus icone petit";
+      plus.textContent = "⋯";
+      plus.setAttribute("aria-label", "Actions sur " + f.nom);
+      li.append(ic, nom, info, plus);
+      li.addEventListener("click", async (e) => {
+        if (e.target.closest(".actions") || e.target === plus) return;
+        if (f.dossier) { montrerFichiers(complet); return; }
+        if (IMAGES.test(f.nom)) {
+          const img = document.createElement("img");
+          img.src = "/api/image/" + enc(complet);
+          img.alt = f.nom;
+          agrandir(img, null, f.nom);
+          return;
+        }
+        if (await ouvrir(complet)) fermerTiroir();
+      });
+      plus.addEventListener("click", () => actions(li, f, complet));
       ul.appendChild(li);
     }
     $("tiroir").hidden = false;
     $("voile").hidden = false;
   }
+
+  // ⋯ : renommer (ou deplacer : le chemin entier se change), supprimer
+  function actions(li, f, complet) {
+    const ouvert = li.querySelector(".actions");
+    for (const a of document.querySelectorAll("#liste .actions")) a.remove();
+    if (ouvert) return;
+    const barre = document.createElement("div");
+    barre.className = "actions";
+    const renommer = document.createElement("button");
+    renommer.textContent = "Renommer ou déplacer";
+    const supprimer = document.createElement("button");
+    supprimer.className = "danger";
+    supprimer.textContent = "Supprimer";
+    barre.append(renommer, supprimer);
+    li.appendChild(barre);
+    renommer.addEventListener("click", async () => {
+      const nouveau = cheminValide(prompt("Nouveau nom (avec son dossier : meteo/" + f.nom + " pour le déplacer) :", complet), f.dossier);
+      if (!nouveau || nouveau === complet) return;
+      if (complet === fichier) await enregistrer();
+      const r = await (await api("/api/renommer/" + enc(complet), nouveau)).json();
+      if (!r.ok) { alert(r.erreur); return; }
+      if (fichier && (fichier === complet || fichier.startsWith(complet + "/"))) {
+        fichier = nouveau + fichier.slice(complet.length);
+        $("nom-fichier").textContent = fichier;
+        try { localStorage.setItem("clair-studio-fichier", fichier); } catch (e) { /* rien */ }
+      }
+      montrerFichiers(dossierDe(nouveau));
+    });
+    supprimer.addEventListener("click", async () => {
+      if (!confirm("Supprimer " + complet + (f.dossier ? " (il doit être vide)" : "") + " ?")) return;
+      const r = await (await api("/api/supprimer/" + enc(complet), "")).json();
+      if (!r.ok) { alert(f.dossier ? "Le dossier n'est pas vide." : r.erreur); return; }
+      if (complet === fichier) {
+        fichier = null;
+        sauve = true;
+        code.value = "";
+        $("nom-fichier").textContent = "…";
+        montrerDiag([]);
+        dessiner();
+      }
+      montrerFichiers();
+    });
+  }
+
   function fermerTiroir() { $("tiroir").hidden = true; $("voile").hidden = true; }
-  $("b-fichiers").addEventListener("click", montrerFichiers);
+  $("b-fichiers").addEventListener("click", () => montrerFichiers(fichier ? dossierDe(fichier) : dossierCourant));
   $("voile").addEventListener("click", fermerTiroir);
 
+  // un nom dans le dossier courant : sans . au debut d'un morceau, sans ..
   function nomValide(nom) {
     nom = (nom || "").trim();
     if (!nom) return null;
@@ -1300,37 +1421,80 @@
     if (nom.startsWith(".") || nom.includes("/")) { alert("Un nom sans / et sans . au début."); return null; }
     return nom;
   }
+  function cheminValide(chemin, dossier) {
+    chemin = (chemin || "").trim().replace(/^\/+|\/+$/g, "");
+    if (!chemin) return null;
+    if (chemin.split("/").some((m) => !m || m.startsWith(".") || m.startsWith("-"))) {
+      alert("Chaque morceau du chemin : sans . ni - au début.");
+      return null;
+    }
+    if (!dossier && !/\.[A-Za-z0-9]+$/.test(chemin)) chemin += ".cl";
+    return chemin;
+  }
 
   $("b-nouveau").addEventListener("click", async () => {
-    const nom = nomValide(prompt("Nom du nouveau fichier :", "programme.cl"));
+    const nom = nomValide(prompt("Nom du nouveau fichier" + (dossierCourant ? " dans " + dossierCourant : "") + " :", "programme.cl"));
     if (!nom) return;
-    const existants = (await listerFichiers()).map((f) => f.nom);
-    if (existants.includes(nom)) { await ouvrir(nom); fermerTiroir(); return; }
-    await api("/api/ecrire/" + enc(nom), nom.endsWith(".cl") ? "def main() -> int {\n    print(\"Bonjour\")\n    return 0\n}\n" : "");
-    await ouvrir(nom);
-    fermerTiroir();
+    const complet = joindre(dossierCourant, nom);
+    const existants = ((await listerFichiers(dossierCourant)) || []).map((f) => f.nom);
+    if (!existants.includes(nom))
+      await api("/api/ecrire/" + enc(complet), nom.endsWith(".cl") ? "def main() -> int {\n    print(\"Bonjour\")\n    return 0\n}\n" : "");
+    if (await ouvrir(complet)) fermerTiroir();
   });
-  $("b-renommer").addEventListener("click", async () => {
-    if (!fichier) return;
-    const nom = nomValide(prompt("Nouveau nom de " + fichier + " :", fichier));
-    if (!nom || nom === fichier) return;
-    await enregistrer();
-    const r = await (await api("/api/renommer/" + enc(fichier) + "/" + enc(nom), "")).json();
+  $("b-nouveau-dossier").addEventListener("click", async () => {
+    const nom = (prompt("Nom du nouveau dossier" + (dossierCourant ? " dans " + dossierCourant : "") + " :", "") || "").trim();
+    if (!nom) return;
+    if (nom.startsWith(".") || nom.startsWith("-") || nom.includes("/")) { alert("Un nom sans / et sans . ni - au début."); return; }
+    const r = await (await api("/api/dossier/" + enc(joindre(dossierCourant, nom)), "")).json();
     if (!r.ok) { alert(r.erreur); return; }
-    await ouvrir(nom);
-    montrerFichiers();
+    montrerFichiers(joindre(dossierCourant, nom));
   });
-  $("b-supprimer").addEventListener("click", async () => {
-    if (!fichier || !confirm("Supprimer " + fichier + " ?")) return;
-    const r = await (await api("/api/supprimer/" + enc(fichier), "")).json();
-    if (!r.ok) { alert(r.erreur); return; }
-    fichier = null;
-    sauve = true;
-    const reste = await listerFichiers();
-    if (reste.length) await ouvrir(reste[0].nom);
-    else { code.value = ""; $("nom-fichier").textContent = "…"; montrerDiag([]); dessiner(); }
-    montrerFichiers();
+
+  // ---- V0.62 : les reglages : theme et taille du texte, gardes par le serveur (et par le navigateur, pour le demarrage) ----
+  let reglages = { theme: "auto", taille: 14 };
+  function appliquerReglages() {
+    const r = document.documentElement;
+    if (reglages.theme === "auto") r.removeAttribute("data-theme");
+    else r.setAttribute("data-theme", reglages.theme);
+    r.style.setProperty("--taille", reglages.taille + "px");
+    r.style.setProperty("--ligne", Math.round(reglages.taille * 1.5) + "px");
+    const sombre = reglages.theme === "sombre" || (reglages.theme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.querySelector('meta[name="theme-color"]').setAttribute("content", sombre ? "#16181d" : "#ffffff");
+    for (const b of document.querySelectorAll("#r-theme button")) b.classList.toggle("actif", b.dataset.v === reglages.theme);
+    $("r-taille").textContent = reglages.taille;
+    mesurer();
+    dejaColories.clear();
+    dessiner();
+  }
+  function garderReglages() {
+    appliquerReglages();
+    const texte = JSON.stringify(reglages);
+    try { localStorage.setItem("clair-studio-reglages", texte); } catch (e) { /* rien */ }
+    api("/api/reglages", texte).catch(() => {});
+  }
+  for (const b of document.querySelectorAll("#r-theme button")) b.addEventListener("click", () => { reglages.theme = b.dataset.v; garderReglages(); });
+  function changerTaille(d) {
+    reglages.taille = Math.min(26, Math.max(10, reglages.taille + d));
+    garderReglages();
+  }
+  $("r-moins").addEventListener("click", () => changerTaille(-1));
+  $("r-plus").addEventListener("click", () => changerTaille(1));
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === "+" || e.key === "=") { e.preventDefault(); changerTaille(1); }
+    if (e.key === "-") { e.preventDefault(); changerTaille(-1); }
   });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", appliquerReglages);
+  async function chargerReglages() {
+    try { Object.assign(reglages, JSON.parse(localStorage.getItem("clair-studio-reglages") || "{}")); } catch (e) { /* rien */ }
+    appliquerReglages();
+    try {
+      const r = await (await api("/api/reglages")).json();
+      if (r && (r.theme || r.taille)) { Object.assign(reglages, r); appliquerReglages(); }
+    } catch (e) { /* rien */ }
+    if (!["auto", "clair", "sombre"].includes(reglages.theme)) reglages.theme = "auto";
+    if (!(reglages.taille >= 10 && reglages.taille <= 26)) reglages.taille = 14;
+  }
 
   window.addEventListener("beforeunload", () => { if (!sauve && fichier) navigator.sendBeacon("/api/ecrire/" + enc(fichier), code.value); });
   document.addEventListener("visibilitychange", () => { if (document.hidden) enregistrer(); });
@@ -1338,15 +1502,15 @@
 
   // ---- au debut : le dernier fichier ouvert, sinon le premier .cl ----
   (async function () {
-    mesurer();
-    dessiner();
+    $("chemin").dataset.racine = nomDe(($("chemin").dataset.dossier || "").replace(/\/+$/, "")) || "dossier";
+    await chargerReglages();
     gitEtat();
     let dernier = null;
     try { dernier = localStorage.getItem("clair-studio-fichier"); } catch (e) { /* rien */ }
-    const liste = await listerFichiers();
-    const noms = liste.map((f) => f.nom);
-    const choix = dernier && noms.includes(dernier) ? dernier : noms.find((n) => n.endsWith(".cl")) || noms[0];
-    if (choix) await ouvrir(choix);
-    else montrerFichiers();
+    if (dernier && (await ouvrir(dernier))) return;
+    const liste = (await listerFichiers("")) || [];
+    const premier = liste.find((f) => !f.dossier && f.nom.endsWith(".cl")) || liste.find((f) => !f.dossier);
+    if (premier) await ouvrir(premier.nom);
+    else montrerFichiers("");
   })();
 })();

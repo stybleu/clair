@@ -207,6 +207,15 @@ def __parts(path: string) -> list[string] {
     return out
 }
 
+// V0.62: <path:name>: the parts from k on, joined by /
+def __rest(parts: list[string], k: int) -> string {
+    let out: string = parts[k]
+    for i in range(k + 1, len(parts)) {
+        out = out + "/" + parts[i]
+    }
+    return out
+}
+
 def __allow(methods: string, more: string) -> string {
     if methods == "" {
         return more

@@ -167,6 +167,22 @@ def boucle(n: int) -> string {
     return s + " " + str(len(mots)) + " " + str(d["a"])
 }
 
+// V0.62 : <path:chemin> prend la fin du chemin, / compris
+@web.route("/docs/<path:chemin>")
+def docs(chemin: string) -> string {
+    return "docs : " + web.escape(chemin)
+}
+
+@web.route("/docs/liste")
+def docs_liste() -> string {
+    return "la liste"
+}
+
+@web.route("/docs/v/<n>/<path:reste>")
+def docs_version(n: int, reste: string) -> string {
+    return "version " + str(n) + " : " + reste
+}
+
 def main() -> int {
     web.run(int(input()))
     return 0
