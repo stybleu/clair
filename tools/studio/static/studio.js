@@ -409,6 +409,17 @@
   // ---- lancer ----
   // V0.61 : plot.show() ecrit une ligne ESC[clair:plot NOM] : la figure prend sa place dans la console
   const MARQUE = /\x1b\[clair:(plot|anim|image) ([^\]\n]*)\]\n?/;
+  // V0.71.2 : la console montre les 5 000 dernieres lignes. Avant, chaque ligne etait un element de la page :
+  // 100 000 lignes prenaient 17 s et alourdissaient tout. Copier garde toute la sortie.
+  const LIGNES_MAX = 5000;
+  let lignesConsole = 0, lignesCachees = 0, noteCachees = null;
+  function viderConsole() {
+    sortie.textContent = "";
+    lignesConsole = 0;
+    lignesCachees = 0;
+    noteCachees = null;
+  }
+
   function ecrireSortie(texte, classe, cible) {
     cible = cible || sortie;
     const bas = cible.scrollTop + cible.clientHeight >= cible.scrollHeight - 4;
@@ -419,7 +430,44 @@
       reste = reste.slice(m.index + m[0].length);
     }
     if (reste) ecrireTexte(reste, classe, cible);
+    if (cible === sortie) {                          // une figure compte pour une ligne (sa marque finit par \n)
+      for (let i = texte.indexOf("\n"); i >= 0; i = texte.indexOf("\n", i + 1)) lignesConsole++;
+      if (lignesConsole > LIGNES_MAX + 1000) couperConsole();
+    }
     if (bas) cible.scrollTop = cible.scrollHeight;
+  }
+
+  // retire les plus vieilles lignes de la console, jusqu'a LIGNES_MAX
+  function couperConsole() {
+    let trop = lignesConsole - LIGNES_MAX;
+    let n = noteCachees ? noteCachees.nextSibling : sortie.firstChild;
+    while (trop > 0 && n) {
+      const suivant = n.nextSibling;
+      const t = n.textContent;
+      let k = 0;
+      if (n.nodeType === 1 && n.classList.contains("figure")) k = 1;
+      else for (let i = t.indexOf("\n"); i >= 0; i = t.indexOf("\n", i + 1)) k++;
+      if (k <= trop) {
+        n.remove();
+        trop -= k;
+        lignesCachees += k;
+        lignesConsole -= k;
+      } else if (n.nodeType === 3) {               // le debut d'un texte de plusieurs lignes
+        let i = -1;
+        for (let j = 0; j < trop; j++) i = t.indexOf("\n", i + 1);
+        n.data = t.slice(i + 1);
+        lignesCachees += trop;
+        lignesConsole -= trop;
+        trop = 0;
+      } else break;
+      n = suivant;
+    }
+    if (!noteCachees) {
+      noteCachees = document.createElement("div");
+      noteCachees.className = "info";
+      sortie.insertBefore(noteCachees, sortie.firstChild);
+    }
+    noteCachees.textContent = "… " + lignesCachees.toLocaleString("fr-FR") + " lignes plus haut ne sont plus affichées (Copier garde toute la sortie)";
   }
 
   // une figure : le SVG de plot, sans rien qui puisse s'executer, a la largeur de la console
@@ -545,14 +593,23 @@
         if (autre) a.dataset.fichier = autre;
         else lignesErr.add(+a.dataset.ligne);
         cible.appendChild(a);
+      } else if (classe || !m.includes("error")) {   // V0.71.2 : tout le morceau d'un coup
+        const s = classe ? document.createElement("span") : document.createTextNode(m);
+        if (classe) { s.className = classe; s.textContent = m; }
+        cible.appendChild(s);
       } else {
-        for (const morceau of m.split(/(?<=\n)/)) {     // ligne par ligne : seules celles d'une erreur en rouge
-          const s = document.createElement("span");
-          if (classe) s.className = classe;
-          else if (/error/.test(morceau)) s.className = "err";
-          s.textContent = morceau;
-          cible.appendChild(s);
+        let paquet = "";                              // seules les lignes d'une erreur en rouge
+        for (const morceau of m.split(/(?<=\n)/)) {
+          if (/error/.test(morceau)) {
+            if (paquet) cible.appendChild(document.createTextNode(paquet));
+            paquet = "";
+            const s = document.createElement("span");
+            s.className = "err";
+            s.textContent = morceau;
+            cible.appendChild(s);
+          } else paquet += morceau;
         }
+        if (paquet) cible.appendChild(document.createTextNode(paquet));
       }
     }
   }
@@ -592,7 +649,7 @@
   async function demarrer(chemin, quoi) {
     if (!fichier || enCours) return;
     await enregistrer();
-    sortie.textContent = "";
+    viderConsole();
     sortieBrute = "";
     csvDetecte = false;
     longueurApercuCsv = 0;
@@ -702,7 +759,7 @@
       if (lignesErr.size) dessiner();
       return;
     }
-    setTimeout(suivre, 150);
+    setTimeout(suivre, texte ? 20 : 150);              // V0.71.2 : quand le programme ecrit, revenir vite
   }
 
   // V0.59 : ce qu'ecrit clair --test, en liste : ✓ ou ✗ pour chaque test, et ce qu'a dit chaque test rate
@@ -723,7 +780,7 @@
       return;
     }
     lignesErr = new Set();
-    sortie.textContent = "";
+    viderConsole();
     let reussis = 0;
     for (const t of resultats) {
       const div = document.createElement("div");
@@ -767,10 +824,15 @@
 
   // V0.64 : tout ce que le programme a ecrit (sans les figures), dans le presse-papiers
   $("b-copier").addEventListener("click", async () => {
-    const copie = sortie.cloneNode(true);
-    for (const f of copie.querySelectorAll(".figure")) f.replaceWith("[figure]\n");
-    for (const t of copie.querySelectorAll(".test")) t.append("\n");
-    const texte = (($("etat").textContent || "") + "\n" + copie.textContent).trim() + "\n";
+    let texte;
+    if (lignesCachees && sortieBrute) {            // V0.71.2 : des lignes ne sont plus affichees : la sortie entiere
+      texte = (($("etat").textContent || "") + "\n" + sortieBrute.replace(new RegExp(MARQUE.source, "g"), "[figure]\n")).trim() + "\n";
+    } else {
+      const copie = sortie.cloneNode(true);
+      for (const f of copie.querySelectorAll(".figure")) f.replaceWith("[figure]\n");
+      for (const t of copie.querySelectorAll(".test")) t.append("\n");
+      texte = (($("etat").textContent || "") + "\n" + copie.textContent).trim() + "\n";
+    }
     let ok = false;
     try { await navigator.clipboard.writeText(texte); ok = true; } catch (e) { /* plus bas */ }
     if (!ok) {                     // sans presse-papiers moderne : la vieille methode

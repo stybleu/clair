@@ -476,6 +476,17 @@ def suivre(req: Request, id: int) -> Response {
     }
     let p: Process = os.Process(id)
     let texte: string = p.read()
+    // V0.71.2 : un programme qui ecrit beaucoup : lire encore (jusqu'a 1 Mo ou 60 ms) au lieu de 64 Ko par appel,
+    // sinon il attend, bloque, que la page revienne chercher la suite
+    let debut: float = os.clock()
+    while texte != "" and len(texte) < 1000000 and os.clock() - debut < 0.06 {
+        p.wait_for(0.0)
+        let encore: string = p.read()
+        if encore == "" {
+            break
+        }
+        texte = texte + encore
+    }
     let fini: bool = not p.running()
     let code: int = -1
     if fini {

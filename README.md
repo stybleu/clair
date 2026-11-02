@@ -127,6 +127,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
+- [Clair V0.71.2](docs/README_V0.71.2.md) : la console de Clair Studio suit les programmes qui écrivent beaucoup (100 000 lignes : 0,6 s au lieu de 18 s), Copier garde tout
 - [Clair V0.71.1](docs/README_V0.71.1.md) : `nbody` compte la relativité générale du Soleil (`s.c`, avec IAS15) : Mercure tourne de 43" par siècle (Einstein), comme REBOUNDx
 - [Clair V0.71](docs/README_V0.71.md) : `nbody` avec MERCURIUS, l'intégrateur hybride de REBOUND (vérifié contre REBOUND et IAS15) ; WHFast plus rapide
 - [Clair V0.70.1](docs/README_V0.70.1.md) : la fenêtre de `nbody` ne rame plus (calcul dans un fil à part, travail partagé selon la vitesse des cœurs, dessin groupé)

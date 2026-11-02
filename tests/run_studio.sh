@@ -108,6 +108,25 @@ for _ in $(seq 1 100); do
 done
 printf '%s' "$R" | grep -q '"code":137' || echec "la boucle arretee : $R"
 
+# V0.71.2 : un programme qui ecrit beaucoup : sa sortie arrive par gros morceaux (jusqu'a 1 Mo par appel), pas
+# 64 Ko (avant : 22 appels ici, et une centaine dans la page, qui attendait 150 ms entre deux)
+$C POST /api/ecrire/beaucoup.cl 'corps=def main() -> int {\n    for i in range(100000) {\n        print("ligne " + str(i) + " : du texte pour remplir")\n    }\n    return 0\n}\n' "$S" > /dev/null
+ID="$($C POST /api/lancer/beaucoup.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+[ -n "$ID" ] || echec "lancer beaucoup.cl"
+APPELS=0
+: > beaucoup.out
+for _ in $(seq 1 400); do
+    APPELS=$((APPELS + 1))
+    $C GET "/api/suivre/$ID" "$S" | corps > beaucoup.r
+    sed -n 's/.*"sortie":"\(.*\)","fini".*/\1/p' beaucoup.r | tr -d '\n' >> beaucoup.out
+    grep -q '"fini":true' beaucoup.r && break
+done
+LIGNES="$(grep -o 'remplir\\n' beaucoup.out | wc -l)"
+[ "$LIGNES" -eq 100000 ] || echec "beaucoup de sortie : $LIGNES lignes au lieu de 100000"
+[ "$APPELS" -le 12 ] || echec "beaucoup de sortie : $APPELS appels au lieu de 12 au plus (la sortie arrive par trop petits morceaux)"
+$C POST /api/supprimer/beaucoup.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "supprimer beaucoup.cl"
+rm -f beaucoup.out beaucoup.r
+
 # V0.59 : pas de recompilation quand rien n'a change ; le meme programme modifie est recompile
 $C POST /api/ecrire/vite.cl 'corps=def main() -> int {\n    print("v1")\n    return 0\n}\n' "$S" > /dev/null
 $C POST /api/lancer/vite.cl 'corps=' "$S" | corps | grep -q '"cache":false' || echec "premiere compilation"
