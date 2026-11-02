@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calcul</title>
+<!-- écrit par le designer de Clair Studio à partir de Calcul.ui -->
+<style>
+html,body{margin:0;padding:0}body{overflow-x:hidden;background:#e5e7eb}
+#fenetre{position:relative;transform-origin:0 0;overflow:hidden;font-family:system-ui,sans-serif}
+.cf-minuteur{display:none!important}
+#erreur{position:fixed;left:0;right:0;bottom:0;margin:0;padding:10px;background:#7f1d1d;color:#fff;font:13px monospace;white-space:pre-wrap;max-height:40vh;overflow:auto}
+.cf{position:absolute;box-sizing:border-box;margin:0;font-family:system-ui,sans-serif;line-height:1.25}.cf-bouton{border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:600;padding:0 8px}.cf-bouton:disabled{opacity:.5}.cf-etiquette{display:flex;align-items:center;white-space:pre-wrap;overflow:hidden}.cf-saisie{border:1px solid #9ca3af;border-radius:6px;padding:4px 8px;background:#fff;color:#111827}textarea.cf-saisie{resize:none}.cf-case{display:flex;align-items:center;gap:8px}.cf-case input{width:1.2em;height:1.2em;margin:0}.cf-curseur{padding:0;accent-color:#2563eb}.cf-liste,.cf-choix{border:1px solid #9ca3af;border-radius:6px;background:#fff;color:#111827;padding:2px 4px}.cf-image{object-fit:contain}.cf-minuteur{display:flex;align-items:center;justify-content:center;border:1px dashed #9ca3af;border-radius:6px;font-size:13px!important;color:#6b7280!important}
+</style>
+</head>
+<body>
+<div id="fenetre"></div>
+<script>
+"use strict";
+const ETAT = {"fenetre":{"name":"fenetre","kind":"fenetre","text":"Calcul","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":[],"selected":-1,"visible":true,"enabled":true,"x":0,"y":0,"width":360,"height":640,"color":"#111827","background":"#ffffff","size":16,"interval":1000,"source":"","message":""},"saisie1":{"name":"saisie1","kind":"saisie","text":"2,5","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":[],"selected":-1,"visible":true,"enabled":true,"x":20,"y":20,"width":200,"height":40,"color":"","background":"","size":16,"interval":1000,"source":"","message":""},"saisie2":{"name":"saisie2","kind":"saisie","text":"4","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":[],"selected":-1,"visible":true,"enabled":true,"x":20,"y":70,"width":200,"height":40,"color":"","background":"","size":16,"interval":1000,"source":"","message":""},"bouton1":{"name":"bouton1","kind":"bouton","text":"Multiplier","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":[],"selected":-1,"visible":true,"enabled":true,"x":20,"y":120,"width":120,"height":44,"color":"","background":"","size":16,"interval":1000,"source":"","message":""},"etiquette1":{"name":"etiquette1","kind":"etiquette","text":"Texte","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":[],"selected":-1,"visible":true,"enabled":true,"x":20,"y":180,"width":160,"height":28,"color":"","background":"","size":16,"interval":1000,"source":"","message":""},"liste1":{"name":"liste1","kind":"liste","text":"","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":["Premier","Deuxième"],"selected":-1,"visible":true,"enabled":true,"x":20,"y":220,"width":200,"height":120,"color":"","background":"","size":16,"interval":1000,"source":"","message":""},"minuteur1":{"name":"minuteur1","kind":"minuteur","text":"","value":0,"minimum":0,"maximum":100,"step":1,"checked":false,"items":[],"selected":-1,"visible":true,"enabled":true,"x":250,"y":20,"width":120,"height":30,"color":"","background":"","size":16,"interval":1000,"source":"","message":""}};
+const ORDRE = ["saisie1","saisie2","bouton1","etiquette1","liste1","minuteur1"];
+const EVENEMENTS = ["bouton1.click","fenetre.load","minuteur1.tick"];
+function creerControle(doc, c) {
+    let el;
+    switch (c.kind) {
+      case "bouton": el = doc.createElement("button"); el.type = "button"; break;
+      case "saisie": el = doc.createElement(c.height >= 80 ? "textarea" : "input"); if (el.tagName === "INPUT") el.type = "text"; break;
+      case "case": {
+        el = doc.createElement("label");
+        const b = doc.createElement("input");
+        b.type = "checkbox";
+        el.append(b, doc.createElement("span"));
+        break;
+      }
+      case "curseur": el = doc.createElement("input"); el.type = "range"; break;
+      case "liste": el = doc.createElement("select"); el.size = 4; break;
+      case "choix": el = doc.createElement("select"); break;
+      case "image": el = doc.createElement("img"); el.alt = ""; break;
+      default: el = doc.createElement("div");
+    }
+    el.className = "cf cf-" + c.kind;
+    el.dataset.nom = c.name;
+    return el;
+  }
+function appliquerControle(el, c, dessin) {
+    const s = el.style;
+    s.left = c.x + "px";
+    s.top = c.y + "px";
+    s.width = c.width + "px";
+    s.height = c.height + "px";
+    s.fontSize = c.size + "px";
+    s.color = c.color || "";
+    s.background = c.background || "";
+    s.display = c.visible || dessin ? "" : "none";
+    s.opacity = !c.visible && dessin ? "0.4" : "";
+    const actif = c.enabled || !!dessin;
+    switch (c.kind) {
+      case "bouton": case "etiquette": el.textContent = c.text; if (c.kind === "bouton") el.disabled = !actif; break;
+      case "minuteur": el.textContent = "⏱ " + c.name; break;
+      case "saisie": if (el.value !== c.text) el.value = c.text; el.disabled = !actif; break;
+      case "case": el.firstChild.checked = c.checked; el.firstChild.disabled = !actif; el.lastChild.textContent = c.text; break;
+      case "curseur": el.min = c.minimum; el.max = c.maximum; el.step = c.step > 0 ? c.step : "any"; el.value = c.value; el.disabled = !actif; break;
+      case "liste": case "choix": {
+        const cle = JSON.stringify(c.items);
+        if (el.dataset.items !== cle) {
+          el.textContent = "";
+          for (const t of c.items) { const o = el.ownerDocument.createElement("option"); o.textContent = t; el.appendChild(o); }
+          el.dataset.items = cle;
+        }
+        el.selectedIndex = c.selected;
+        el.disabled = !actif;
+        if (c.kind === "liste") el.size = Math.max(2, Math.floor(c.height / (c.size * 1.45)));
+        break;
+      }
+      case "image": if (c.source && el.getAttribute("src") !== c.source) el.setAttribute("src", c.source); if (!c.source) el.removeAttribute("src"); break;
+      default: break;
+    }
+  }
+(function pageApplication() {
+    /* le programme de la page : ETAT, ORDRE et EVENEMENTS sont ecrits avant lui */
+    const fenetre = document.getElementById("fenetre");
+    const elements = {};
+    const minuteurs = {};
+    const attente = {};
+    let file = Promise.resolve();
+
+    function corps(ev) {
+      const p = new URLSearchParams();
+      p.set("_evenement", ev);
+      for (const nom of Object.keys(ETAT)) {
+        const c = ETAT[nom];
+        for (const k of Object.keys(c)) {
+          const v = c[k];
+          p.set(nom + "." + k, Array.isArray(v) ? v.join("\n") : typeof v === "boolean" ? (v ? "1" : "0") : String(v));
+        }
+      }
+      return p;
+    }
+
+    function erreur(texte) {
+      let b = document.getElementById("erreur");
+      if (!b) {
+        b = document.createElement("pre");
+        b.id = "erreur";
+        b.addEventListener("click", () => b.remove());
+        document.body.appendChild(b);
+      }
+      b.textContent = texte;
+    }
+
+    function envoyer(ev) {
+      if (!EVENEMENTS.includes(ev)) return;
+      file = file.then(async () => {
+        let r;
+        try {
+          r = await fetch("evenement", { method: "POST", body: corps(ev) });
+        } catch (e) {
+          erreur("Le programme ne répond plus (il est arrêté ?).");
+          return;
+        }
+        const t = await r.text();
+        if (!r.ok) {
+          erreur(t.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+          return;
+        }
+        const nouveau = JSON.parse(t);
+        for (const nom of Object.keys(nouveau)) if (ETAT[nom]) ETAT[nom] = nouveau[nom];
+        montrer();
+        const m = ETAT.fenetre.message;
+        if (m) {
+          ETAT.fenetre.message = "";
+          alert(m);
+        }
+      });
+    }
+
+    function plusTard(ev, ms) {
+      clearTimeout(attente[ev]);
+      attente[ev] = setTimeout(() => envoyer(ev), ms);
+    }
+
+    function montrer() {
+      const f = ETAT.fenetre;
+      document.title = f.text || "Application";
+      fenetre.style.width = f.width + "px";
+      fenetre.style.height = f.height + "px";
+      fenetre.style.background = f.background || "";
+      fenetre.style.color = f.color || "";
+      fenetre.style.fontSize = f.size + "px";
+      document.body.style.background = f.background || "";
+      for (const nom of ORDRE) appliquerControle(elements[nom], ETAT[nom], false);
+      for (const nom of ORDRE) {
+        const c = ETAT[nom];
+        if (c.kind !== "minuteur") continue;
+        const ev = nom + ".tick", voulu = c.enabled && c.interval > 0 && EVENEMENTS.includes(ev) ? c.interval : 0;
+        if (minuteurs[nom] && minuteurs[nom].ms === voulu) continue;
+        if (minuteurs[nom]) clearInterval(minuteurs[nom].id);
+        minuteurs[nom] = { ms: voulu, id: voulu ? setInterval(() => envoyer(ev), Math.max(20, voulu)) : 0 };
+      }
+      echelle();
+    }
+
+    function echelle() {
+      const f = ETAT.fenetre, k = Math.min(window.innerWidth / f.width, 2);
+      fenetre.style.transform = "scale(" + k + ")";
+      document.body.style.height = f.height * k + "px";
+      document.body.style.width = f.width * k + "px";
+    }
+
+    for (const nom of ORDRE) {
+      const c = ETAT[nom], el = creerControle(document, c);
+      elements[nom] = el;
+      fenetre.appendChild(el);
+      switch (c.kind) {
+        case "bouton": case "etiquette": case "image":
+          el.addEventListener("click", () => envoyer(nom + ".click"));
+          break;
+        case "saisie":
+          el.addEventListener("input", () => { ETAT[nom].text = el.value; plusTard(nom + ".change", 300); });
+          el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && el.tagName === "INPUT") { e.preventDefault(); ETAT[nom].text = el.value; envoyer(nom + ".enter"); }
+          });
+          break;
+        case "case":
+          el.firstChild.addEventListener("change", () => { ETAT[nom].checked = el.firstChild.checked; envoyer(nom + ".change"); });
+          break;
+        case "curseur":
+          el.addEventListener("input", () => { ETAT[nom].value = +el.value; plusTard(nom + ".change", 120); });
+          break;
+        case "liste": case "choix":
+          el.addEventListener("change", () => { ETAT[nom].selected = el.selectedIndex; envoyer(nom + ".select"); });
+          break;
+        default:
+          break;
+      }
+    }
+    window.addEventListener("resize", echelle);
+    montrer();
+    envoyer("fenetre.load");
+  })();
+</script>
+</body>
+</html>

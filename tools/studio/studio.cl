@@ -455,14 +455,14 @@ def verifier(req: Request, nom: string) -> Response {
     return web.json("{\"ok\":" + oui(c.code == 0) + ",\"erreurs\":" + web.json_string(c.err + c.out) + ",\"ms\":" + duree + "}")
 }
 
-// V0.59 : la source des modules os et web (V0.61 plot, V0.66 gui et nbody), pour l'autocompletion de l'editeur
+// V0.59 : la source des modules os et web (V0.61 plot, V0.66 gui et nbody, V0.67 forms), pour l'autocompletion de l'editeur
 @web.route("/api/module/<nom>")
 def module_source(req: Request, nom: string) -> Response {
     if not autorise(req) {
         return refus()
     }
     let chemin: string = os.join(racine(), "src/clair_" + nom + ".cl")
-    if (nom != "os" and nom != "web" and nom != "plot" and nom != "gui" and nom != "nbody") or not os.is_file(chemin) {
+    if (nom != "os" and nom != "web" and nom != "plot" and nom != "gui" and nom != "nbody" and nom != "forms") or not os.is_file(chemin) {
         return web.error(404, "pas de module " + nom)
     }
     return web.text(read_text(chemin))

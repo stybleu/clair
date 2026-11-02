@@ -1,0 +1,31 @@
+/* Clair Studio (V0.67) : le designer des fenetres */
+#app.mode-dessin #editeur, #app.mode-dessin .touches, #app.mode-dessin .aide, #app.mode-dessin .diag,
+#app.mode-dessin #b-c, #app.mode-dessin #b-tester { display: none; }
+#b-dessin { font: 600 15px var(--code); }
+#designer { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--fond2); }
+#designer[hidden] { display: none; }
+.d-palette { display: flex; gap: 4px; padding: 4px; overflow-x: auto; scrollbar-width: none; flex: none;
+             border-bottom: 1px solid var(--bord); background: var(--fond); }
+.d-palette button { flex: none; min-height: 36px; padding: 0 10px; font-size: 14px; white-space: nowrap; }
+.d-scene { flex: 1; min-height: 0; overflow: auto; padding: 12px; touch-action: pan-y; }
+.d-cadre { position: relative; margin: 0 auto; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35); border-radius: 4px; overflow: hidden; }
+.d-feuille { position: absolute; left: 0; top: 0; transform-origin: 0 0; overflow: hidden; font-family: system-ui, sans-serif; }
+.d-feuille .cf { pointer-events: none; }
+.d-porte { position: absolute; touch-action: none; cursor: move; }
+.d-selection { position: absolute; border: 2px solid #f59e0b; box-sizing: border-box; pointer-events: none; }
+.d-selection[hidden] { display: none; }
+.d-poignee { position: absolute; background: #f59e0b; border-radius: 50%; pointer-events: auto; touch-action: none; cursor: nwse-resize; }
+.d-props { flex: none; max-height: 42%; overflow: auto; border-top: 2px solid var(--bord); background: var(--fond); padding: 6px 8px 10px; }
+.d-tete { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.d-tete .d-nom { flex: 1; min-width: 0; font: 600 15px var(--code); padding: 6px 8px; }
+.d-tete .d-nom.faux { outline: 2px solid var(--rouge); }
+.d-evenements { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.d-evenements button { font: 13px var(--code); min-height: 32px; padding: 0 10px; color: var(--accent); }
+.d-grille { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 10px; }
+.d-grille label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--discret); }
+.d-grille label.d-oui { flex-direction: row; align-items: center; gap: 8px; font-size: 14px; color: var(--texte); }
+.d-grille input, .d-grille textarea { font-size: 15px; padding: 6px 8px; min-width: 0; }
+.d-grille label:has(textarea) { grid-column: 1 / -1; }
+.figure.appli { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+#sortie .figure.appli a { display: inline-block; padding: 10px 16px; border-radius: 8px; background: var(--accent); color: #fff;
+                  text-decoration: none; font-weight: 600; }

@@ -1237,6 +1237,36 @@ if printf '#include <SDL3/SDL.h>\n' | clang -E -x c - > /dev/null 2>&1; then
     printf '%s\n' 'gui_abi.c : OK -> les declarations de SDL3 du module gui sont celles des en-tetes de SDL3'
 fi
 
+# V0.67 : le module forms : une application ecrite par le designer de Clair Studio (tests/forms : Calcul.ui, .cl, .html)
+forms_echec() { printf '%s\n' "forms (tests/forms/Calcul.cl) : ECHEC -> $1" >&2; kill "$FPID" 2> /dev/null; exit 1; }
+[ -x build/web_client ] || clang -std=c11 -O2 tests/web_client.c -o build/web_client
+./build/clair tests/forms/Calcul.cl -o build/test_forms_calcul
+rm -rf build/forms_test
+mkdir -p build/forms_test
+cp tests/forms/Calcul.html build/forms_test/
+(cd build/forms_test && exec env CLAIR_FORMS_PORT=0 ../test_forms_calcul > sortie.txt 2> erreurs.txt) &
+FPID=$!
+FPORT=""
+for _ in $(seq 1 100); do
+    FPORT="$(sed -n 's|.*http://127\.0\.0\.1:\([0-9]*\)/$|\1|p' build/forms_test/erreurs.txt 2> /dev/null | head -n 1)"
+    [ -n "$FPORT" ] && break
+    sleep 0.05
+done
+[ -n "$FPORT" ] || forms_echec "le serveur ne demarre pas : $(cat build/forms_test/erreurs.txt)"
+FH="Content-Type: application/x-www-form-urlencoded"
+fc() { ./build/web_client "$FPORT" POST /evenement "corps=$1" "$FH" | sed '1,/^$/d'; }
+./build/web_client "$FPORT" GET / | grep -q '<div id="fenetre"></div>' || forms_echec "la page"
+fc '_evenement=fenetre.load&etiquette1.kind=etiquette' | grep -q '"etiquette1":{"name":"etiquette1","kind":"etiquette","text":"Prêt"' || forms_echec "fenetre.load"
+r="$(fc '_evenement=bouton1.click&saisie1.text=2%2C5&saisie2.text=4&liste1.items=a&liste1.selected=0')"
+printf '%s' "$r" | grep -q '"text":"Produit : 10"' || forms_echec "bouton1.click : $r"
+printf '%s' "$r" | grep -q '"items":\["a","2,5 x 4"\],"selected":1' || forms_echec "la liste : $r"
+fc '_evenement=bouton1.click&saisie1.text=abc&saisie2.text=4' | grep -q '"message":"Il faut deux nombres"' || forms_echec "message"
+fc '_evenement=minuteur1.tick&minuteur1.text=41' | grep -q '"minuteur1":{"name":"minuteur1","kind":"","text":"42"' || forms_echec "minuteur1.tick"
+fc '_evenement=inconnu&saisie1.text=x%20y&saisie1.visible=0' | grep -q '"saisie1":{"name":"saisie1","kind":"","text":"x y",.*"visible":false' || forms_echec "un evenement sans fonction rend l'etat tel quel"
+kill "$FPID" 2> /dev/null
+wait "$FPID" 2> /dev/null || true
+printf '%s\n' 'forms (Calcul.cl) : OK -> page, ouverture, bouton (nombres avec virgule), liste, message, minuteur, etat rendu tel quel'
+
 # V0.58 : Clair Studio, l'IDE ecrit en Clair (tools/studio)
 if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     printf '%s\n' 'tools/studio : ECHEC' >&2

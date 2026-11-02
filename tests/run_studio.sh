@@ -284,6 +284,12 @@ $C POST "/api/enregistrer-csv/mesures.csv?d=$ROOT/build/studio_projets/export_cs
 
 [ "$( $C POST '/api/enregistrer-csv/dehors.csv?d=/etc' 'corps=donnees' "$S" | code )" = 403 ] || echec "CSV dossier interdit"
 
+# V0.67 : le designer des fenetres et la source du module forms
+[ "$($C GET /static/designer.js "$S" | code)" = 200 ] || echec "designer.js"
+[ "$($C GET /static/designer.css "$S" | code)" = 200 ] || echec "designer.css"
+$C GET / "$S" | grep -q 'b-nouvelle-fenetre' || echec "le bouton + Fenetre"
+$C GET /api/module/forms "$S" | grep -q '^Class Control {' || echec "la source du module forms"
+
 kill $PID 2> /dev/null
 wait $PID 2> /dev/null
 echo "studio : OK"
