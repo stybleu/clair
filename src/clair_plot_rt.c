@@ -32,8 +32,8 @@ typedef struct {
 static struct {
     int w, h;
     char *title, *xlabel, *ylabel;
-    int fixed_x, fixed_y, equal, hide_axes, colormap, has_extent;
-    double xmin, xmax, ymin, ymax, ex0, ex1, ey0, ey1;
+    int fixed_x, fixed_y, fixed_c, equal, hide_axes, colormap, has_extent;
+    double xmin, xmax, ymin, ymax, cmin, cmax, ex0, ex1, ey0, ey1;
     ClairPlotItem *items;
     size_t count, cap;
     char **frames;                /* an animation: each frame drawn */
@@ -290,7 +290,7 @@ static void clair_plot_reset(void) {
     free(clair_plot.title); free(clair_plot.xlabel); free(clair_plot.ylabel);
     clair_plot.title = clair_plot.xlabel = clair_plot.ylabel = NULL;
     clair_plot.w = 640; clair_plot.h = 400;
-    clair_plot.fixed_x = clair_plot.fixed_y = clair_plot.equal = clair_plot.hide_axes = 0;
+    clair_plot.fixed_x = clair_plot.fixed_y = clair_plot.fixed_c = clair_plot.equal = clair_plot.hide_axes = 0;
     clair_plot.colormap = clair_plot.has_extent = 0;
 }
 
@@ -337,9 +337,10 @@ static int64_t clair_plot_set(int64_t what, const char *text) {
 }
 
 static int64_t clair_plot_range(int64_t axis, double low, double high) {
-    if (!(low < high) || !isfinite(low) || !isfinite(high)) clair_plot_fail("plot.xrange() and plot.yrange() need low < high");
+    if (!(low < high) || !isfinite(low) || !isfinite(high)) clair_plot_fail("plot.xrange(), plot.yrange() and plot.crange() need low < high");
     if (axis == 0) { clair_plot.fixed_x = 1; clair_plot.xmin = low; clair_plot.xmax = high; }
-    else { clair_plot.fixed_y = 1; clair_plot.ymin = low; clair_plot.ymax = high; }
+    else if (axis == 1) { clair_plot.fixed_y = 1; clair_plot.ymin = low; clair_plot.ymax = high; }
+    else { clair_plot.fixed_c = 1; clair_plot.cmin = low; clair_plot.cmax = high; }     /* V0.63: the colors of a field */
     return 0;
 }
 
@@ -510,8 +511,9 @@ static void clair_plot_extend(double *lo, double *hi, double v) {
     if (v > *hi) *hi = v;
 }
 
-/* the smallest and largest values of a field (its finite values) */
+/* the smallest and largest values of a field (its finite values), or plot.crange() */
 static void clair_plot_field_range(const ClairPlotItem *it, double *lo, double *hi) {
+    if (clair_plot.fixed_c) { *lo = clair_plot.cmin; *hi = clair_plot.cmax; return; }
     *lo = INFINITY; *hi = -INFINITY;
     for (size_t i = 0; i < it->n; i++) clair_plot_extend(lo, hi, it->x[i]);
     if (!(*lo <= *hi)) { *lo = 0; *hi = 1; }
@@ -651,6 +653,19 @@ static void clair_plot_contour_level(ClairPlotBuf *b, const ClairPlotView *v, co
 
 static int clair_plot_ids = 0;
 
+/* V0.63: contour lines and arrows over a map in colors: dark, with a light edge, seen on any color
+   (in dark mode the text color would vanish on the light parts of the map) */
+static void clair_plot_path_over(ClairPlotBuf *b, const ClairPlotItem *it, int over_map, const char *d) {
+    if (over_map && strcmp(it->color, "currentColor") == 0) {
+        clair_plot_printf(b, "<path fill=\"none\" stroke=\"#ffffff\" stroke-opacity=\"0.55\" stroke-width=\"%.2g\" stroke-linecap=\"round\" d=\"%s\"/>\n",
+                          it->width + 2, d);
+        clair_plot_printf(b, "<path fill=\"none\" stroke=\"#111827\" stroke-width=\"%.2g\" stroke-linecap=\"round\" d=\"%s\"/>\n", it->width, d);
+    } else {
+        clair_plot_printf(b, "<path fill=\"none\" stroke=\"%s\" stroke-width=\"%.2g\" stroke-linecap=\"round\" d=\"%s\"/>\n",
+                          it->color, it->width, d);
+    }
+}
+
 /* the inside of an <svg> of w x h: background, grid, axes, data, legend */
 static void clair_plot_draw(ClairPlotBuf *b, int w, int h) {
     ClairPlotView v;
@@ -660,8 +675,11 @@ static void clair_plot_draw(ClairPlotBuf *b, int w, int h) {
     clair_plot_printf(b, "<rect class=\"cp-fond\" x=\"0\" y=\"0\" width=\"%d\" height=\"%d\"/>\n", w, h);
     clair_plot_printf(b, "<defs><clipPath id=\"cp%d\"><rect x=\"%.1f\" y=\"%.1f\" width=\"%.1f\" height=\"%.1f\"/></clipPath></defs>\n",
                       v.id, v.left, v.top, v.pw, v.ph);
-    int bars = 0;
-    for (size_t i = 0; i < clair_plot.count; i++) if (clair_plot.items[i].kind == CLAIR_PLOT_BARS) bars = 1;
+    int bars = 0, has_map = 0;
+    for (size_t i = 0; i < clair_plot.count; i++) {
+        if (clair_plot.items[i].kind == CLAIR_PLOT_BARS) bars = 1;
+        if (clair_plot.items[i].kind == CLAIR_PLOT_MAP) has_map = 1;
+    }
     char t[64];
     double sx = clair_plot_step(v.xmax - v.xmin, (int)(v.pw / 80) < 2 ? 2 : (int)(v.pw / 80));
     double sy = clair_plot_step(v.ymax - v.ymin, (int)(v.ph / 50) < 2 ? 2 : (int)(v.ph / 50));
@@ -703,10 +721,11 @@ static void clair_plot_draw(ClairPlotBuf *b, int w, int h) {
                 double lo, hi;
                 clair_plot_field_range(it, &lo, &hi);
                 double step = clair_plot_step(hi - lo, it->levels);
-                clair_plot_printf(b, "<path fill=\"none\" stroke=\"%s\" stroke-width=\"%.2g\" stroke-linecap=\"round\" d=\"", it->color, it->width);
+                ClairPlotBuf d = { 0 };
                 CLAIR_PLOT_TICKS(level, lo, hi, step)
-                    if (level > lo && level < hi) clair_plot_contour_level(b, &v, it, level);
-                clair_plot_str(b, "\"/>\n");
+                    if (level > lo && level < hi) clair_plot_contour_level(&d, &v, it, level);
+                clair_plot_path_over(b, it, has_map, d.p ? d.p : "");
+                free(d.p);
                 break;
             }
             case CLAIR_PLOT_ARROWS: {
@@ -720,7 +739,7 @@ static void clair_plot_draw(ClairPlotBuf *b, int w, int h) {
                 double cell_y = v.ph * (it->y1 - it->y0) / (v.ymax - v.ymin) / (double)it->ny * (double)every;
                 double cell = cell_x < cell_y ? cell_x : cell_y, scale = big > 0 ? 0.9 * cell / big : 0;
                 double cw = (it->x1 - it->x0) / (double)it->nx, ch = (it->y1 - it->y0) / (double)it->ny;
-                clair_plot_printf(b, "<path fill=\"none\" stroke=\"%s\" stroke-width=\"%.2g\" stroke-linecap=\"round\" d=\"", it->color, it->width);
+                ClairPlotBuf d = { 0 };
                 for (size_t j = every / 2; j < it->ny; j += every)
                     for (size_t k = every / 2; k < it->nx; k += every) {
                         double u = it->x[j * it->nx + k], w2 = it->y[j * it->nx + k];
@@ -728,10 +747,11 @@ static void clair_plot_draw(ClairPlotBuf *b, int w, int h) {
                         double cx = clair_plot_px(&v, it->x0 + ((double)k + 0.5) * cw), cy = clair_plot_py(&v, it->y0 + ((double)j + 0.5) * ch);
                         double dx = u * scale, dy = -w2 * scale;
                         if (fabs(dx) + fabs(dy) < 3) continue;          /* too short to be seen as an arrow */
-                        clair_plot_printf(b, "M%.1f %.1fL%.1f %.1f", cx - dx / 2, cy - dy / 2, cx + dx / 2, cy + dy / 2);
-                        clair_plot_arrow_head(b, cx - dx / 2, cy - dy / 2, cx + dx / 2, cy + dy / 2, 4 + it->width);
+                        clair_plot_printf(&d, "M%.1f %.1fL%.1f %.1f", cx - dx / 2, cy - dy / 2, cx + dx / 2, cy + dy / 2);
+                        clair_plot_arrow_head(&d, cx - dx / 2, cy - dy / 2, cx + dx / 2, cy + dy / 2, 4 + it->width);
                     }
-                clair_plot_str(b, "\"/>\n");
+                clair_plot_path_over(b, it, has_map, d.p ? d.p : "");
+                free(d.p);
                 break;
             }
             case CLAIR_PLOT_LINE: case CLAIR_PLOT_POLYGON: {

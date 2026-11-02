@@ -1168,6 +1168,32 @@ for t in longueurs:'plot.line(): the two lists have 2 and 1 values, they need as
 done
 printf '%s\n' 'plot_module.cl : OK -> courbes, points, legende, titre echappe, dessin sans axes, polygone, cercle, fleche, texte, barres, histogramme, carte en couleurs (PNG), isolignes, fleches de vent, animation, plot.save, mode Clair Studio, erreurs'
 
+# V0.63 : les exemples meteo (exemples/meteo) : leurs tests, puis chacun en entier (sans Internet)
+rm -rf build/meteo_test
+mkdir -p build/meteo_test
+meteo_echec() { printf '%s\n' "exemples/meteo : ECHEC -> $1" >&2; exit 1; }
+for ex in lorenz chaleur pluie; do
+    ./build/clair --test "exemples/meteo/$ex.cl" -o "build/test_meteo_$ex" > /dev/null 2>&1 || meteo_echec "$ex.cl ne compile pas avec --test"
+    (cd build/meteo_test && "../test_meteo_$ex" > "tests_$ex.txt" 2>&1) || { tail -n 8 "build/meteo_test/tests_$ex.txt" >&2; meteo_echec "les tests de $ex.cl"; }
+    ./build/clair "exemples/meteo/$ex.cl" -o "build/meteo_$ex" > /dev/null 2>&1 || meteo_echec "$ex.cl ne compile pas"
+done
+(cd build/meteo_test && env -u CLAIR_PLOT_DIR ../meteo_lorenz > lorenz.txt 2> /dev/null) || meteo_echec "lorenz.cl"
+grep -q "^Ils s'écartent de plus de 1 après t = 26.7 : au-delà, on ne peut plus prévoir.$" build/meteo_test/lorenz.txt || meteo_echec "lorenz.cl : $(cat build/meteo_test/lorenz.txt)"
+[ -s build/meteo_test/plot_2.svg ] || meteo_echec "lorenz.cl : figures"
+(cd build/meteo_test && env -u CLAIR_PLOT_DIR ../meteo_chaleur > chaleur.txt 2> /dev/null) || meteo_echec "chaleur.cl"
+[ "$(sed -n 's/^Chaleur totale au début : //p' build/meteo_test/chaleur.txt)" = "$(sed -n 's/^Chaleur totale à la fin : \([0-9.]*\) .*/\1/p' build/meteo_test/chaleur.txt)" ] || meteo_echec "chaleur.cl : la chaleur ne se conserve pas : $(cat build/meteo_test/chaleur.txt)"
+grep -q 'data-frames="40"' build/meteo_test/animation_1.svg || meteo_echec "chaleur.cl : animation"
+[ "$(grep -o '>25</text>' build/meteo_test/animation_1.svg | wc -l)" = 80 ] || meteo_echec "chaleur.cl : plot.crange garde la meme echelle sur les 40 images"
+./build/clair tests/meteo/fabriquer.cl -o build/meteo_fabriquer > /dev/null 2>&1 || meteo_echec "tests/meteo/fabriquer.cl"
+(cd build/meteo_test && ../meteo_fabriquer > historique.csv) || meteo_echec "fabriquer historique.csv"
+(cd build/meteo_test && env -u CLAIR_PLOT_DIR ../meteo_pluie > pluie.txt 2> /dev/null) || meteo_echec "pluie.cl : $(tail -n 3 build/meteo_test/pluie.txt)"
+grep -q '^2902 heures, du 2023-11-01 au 2024-02-29' build/meteo_test/pluie.txt || meteo_echec "pluie.cl : lecture du fichier : $(head -n 2 build/meteo_test/pluie.txt)"
+grep -q '^Apprentissage sur 1451 heures, mesure sur les 1433 heures de 2024.$' build/meteo_test/pluie.txt || meteo_echec "pluie.cl : annees"
+[ "$(grep -c '^passage ' build/meteo_test/pluie.txt)" = 10 ] || meteo_echec "pluie.cl : apprentissage"
+grep -q '^  réseau de neurones     : réussite [0-9]* %, pluies annoncées [0-9]* %, fausses alertes' build/meteo_test/pluie.txt || meteo_echec "pluie.cl : scores"
+[ -s build/meteo_test/plot_3.svg ] || meteo_echec "pluie.cl : figures"
+printf '%s\n' 'exemples/meteo : OK -> lorenz (effet papillon, RK4, points fixes), chaleur (conservation, animation), pluie (lecture du CSV d Open-Meteo, reseau de neurones, gradient, scores, figures)'
+
 # V0.58 : Clair Studio, l'IDE ecrit en Clair (tools/studio)
 if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     printf '%s\n' 'tools/studio : ECHEC' >&2

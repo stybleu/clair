@@ -35,6 +35,12 @@ def yrange(low: float, high: float) -> int {
     return __plot_range(1, low, high)
 }
 
+// the values that the colors of plot.heatmap go from and to (otherwise: the smallest and largest of the field);
+// the same scale for every frame of an animation
+def crange(low: float, high: float) -> int {
+    return __plot_range(2, low, high)
+}
+
 // the same scale on both axes: a circle stays round, a square square
 def equal() -> int {
     return __plot_flag(0, 1)
