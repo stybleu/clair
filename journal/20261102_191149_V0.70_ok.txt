@@ -1,0 +1,30 @@
+date : 2026-11-02T19:11:49Z
+titre : mise a jour V0.70 (ok)
+clair : 20b6248 feat(nbody): arbre de Barnes et Hut sur tous les coeurs (verif
+processeur : aarch64, coeurs : 8
+android : 13
+clang : clang version 21.1.8
+sdl3 : libSDL3.so
+--- resultat
+V0.70 APPLIQUEE, COMPILATION OK
+tests reussis : 277
+nbody_tree.cl : OK -> sphere de Plummer (equilibre, rayon de
+ TOUS LES TESTS SONT OK
+arbre, 10000 etoiles : 293.9 ms par pas (tous les coeurs), 589.9 ms (u
+ENVOYE SUR GITHUB : 20b6248 feat(nbody): arbre de Barnes et Hut sur tous les coe
+--- erreurs
+--- compilation
+--- tests
+277
+nbody_tree.cl : OK -> sphere de Plummer (equilibre, rayon de demi-masse, meme graine), arbre comme le calcul direct, energie, un coeur ou tous au dernier chiffre, Yoshida, collisions trouvees par l arbre, deux amas sauves et relus
+gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre
+gui_abi.c : OK -> les declarations de SDL3 du module gui sont celles des en-tetes de SDL3
+tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot, sous-dossiers, reglages
+ TOUS LES TESTS SONT OK
+==================================================
+--- vitesse
+arbre, 1000 etoiles : 12.6 ms par pas (tous les coeurs), 24.6 ms (un coeur)
+arbre, 10000 etoiles : 293.9 ms par pas (tous les coeurs), 589.9 ms (un coeur)
+calcul direct, 2000 etoiles : 35.3 ms par pas
+IAS15, systeme solaire, 100 ans : 1.05 s
+WHFast, systeme solaire, 1 000 ans : 0.41 s
