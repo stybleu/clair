@@ -1135,7 +1135,7 @@ if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     tail -n 8 build/studio.log >&2
     exit 1
 fi
-printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules'
+printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

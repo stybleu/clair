@@ -2,6 +2,7 @@
 # V0.58 : Clair Studio (tools/studio/studio.cl), interroge comme le ferait l'editeur
 # du navigateur : jeton, fichiers, compilation, lancement, entree, arret.
 # V0.59 : cache de compilation, verification sans compiler, tests, sources des modules.
+# V0.60 : Git : depot, etat, differences, versions, historique, restaurer, annuler, envoyer, recuperer.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -11,7 +12,8 @@ rm -rf build/studio_test build/studio_projets
 cp -r tools/studio build/studio_test
 mkdir -p build/studio_projets
 cd build/studio_test
-CLAIR_STUDIO_OUVRIR=0 ../studio_test_bin "$ROOT/build/studio_projets" 0 > studio.out 2> studio.err &
+# le dossier des programmes est dans build/, donc dans le depot de Clair : git ne doit pas le voir
+GIT_CEILING_DIRECTORIES="$ROOT/build" CLAIR_STUDIO_OUVRIR=0 ../studio_test_bin "$ROOT/build/studio_projets" 0 > studio.out 2> studio.err &
 PID=$!
 trap 'kill $PID 2> /dev/null' EXIT
 PORT=""
@@ -121,6 +123,48 @@ $C POST /api/tester/vite.cl 'corps=' "$S" | corps | grep -q '"ok":false,"erreurs
 $C GET /api/module/os "$S" | grep -q '^def run(command: list\[string\]) -> RunResult {' || echec "la source du module os"
 [ "$($C GET /api/module/secret "$S" | code)" = 404 ] || echec "un module qui n'existe pas"
 [ "$($C GET /api/module/os | code)" = 403 ] || echec "la source d'un module sans jeton"
+
+# V0.60 : Git dans le dossier des programmes
+if command -v git > /dev/null; then
+    gj() { $C "$@" "$S" | corps; }
+    gj GET /api/git/etat | grep -q '"git":true,"depot":false' || echec "git : pas encore de depot"
+    gj POST /api/git/creer 'corps=' | grep -q '"ok":true' || echec "git : creer le depot"
+    gj GET /api/git/etat | grep -q '"statut":"## No commits yet on main\\n?? bonjour.cl\\n' || echec "git : etat d'un depot neuf : $(gj GET /api/git/etat)"
+    gj GET '/api/git/diff/bonjour.cl?nouveau=1' | grep -q '+def main() -> int {' || echec "git : un fichier nouveau"
+    gj POST /api/git/identite 'corps=Ada Lovelace\nada@example.org' | grep -q '"ok":true' || echec "git : identite"
+    gj POST /api/git/version 'corps=' | grep -q '"ok":false' || echec "git : une version sans message"
+    gj POST /api/git/version 'corps=premiere version' | grep -q '"ok":true' || echec "git : premiere version"
+    gj GET /api/git/historique | grep -q 'Ada Lovelace\\u001f.*\\u001fpremiere version' || echec "git : historique : $(gj GET /api/git/historique)"
+    V1="$(gj GET /api/git/historique | sed -n 's/.*"sortie":"\([0-9a-f]*\)\\u001f.*/\1/p')"
+    [ -n "$V1" ] || echec "git : numero de version"
+    $C POST /api/ecrire/teste.cl 'corps=def carre(x: int) -> int {\n    return x * x * 1\n}\n' "$S" > /dev/null
+    gj GET /api/git/etat | grep -q '\\n M teste.cl\\n' || echec "git : un fichier modifie"
+    gj GET /api/git/diff/teste.cl | grep -q '+    return x \* x \* 1' || echec "git : diff"
+    gj GET /api/git/lignes/teste.cl | grep -q '@@ -2,9 +2 @@' || echec "git : lignes changees : $(gj GET /api/git/lignes/teste.cl)"
+    gj POST /api/git/version 'corps=carre fois 1' | grep -q '"ok":true' || echec "git : deuxieme version"
+    gj GET "/api/git/voir/$V1" | grep -q 'premiere version' || echec "git : voir une version"
+    gj POST "/api/git/restaurer/$V1/teste.cl" 'corps=' | grep -q '"ok":true' || echec "git : restaurer"
+    [ "$(sed -n 2p "$ROOT/build/studio_projets/teste.cl")" = '    return x * x' ] || echec "git : le fichier restaure"
+    gj POST /api/git/annuler/teste.cl 'corps=' | grep -q '"ok":true' || echec "git : annuler"
+    [ "$(sed -n 2p "$ROOT/build/studio_projets/teste.cl")" = '    return x * x * 1' ] || echec "git : le fichier annule"
+    # envoyer et recuperer, avec un depot distant dans un dossier
+    rm -rf "$ROOT/build/studio_distant.git" "$ROOT/build/studio_autre"
+    git init -q --bare -b main "$ROOT/build/studio_distant.git"
+    gj POST /api/git/distant 'corps=ext::sh -c touch% /tmp/pirate' | grep -q '"ok":false' || echec "git : une adresse ext:: devrait etre refusee"
+    gj POST /api/git/distant "corps=$ROOT/build/studio_distant.git" | grep -q '"ok":true' || echec "git : relier"
+    gj POST /api/git/envoyer 'corps=' | grep -q '"ok":true' || echec "git : envoyer : $(gj POST /api/git/envoyer 'corps=')"
+    git clone -q "$ROOT/build/studio_distant.git" "$ROOT/build/studio_autre"
+    printf 'def main() -> int {\n    print("ailleurs")\n    return 0\n}\n' > "$ROOT/build/studio_autre/bonjour.cl"
+    git -C "$ROOT/build/studio_autre" -c user.name=B -c user.email=b@example.org commit -q -am "ailleurs"
+    git -C "$ROOT/build/studio_autre" push -q
+    gj POST /api/git/recuperer 'corps=' | grep -q '"ok":true' || echec "git : recuperer"
+    grep -q 'ailleurs' "$ROOT/build/studio_projets/bonjour.cl" || echec "git : le fichier recupere"
+    # rien hors du dossier, pas d'option deguisee en fichier ou en version
+    [ "$(gj GET /api/git/diff/..%2F..%2Fsrc%2Fmain.c | head -c 1)" != '{' ] || echec "git : un chemin hors du dossier"
+    [ "$($C GET /api/git/diff/--output=x "$S" | code)" = 403 ] || echec "git : une option a la place d'un fichier"
+    [ "$($C POST /api/git/restaurer/--help/teste.cl 'corps=' "$S" | code)" = 403 ] || echec "git : une option a la place d'une version"
+    [ "$($C GET /api/git/etat | code)" = 403 ] || echec "git : sans jeton"
+fi
 
 # renommer, supprimer, et rien en dehors du dossier
 $C POST /api/renommer/essai.cl/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "renommer"

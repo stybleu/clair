@@ -1,4 +1,4 @@
-/* Clair Studio (V0.58, V0.59) */
+/* Clair Studio (V0.58 a V0.60) */
 :root {
   --fond: #ffffff; --fond2: #f3f4f6; --bord: #d9dce1; --texte: #1d2129; --discret: #6b7280;
   --accent: #2563eb; --vert: #15803d; --rouge: #b91c1c; --erreur-fond: #fde8e8;
@@ -33,7 +33,11 @@ button:active { filter: brightness(0.9); }
 .editeur { flex: 1; display: flex; min-height: 0; position: relative; font-family: var(--code); font-size: 14px; }
 .marge { width: 44px; overflow: hidden; background: var(--fond2); border-right: 1px solid var(--bord); color: var(--discret);
          text-align: right; flex: none; }
-#numeros { padding: 8px 6px 8px 0; line-height: var(--ligne); white-space: pre; will-change: transform; }
+#numeros { padding: 8px 0; line-height: var(--ligne); will-change: transform; }
+#numeros .nl { display: block; height: var(--ligne); padding-right: 6px; }
+#numeros .ga { box-shadow: inset -3px 0 0 var(--vert); }
+#numeros .gm { box-shadow: inset -3px 0 0 var(--accent); }
+#numeros .gd { box-shadow: inset 0 2px 0 var(--rouge); }
 #numeros .err { color: var(--rouge); font-weight: 700; }
 .zone { position: relative; flex: 1; min-width: 0; }
 .zone pre, .zone textarea { position: absolute; inset: 0; margin: 0; padding: 8px 10px; border: 0; font: inherit;
@@ -95,3 +99,32 @@ button:active { filter: brightness(0.9); }
 
 .fenetre { position: fixed; inset: 8px; background: var(--fond); border: 1px solid var(--bord); border-radius: 12px;
            display: flex; flex-direction: column; overflow: hidden; }
+
+/* V0.60 : Git */
+#b-git { position: relative; display: inline-flex; align-items: center; justify-content: center; }
+.badge { position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+         background: var(--accent); color: #fff; font: 700 11px/18px system-ui, sans-serif; }
+.onglets { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--bord); flex: none; }
+.onglets button { flex: 1; }
+.onglets button.actif { background: var(--accent); color: #fff; border-color: transparent; }
+.git-corps { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.git-corps p { margin: 4px 0; }
+.git-ligne { font-size: 13px; color: var(--discret); overflow-wrap: anywhere; }
+.git-boite { border: 1px solid var(--bord); border-radius: 10px; overflow: hidden; flex: none; }
+.git-tete { display: flex; gap: 10px; align-items: center; padding: 10px; cursor: pointer; }
+.git-nom { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--code); font-size: 14px; }
+.git-tete .git-nom .discret { font-family: system-ui, sans-serif; }
+.git-detail { border-top: 1px solid var(--bord); display: flex; flex-direction: column; gap: 6px; padding: 6px; background: var(--fond2); }
+.lettre { flex: none; width: 24px; text-align: center; border-radius: 5px; font: 700 12px/22px var(--code); color: #fff; }
+.lettre.M, .lettre.R { background: var(--accent); } .lettre.N, .lettre.A { background: var(--vert); } .lettre.D { background: var(--rouge); }
+.diff { margin: 0; padding: 6px; font: 12px/1.45 var(--code); white-space: pre; overflow-x: auto; }
+.diff .add { color: var(--vert); } .diff .del { color: var(--rouge); } .diff .hunk { color: var(--accent); } .diff .meta { color: var(--discret); }
+.git-message { width: 100%; font: 14px var(--code); padding: 8px; border: 1px solid var(--bord); border-radius: 8px;
+               background: var(--fond); color: var(--texte); resize: vertical; flex: none; }
+.principal { background: var(--accent); color: #fff; border-color: transparent; flex: none; }
+.principal:disabled { opacity: 0.5; }
+.git-distant { display: flex; gap: 6px; flex-wrap: wrap; flex: none; }
+.git-distant button { flex: 1; }
+.git-sortie { margin: 0; padding: 8px; font: 12px/1.45 var(--code); white-space: pre-wrap; overflow-wrap: anywhere;
+              border-radius: 8px; background: var(--fond2); flex: none; }
+.git-sortie.err { color: var(--rouge); }

@@ -1,4 +1,4 @@
-// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58, V0.59).
+// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58 a V0.60).
 // Le serveur est ce programme (modules web et os) ; l'editeur s'ouvre dans le navigateur.
 //   sh ~/clair/tools/studio/studio.sh [dossier] [port]
 import web
@@ -287,6 +287,205 @@ def code_c(req: Request, nom: string) -> Response {
     return web.text(read_text(chemin))
 }
 
+// ---- V0.60 : Git (les modifications et les versions du dossier) ----
+// git -C dossier ..., toujours avec -- avant les fichiers ; l'editeur lit ce que git ecrit.
+
+def git(args: list[string]) -> RunResult {
+    let commande: list[string] = ["git", "-C", dossier(), "-c", "core.quotePath=false", "-c", "color.ui=false"]
+    for a in args {
+        commande.append(a)
+    }
+    return os.run(commande)
+}
+
+def git_reponse(r: RunResult) -> Response {
+    return web.json("{\"ok\":" + oui(r.code == 0) + ",\"code\":" + str(r.code) + ",\"sortie\":" + web.json_string(r.out + r.err) + "}")
+}
+
+// un fichier du dossier ou d'un sous-dossier : pas de .., pas de nom cache, rien qui ressemble a une option
+def chemin_valide(c: string) -> bool {
+    if c == "" or len(c) > 300 or c[0:1] == "/" {
+        return false
+    }
+    for morceau in split(c, "/") {
+        if morceau == "" or morceau[0:1] == "." or morceau[0:1] == "-" {
+            return false
+        }
+    }
+    return true
+}
+
+// un numero de version : 4 a 40 chiffres hexadecimaux
+def version_valide(h: string) -> bool {
+    if len(h) < 4 or len(h) > 40 {
+        return false
+    }
+    for i in range(0, len(h)) {
+        let c: int = ord(h[i:i + 1])
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)) {
+            return false
+        }
+    }
+    return true
+}
+
+def a_des_versions() -> bool {
+    return git(["rev-parse", "--verify", "-q", "HEAD"]).code == 0
+}
+
+@web.route("/api/git/etat")
+def git_etat(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    if os.which("git") == "" {
+        return web.json("{\"git\":false}")
+    }
+    let prefixe: RunResult = git(["rev-parse", "--show-prefix"])
+    if prefixe.code != 0 {
+        return web.json("{\"git\":true,\"depot\":false}")
+    }
+    let statut: RunResult = git(["status", "--porcelain=v1", "--branch", "--", "."])
+    let distant: RunResult = git(["remote", "get-url", "origin"])
+    let nom: string = strip(git(["config", "user.name"]).out)
+    let email: string = strip(git(["config", "user.email"]).out)
+    return web.json("{\"git\":true,\"depot\":true,\"prefixe\":" + web.json_string(strip(prefixe.out)) + ",\"statut\":" + web.json_string(statut.out) + ",\"distant\":" + web.json_string(strip(distant.out)) + ",\"identite\":" + oui(nom != "" and email != "") + "}")
+}
+
+@web.route("/api/git/creer", "POST")
+def git_creer(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    return git_reponse(git(["init", "-q", "-b", "main"]))
+}
+
+// le nom et l'adresse mail qui signent les versions de ce dossier
+@web.route("/api/git/identite", "POST")
+def git_identite(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    let parties: list[string] = split(req.body, "\n")
+    if len(parties) < 2 or strip(parties[0]) == "" or strip(parties[1]) == "" {
+        return web.json("{\"ok\":false,\"code\":1,\"sortie\":\"un nom et une adresse mail\"}")
+    }
+    let r: RunResult = git(["config", "user.name", strip(parties[0])])
+    if r.code != 0 {
+        return git_reponse(r)
+    }
+    return git_reponse(git(["config", "user.email", strip(parties[1])]))
+}
+
+// ce qui a change dans un fichier depuis la derniere version (?nouveau=1 : un fichier que git ne suit pas)
+@web.route("/api/git/diff/<chemin>")
+def git_diff(req: Request, chemin: string) -> Response {
+    if not autorise(req) or not chemin_valide(chemin) {
+        return refus()
+    }
+    if req.arg("nouveau", "") == "1" or not a_des_versions() {
+        let r: RunResult = git(["diff", "--no-index", "--", "/dev/null", chemin])
+        return web.json("{\"ok\":true,\"code\":0,\"sortie\":" + web.json_string(r.out) + "}")
+    }
+    return git_reponse(git(["diff", "HEAD", "--", chemin]))
+}
+
+// les lignes changees du fichier ouvert, pour la marge de l'editeur
+@web.route("/api/git/lignes/<nom>")
+def git_lignes(req: Request, nom: string) -> Response {
+    if not autorise(req) or not valide(nom) {
+        return refus()
+    }
+    return git_reponse(git(["diff", "-U0", "HEAD", "--", nom]))
+}
+
+// enregistre une version de tout le dossier
+@web.route("/api/git/version", "POST")
+def git_version(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    if strip(req.body) == "" {
+        return web.json("{\"ok\":false,\"code\":1,\"sortie\":\"il faut un message\"}")
+    }
+    let ajout: RunResult = git(["add", "-A", "--", "."])
+    if ajout.code != 0 {
+        return git_reponse(ajout)
+    }
+    return git_reponse(git(["commit", "-q", "-m", req.body, "--", "."]))
+}
+
+@web.route("/api/git/historique")
+def git_historique(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    if not a_des_versions() {
+        return web.json("{\"ok\":true,\"code\":0,\"sortie\":\"\"}")
+    }
+    return git_reponse(git(["log", "-n", "200", "--format=%h%x1f%an%x1f%ct%x1f%s", "--", "."]))
+}
+
+@web.route("/api/git/voir/<version>")
+def git_voir(req: Request, version: string) -> Response {
+    if not autorise(req) or not version_valide(version) {
+        return refus()
+    }
+    return git_reponse(git(["show", "--stat", "--patch", "--date=format:%d/%m/%Y %H:%M", "--format=%h, %an, %ad%n%n%B", version, "--", "."]))
+}
+
+// remet un fichier comme dans la derniere version (ses changements sont perdus)
+@web.route("/api/git/annuler/<chemin>", "POST")
+def git_annuler(req: Request, chemin: string) -> Response {
+    if not autorise(req) or not chemin_valide(chemin) {
+        return refus()
+    }
+    return git_reponse(git(["checkout", "-q", "HEAD", "--", chemin]))
+}
+
+// remet un fichier comme dans une version plus ancienne
+@web.route("/api/git/restaurer/<version>/<chemin>", "POST")
+def git_restaurer(req: Request, version: string, chemin: string) -> Response {
+    if not autorise(req) or not version_valide(version) or not chemin_valide(chemin) {
+        return refus()
+    }
+    return git_reponse(git(["checkout", "-q", version, "--", chemin]))
+}
+
+// relie le dossier a un depot distant (GitHub) : https://..., git@..., ssh://..., ou un chemin
+@web.route("/api/git/distant", "POST")
+def git_distant(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    let url: string = strip(req.body)
+    let ok: bool = url[0:8] == "https://" or url[0:6] == "ssh://" or url[0:4] == "git@" or url[0:1] == "/"
+    if not ok or len(url) > 500 {
+        return web.json("{\"ok\":false,\"code\":1,\"sortie\":\"une adresse https://..., git@... ou ssh://...\"}")
+    }
+    if git(["remote", "get-url", "origin"]).code == 0 {
+        return git_reponse(git(["remote", "set-url", "origin", url]))
+    }
+    return git_reponse(git(["remote", "add", "origin", url]))
+}
+
+// envoyer et recuperer : jamais de question dans le terminal (GIT_TERMINAL_PROMPT=0), 90 s au plus
+@web.route("/api/git/envoyer", "POST")
+def git_envoyer(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    return git_reponse(os.run_with(["git", "-C", dossier(), "push", "-u", "origin", "HEAD"], "", 90.0))
+}
+
+@web.route("/api/git/recuperer", "POST")
+def git_recuperer(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    return git_reponse(os.run_with(["git", "-C", dossier(), "pull", "--ff-only"], "", 90.0))
+}
+
 def main() -> int {
     let a: list[string] = os.args()
     let d: string = os.join(os.home(), "clair_projets")
@@ -301,6 +500,7 @@ def main() -> int {
         return 1
     }
     web.save("dossier", d)
+    os.set_env("GIT_TERMINAL_PROMPT", "0")       // V0.60 : git ne pose jamais de question au terminal
     if len(os.listdir(d)) == 0 {
         write_file(os.join(d, "bonjour.cl"), "def main() -> int {\n    let nom: string = \"Clair\"\n    print(\"Bonjour depuis \" + nom)\n    for i in range(1, 6) {\n        print(str(i) + \" au carre = \" + str(i * i))\n    }\n    return 0\n}\n")
     }

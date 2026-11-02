@@ -15,6 +15,10 @@
       <span id="nom-fichier">…</span>
       <span id="etat-sauve" class="discret"></span>
     </div>
+    <button id="b-git" class="icone" title="Git : les modifications et les versions" aria-label="Git">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="8" r="2.2"/><path d="M6 7.2v9.6M18 10.2c0 4-6 3-11 7"/></svg>
+      <span id="git-badge" class="badge" hidden></span>
+    </button>
     <button id="b-c" class="texte" title="Voir le C écrit par Clair">C</button>
     <button id="b-tester" class="icone" title="Lancer les tests (test &quot;nom&quot; { ... })" aria-label="Tests">🧪</button>
     <button id="b-arreter" class="icone arreter" title="Arrêter" aria-label="Arrêter" hidden>■</button>
@@ -71,6 +75,14 @@
     <button id="b-supprimer" class="danger">Supprimer</button>
   </div>
 </aside>
+
+<div class="fenetre" id="fenetre-git" hidden>
+  <div class="console-tete"><span>Git</span><button id="b-fermer-git" class="icone petit" aria-label="Fermer">✕</button></div>
+  <div class="onglets" id="git-onglets" hidden>
+    <button id="git-o-chg" class="actif">Changements</button><button id="git-o-hist">Historique</button>
+  </div>
+  <div class="git-corps" id="git-corps"></div>
+</div>
 
 <div class="fenetre" id="fenetre-c" hidden>
   <div class="console-tete"><span id="titre-c">Le C</span><button id="b-fermer-c" class="icone petit" aria-label="Fermer">✕</button></div>

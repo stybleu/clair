@@ -1,4 +1,4 @@
-// Clair Studio (V0.58, V0.59) : l'editeur. Le serveur est tools/studio/studio.cl.
+// Clair Studio (V0.58 a V0.60) : l'editeur. Le serveur est tools/studio/studio.cl.
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -9,6 +9,7 @@
   let enTests = false, texteTests = "";
   let lignesErr = new Set();     // les lignes d'une erreur au dernier lancement
   let lignesVerif = new Map();   // V0.59 : les lignes des erreurs trouvees en tapant -> leur message
+  let lignesGit = new Map();     // V0.60 : les lignes changees depuis la derniere version -> "a", "m" ou "d"
   let debut = 0;
   const enc = encodeURIComponent;
 
@@ -89,7 +90,8 @@
       const n = k + 1;
       const cls = lignesErr.has(n) ? "err" : lignesVerif.has(n) ? "verif" : "";
       html += '<span class="l' + (cls ? " " + cls : "") + '">' + (couleur(lignes[k]) || " ") + "</span>";
-      nums += cls ? '<span class="' + cls + '">' + n + "</span>\n" : n + "\n";
+      const g = lignesGit.get(n);
+      nums += '<span class="nl' + (cls ? " " + cls : "") + (g ? " g" + g : "") + '">' + n + "</span>";
     }
     if (total > dernier) html += '<span class="vide" style="height:' + (total - dernier) * hauteur + 'px"></span>';
     couleurs.innerHTML = html + '<span class="l"> </span>';
@@ -191,6 +193,7 @@
       sauve = true;
       $("etat-sauve").textContent = "enregistré";
       verifier();
+      apresEnregistrement();
     }
   }
 
@@ -210,8 +213,10 @@
     document.title = nom + " · Clair Studio";
     try { localStorage.setItem("clair-studio-fichier", nom); } catch (e) { /* rien */ }
     code.scrollTop = 0;
+    if (lignesGit.size) lignesGit = new Map();
     dessiner();
     verifier();
+    majLignesGit();
     return true;
   }
 
@@ -819,6 +824,311 @@
     planifierAide();
   }
 
+  // ---- V0.60 : Git, les modifications et les versions du dossier ----
+  // Le serveur lance git dans le dossier des programmes ; ici on lit ce que git ecrit.
+  let depot = null;              // { git, depot, prefixe, statut, distant, identite }
+  let ongletGit = "chg", gitQuand = 0;
+
+  async function gitEtat() {
+    try { depot = await (await api("/api/git/etat")).json(); } catch (e) { depot = null; }
+    gitQuand = performance.now();
+    const n = depot && depot.depot ? lireStatut().fichiers.length : 0;
+    $("git-badge").textContent = n > 99 ? "99+" : String(n);
+    $("git-badge").hidden = !n;
+    return depot;
+  }
+
+  // "## main...origin/main [ahead 1]", puis "XY chemin" (chemins depuis la racine du depot)
+  function lireStatut() {
+    const r = { branche: "", avance: 0, retard: 0, fichiers: [] };
+    if (!depot || !depot.depot) return r;
+    for (const l of depot.statut.split("\n")) {
+      if (!l) continue;
+      if (l.startsWith("## ")) {
+        const t = l.slice(3).replace(/^(No commits yet on|Initial commit on) /, "");
+        r.branche = t.split(/\.\.\.| /)[0];
+        const a = /ahead (\d+)/.exec(t), b = /behind (\d+)/.exec(t);
+        r.avance = a ? +a[1] : 0;
+        r.retard = b ? +b[1] : 0;
+        continue;
+      }
+      const xy = l.slice(0, 2);
+      let chemin = l.slice(3);
+      if (chemin.includes(" -> ")) chemin = chemin.split(" -> ").pop();
+      if (/^".*"$/.test(chemin)) chemin = chemin.slice(1, -1).replace(/\\(.)/g, "$1");
+      if (depot.prefixe && chemin.startsWith(depot.prefixe)) chemin = chemin.slice(depot.prefixe.length);
+      const lettre = xy === "??" ? "N" : /R/.test(xy) ? "R" : /D/.test(xy) ? "D" : /A/.test(xy) ? "A" : "M";
+      r.fichiers.push({ chemin, lettre, nouveau: xy === "??" });
+    }
+    return r;
+  }
+  const LETTRES = { N: "nouveau", M: "modifié", A: "ajouté", D: "supprimé", R: "renommé" };
+
+  function apresEnregistrement() {
+    majLignesGit();
+    if (performance.now() - gitQuand > 2000) gitEtat();
+  }
+
+  // la marge : les lignes ajoutees, modifiees, et ou des lignes ont ete retirees
+  async function majLignesGit() {
+    const nom = fichier;
+    if (!nom || !depot || !depot.depot) {
+      if (lignesGit.size) { lignesGit = new Map(); dessiner(); }
+      return;
+    }
+    const m = new Map();
+    const suivi = lireStatut().fichiers.find((f) => f.chemin === nom);
+    if (suivi && suivi.nouveau) {
+      const n = code.value.split("\n").length;
+      for (let k = 1; k <= n; k++) m.set(k, "a");
+    } else {
+      let r;
+      try { r = await (await api("/api/git/lignes/" + enc(nom))).json(); } catch (e) { return; }
+      if (nom !== fichier) return;
+      if (r.ok) {
+        for (const l of r.sortie.split("\n")) {
+          const h = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(l);
+          if (!h) continue;
+          const avant = h[1] === undefined ? 1 : +h[1], debutL = +h[2], apres = h[3] === undefined ? 1 : +h[3];
+          if (apres === 0) { if (!m.has(debutL + 1)) m.set(debutL + 1, "d"); }
+          else for (let k = 0; k < apres; k++) m.set(debutL + k, avant === 0 ? "a" : "m");
+        }
+      }
+    }
+    lignesGit = m;
+    dessiner();
+  }
+
+  function colorierDiff(texte) {
+    let dans = false;          // avant le premier diff --git : le message et le resume d'une version
+    return texte.replace(/\n$/, "").split("\n").map((l) => {
+      if (l.startsWith("diff --git")) dans = true;
+      const c = !dans ? "" : /^(diff --git|index |--- |\+\+\+ |new file|deleted file|similarity|rename |\\ No newline)/.test(l) ? "meta"
+        : l.startsWith("@@") ? "hunk" : l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : "";
+      return '<span class="' + c + '">' + esc(l || " ") + "</span>";
+    }).join("\n");
+  }
+
+  const el = (tag, cls, texte) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (texte !== undefined) e.textContent = texte;
+    return e;
+  };
+
+  function gitMessage(texte, erreur) {
+    const s = $("git-sortie");
+    s.textContent = texte;
+    s.className = "git-sortie" + (erreur ? " err" : "");
+    s.hidden = !texte;
+  }
+
+  async function gitPost(chemin, corps) {
+    const r = await (await api(chemin, corps === undefined ? "" : corps)).json();
+    return r;
+  }
+
+  // un fichier ou une version : un appui montre ou cache ses changements
+  function depliable(tete, charger) {
+    const boite = el("div", "git-boite");
+    tete.classList.add("git-tete");
+    boite.appendChild(tete);
+    let corps = null;
+    tete.addEventListener("click", async () => {
+      if (corps) { corps.remove(); corps = null; return; }
+      corps = el("div", "git-detail");
+      corps.appendChild(el("div", "discret", "…"));
+      boite.appendChild(corps);
+      await charger(corps);
+    });
+    return boite;
+  }
+
+  async function afficherGit() {
+    await enregistrer();
+    await gitEtat();
+    const c = $("git-corps");
+    c.textContent = "";
+    $("git-onglets").hidden = true;
+    if (!depot || !depot.git) {
+      c.appendChild(el("p", "", "Git n'est pas installé. Dans Termux : pkg install git"));
+      return;
+    }
+    if (!depot.depot) {
+      c.appendChild(el("p", "", "Ce dossier n'a pas encore de dépôt Git : rien n'est gardé des versions précédentes."));
+      const b = el("button", "principal", "Créer un dépôt Git dans ce dossier");
+      b.addEventListener("click", async () => {
+        const r = await gitPost("/api/git/creer");
+        if (!r.ok) { gitMessage(r.sortie, true); return; }
+        afficherGit();
+      });
+      c.appendChild(b);
+      c.appendChild(el("pre", "git-sortie", ""));
+      c.lastChild.id = "git-sortie";
+      c.lastChild.hidden = true;
+      return;
+    }
+    $("git-onglets").hidden = false;
+    $("git-o-chg").classList.toggle("actif", ongletGit === "chg");
+    $("git-o-hist").classList.toggle("actif", ongletGit === "hist");
+    const st = lireStatut();
+    $("git-o-chg").textContent = "Changements" + (st.fichiers.length ? " (" + st.fichiers.length + ")" : "");
+    const ligne = el("div", "git-ligne");
+    ligne.textContent = "Branche " + (st.branche || "?") + (st.avance ? " · ↑ " + st.avance + " à envoyer" : "") +
+      (st.retard ? " · ↓ " + st.retard + " à récupérer" : "") + (depot.distant ? " · " + depot.distant.replace(/^https:\/\//, "") : "");
+    c.appendChild(ligne);
+    if (ongletGit === "chg") afficherChangements(c, st);
+    else await afficherHistorique(c);
+    const sortieGit = el("pre", "git-sortie");
+    sortieGit.id = "git-sortie";
+    sortieGit.hidden = true;
+    c.appendChild(sortieGit);
+  }
+
+  function afficherChangements(c, st) {
+    if (!st.fichiers.length) c.appendChild(el("p", "discret", "Rien n'a changé depuis la dernière version."));
+    for (const f of st.fichiers) {
+      const tete = el("div");
+      const lettre = el("span", "lettre " + f.lettre, f.lettre);
+      lettre.title = LETTRES[f.lettre];
+      tete.appendChild(lettre);
+      tete.appendChild(el("span", "git-nom", f.chemin));
+      tete.appendChild(el("span", "discret", LETTRES[f.lettre]));
+      c.appendChild(depliable(tete, async (corps) => {
+        const r = await (await api("/api/git/diff/" + enc(f.chemin) + (f.nouveau ? "?nouveau=1" : ""))).json();
+        corps.textContent = "";
+        const pre = el("pre", "diff");
+        pre.innerHTML = colorierDiff(r.sortie || "(pas de différence de texte)");
+        corps.appendChild(pre);
+        if (f.lettre === "M" || f.lettre === "D") {
+          const b = el("button", "danger", "Annuler mes changements de " + f.chemin);
+          b.addEventListener("click", async () => {
+            if (!confirm("Remettre " + f.chemin + " comme dans la dernière version ? Les changements seront perdus.")) return;
+            const r2 = await gitPost("/api/git/annuler/" + enc(f.chemin));
+            if (!r2.ok) { gitMessage(r2.sortie, true); return; }
+            if (f.chemin === fichier) { sauve = true; await ouvrir(fichier); }
+            afficherGit();
+          });
+          corps.appendChild(b);
+        }
+      }));
+    }
+    const msg = el("textarea", "git-message");
+    msg.id = "git-message";
+    msg.placeholder = "Ce qui a changé, par exemple : ajoute la fonction carre";
+    msg.rows = 2;
+    c.appendChild(msg);
+    const b = el("button", "principal", "Enregistrer une version");
+    b.id = "git-b-version";
+    b.disabled = !st.fichiers.length;
+    b.addEventListener("click", () => enregistrerVersion(msg.value));
+    c.appendChild(b);
+    const distant = el("div", "git-distant");
+    if (depot.distant) {
+      const envoyer = el("button", "", "↑ Envoyer");
+      const recuperer = el("button", "", "↓ Récupérer");
+      envoyer.addEventListener("click", () => echanger("/api/git/envoyer", "Envoi…", envoyer));
+      recuperer.addEventListener("click", () => echanger("/api/git/recuperer", "Récupération…", recuperer));
+      distant.append(envoyer, recuperer);
+    }
+    const relier = el("button", "", depot.distant ? "Changer d'adresse" : "Relier à GitHub…");
+    relier.addEventListener("click", async () => {
+      const url = prompt("Adresse du dépôt (https://github.com/toi/projet.git) :", depot.distant || "https://github.com/");
+      if (!url) return;
+      const r = await gitPost("/api/git/distant", url);
+      if (!r.ok) { gitMessage(r.sortie, true); return; }
+      afficherGit();
+    });
+    distant.appendChild(relier);
+    c.appendChild(distant);
+  }
+
+  async function enregistrerVersion(message) {
+    if (!message.trim()) { gitMessage("Écris d'abord ce qui a changé.", true); $("git-message").focus(); return; }
+    await enregistrer();
+    if (!depot.identite) {
+      const nom = prompt("Ton nom, pour signer tes versions :");
+      const mail = nom && prompt("Ton adresse mail :");
+      if (!nom || !mail) return;
+      const r = await gitPost("/api/git/identite", nom + "\n" + mail);
+      if (!r.ok) { gitMessage(r.sortie, true); return; }
+    }
+    const r = await gitPost("/api/git/version", message);
+    if (!r.ok) { gitMessage(r.sortie, true); return; }
+    await afficherGit();
+    gitMessage("Version enregistrée : " + message.trim().split("\n")[0]);
+    majLignesGit();
+  }
+
+  async function echanger(chemin, attente, bouton) {
+    await enregistrer();
+    bouton.disabled = true;
+    gitMessage(attente);
+    let r;
+    try { r = await gitPost(chemin); } finally { bouton.disabled = false; }
+    let texte = r.sortie.trim() || (r.ok ? "C'est fait." : "Échec (code " + r.code + ")");
+    if (!r.ok && /terminal prompts disabled|could not read Username|Authentication failed|Permission denied/.test(r.sortie))
+      texte += "\n\nGitHub demande qui tu es. Dans Termux, une fois : pkg install gh puis gh auth login (ou une clé SSH).";
+    if (r.ok && chemin.endsWith("recuperer") && fichier) { sauve = true; await ouvrir(fichier); }
+    await afficherGit();
+    gitMessage(texte, !r.ok);
+  }
+
+  // "a l'instant", "il y a 5 min", "hier a 14:02", "le 3/10/2026"
+  function ilYa(secondes) {
+    const d = new Date(secondes * 1000), ecart = (Date.now() - d.getTime()) / 1000;
+    const heure = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    if (ecart < 60) return "à l'instant";
+    if (ecart < 3600) return "il y a " + Math.floor(ecart / 60) + " min";
+    const jour = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const jours = Math.round((jour(new Date()) - jour(d)) / 86400000);
+    if (jours === 0) return "aujourd'hui à " + heure;
+    if (jours === 1) return "hier à " + heure;
+    return "le " + d.toLocaleDateString("fr-FR") + " à " + heure;
+  }
+
+  async function afficherHistorique(c) {
+    const r = await (await api("/api/git/historique")).json();
+    const lignesH = (r.sortie || "").split("\n").filter(Boolean);
+    if (!lignesH.length) { c.appendChild(el("p", "discret", "Pas encore de version : enregistre la première dans Changements.")); return; }
+    for (const l of lignesH) {
+      const [h, auteur, date, sujet] = l.split("\x1f");
+      const quand = ilYa(+date);
+      const tete = el("div");
+      const texte = el("div", "git-nom");
+      texte.appendChild(el("div", "", sujet || "(sans message)"));
+      texte.appendChild(el("div", "discret", h + " · " + auteur + " · " + quand));
+      tete.appendChild(texte);
+      c.appendChild(depliable(tete, async (corps) => {
+        const v = await (await api("/api/git/voir/" + h)).json();
+        corps.textContent = "";
+        if (fichier && v.sortie.includes(" b/" + (depot.prefixe || "") + fichier + "\n")) {
+          const b = el("button", "", "Remettre " + fichier + " comme dans cette version");
+          b.addEventListener("click", async () => {
+            if (!confirm("Remettre " + fichier + " comme dans la version " + h + " ? Tu pourras enregistrer ce retour comme une nouvelle version.")) return;
+            await enregistrer();
+            const r2 = await gitPost("/api/git/restaurer/" + h + "/" + enc(fichier));
+            if (!r2.ok) { gitMessage(r2.sortie, true); return; }
+            sauve = true;
+            await ouvrir(fichier);
+            ongletGit = "chg";
+            await afficherGit();
+            gitMessage(fichier + " est revenu à la version " + h + ".");
+          });
+          corps.appendChild(b);
+        }
+        const pre = el("pre", "diff");
+        pre.innerHTML = colorierDiff(v.sortie);
+        corps.appendChild(pre);
+      }));
+    }
+  }
+
+  $("b-git").addEventListener("click", async () => { $("fenetre-git").hidden = false; await afficherGit(); });
+  $("b-fermer-git").addEventListener("click", () => { $("fenetre-git").hidden = true; majLignesGit(); });
+  $("git-o-chg").addEventListener("click", () => { ongletGit = "chg"; afficherGit(); });
+  $("git-o-hist").addEventListener("click", () => { ongletGit = "hist"; afficherGit(); });
+
   // ---- le C ----
   $("b-c").addEventListener("click", async () => {
     if (!fichier) return;
@@ -899,6 +1209,7 @@
   (async function () {
     mesurer();
     dessiner();
+    gitEtat();
     let dernier = null;
     try { dernier = localStorage.getItem("clair-studio-fichier"); } catch (e) { /* rien */ }
     const liste = await listerFichiers();
