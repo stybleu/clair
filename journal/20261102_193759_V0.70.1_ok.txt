@@ -1,0 +1,33 @@
+date : 2026-11-02T19:37:59Z
+titre : mise a jour V0.70.1 (ok)
+clair : 8a4f397 perf(nbody): fenetre fluide (calcul dans un fil a part), trava
+processeur : aarch64, coeurs : 8
+android : 16
+clang : clang version 21.1.8
+sdl3 : 
+--- resultat
+V0.70.1 APPLIQUEE, COMPILATION OK
+tests reussis : 275
+gui_module.cl : SAUTE -> SDL3 absent (pkg install x11-repo &
+ TOUS LES TESTS SONT OK
+arbre, 10000 etoiles : 22.3 ms par pas (tous les coeurs), 73.7 ms (un 
+ENVOYE SUR GITHUB : 8a4f397 perf(nbody): fenetre fluide (calcul dans un fil a pa
+--- erreurs
+--- compilation
+--- tests
+275
+gui_module.cl : SAUTE -> SDL3 absent (pkg install x11-repo && pkg install sdl3) : la fenetre n est pas essayee
+nbody_whfast.cl : OK -> WHFast : Kepler exact avec un grand pas (ellipse e = 0.9, hyperbole), systeme solaire 1 000 ans (comme le calcul en 80 bits a 1e-8 UA), pas par defaut ; s.save() et nbody.load() au dernier chiffre, suite identique
+nbody_tree.cl : OK -> sphere de Plummer (equilibre, rayon de demi-masse, meme graine), arbre comme le calcul direct, energie, un coeur ou tous au dernier chiffre, Yoshida, collisions trouvees par l arbre, deux amas sauves et relus
+gui_module.cl : SAUTE -> SDL3 absent (pkg install x11-repo && pkg install sdl3) : la fenetre n est pas essayee
+tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot, sous-dossiers, reglages
+ TOUS LES TESTS SONT OK
+==================================================
+--- vitesse
+arbre, 1000 etoiles : 2.5 ms par pas (tous les coeurs), 5.2 ms (un coeur)
+arbre, 10000 etoiles : 22.3 ms par pas (tous les coeurs), 73.7 ms (un coeur)
+calcul direct, 2000 etoiles : 6.3 ms par pas
+IAS15, systeme solaire, 100 ans : 0.17 s
+WHFast, systeme solaire, 1 000 ans : 0.13 s
+Clair runtime error: gui needs SDL3 (libSDL3.so.0 not found).
+In Termux: pkg install x11-repo && pkg install sdl3 termux-x11-nightly, and the app Termux:X11
