@@ -3,6 +3,19 @@
 Clair est un langage de programmation expérimental.
 Son compilateur est écrit en C et utilise Clang.
 
+## Démarrer avec Clair Studio (Termux, sur Android)
+
+```sh
+pkg install -y git
+git clone https://github.com/stybleu/clair ~/clair
+sh ~/clair/tools/studio/studio.sh
+```
+
+La première fois, `studio.sh` installe ce qui manque (clang, cmake, make), compile Clair puis le Studio
+(quelques minutes), et ouvre l'éditeur dans le navigateur du téléphone. Les fois suivantes, il s'ouvre
+tout de suite, et recompile Clair seul quand ses sources ont changé (après un `git pull`). Tes programmes
+sont dans `~/clair_projets`. Le détail : [Clair Studio](docs/README_V0.58.md).
+
 ## Fonctionnalités
 
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON

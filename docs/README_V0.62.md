@@ -1,5 +1,31 @@
 # Clair V0.62
 
+## V0.62.1 : `studio.sh` se suffit à lui-même
+
+```sh
+sh ~/clair/tools/studio/studio.sh
+```
+
+Avant, sur un appareil où Clair n'avait jamais été compilé (un nouveau téléphone, ou quelqu'un qui vient
+de récupérer Clair sur GitHub), `studio.sh` s'arrêtait sur `../../build/clair: not found`. Maintenant :
+
+- si Clair n'est pas compilé, ou si un de ses fichiers sources est plus récent que le compilateur (après
+  un `git pull`), `studio.sh` le compile d'abord (`cmake`, puis `cmake --build`), le détail dans
+  `~/clair_build.log` ;
+- s'il manque `clang`, `cmake` ou `make`, il les installe avec `pkg` (Termux), le détail dans
+  `~/clair_install.log` ; ailleurs qu'en Termux, il dit lesquels manquent ;
+- puis il compile le Studio s'il le faut, et l'ouvre, comme avant ;
+- tous les chemins partent de l'emplacement de `studio.sh` : il marche depuis n'importe quel dossier.
+
+Pour un nouvel utilisateur, trois lignes suffisent (voir le README) :
+
+```sh
+pkg install -y git
+git clone https://github.com/stybleu/clair ~/clair
+sh ~/clair/tools/studio/studio.sh
+```
+
+
 ## Clair Studio : thème, taille du texte, explorateur de fichiers
 
 ```text
