@@ -16,6 +16,7 @@ add_executable(clair
     src/units.c
     src/codegen_c.c
     src/web.c
+    src/testing.c
 )
 target_compile_options(clair PRIVATE -Wall -Wextra -Wpedantic)
 

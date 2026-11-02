@@ -8,6 +8,7 @@
 #include "ad_reverse.h"
 #include "diagnostics.h"
 #include "web.h"
+#include "testing.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -463,18 +464,23 @@ int main(int argc, char **argv) {
     int dce_enabled = 0;
     int ad_enabled = 0;
     int diag_enabled = 0;
+    int test_mode = 0;
+    int check_only = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output = argv[++i];
         else if (strcmp(argv[i], "--sans-verif") == 0 || strcmp(argv[i], "--unchecked") == 0) unchecked = 1;
         else if (strcmp(argv[i], "--ad") == 0) ad_enabled = 1;
         else if (strcmp(argv[i], "--diagnostics") == 0) diag_enabled = 1;
         else if (strcmp(argv[i], "--dce") == 0) dce_enabled = 1;
+        else if (strcmp(argv[i], "--test") == 0) test_mode = 1;     /* V0.59: runs the test blocks */
+        else if (strcmp(argv[i], "--check") == 0) check_only = 1;   /* V0.59: the errors, without compiling */
         else if (strcmp(argv[i], "--fma") == 0) allow_fma = 1;
         else if (!input && argv[i][0] != '-') input = argv[i];
         else { input = NULL; break; }
     }
-    if (!input || !output) {
-        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif] [--fma] [--dce] [--ad] [--diagnostics]\n", argv[0]);
+    if (!input || (!output && !check_only)) {
+        fprintf(stderr, "usage: %s input.cl -o output [--sans-verif] [--fma] [--dce] [--ad] [--diagnostics] [--test]\n"
+                        "       %s input.cl --check     (finds the errors without compiling)\n", argv[0], argv[0]);
         return 2;
     }
     codegen_set_unchecked(unchecked);
@@ -492,6 +498,13 @@ int main(int argc, char **argv) {
     AstNode *program = parser_parse_program(&parser);
     ast_current_line = 0;                 /* V0.49: nodes made by the compiler have no line */
     if (!program || parser.had_error) {
+        ast_free(program);
+        free(source);
+        return 1;
+    }
+
+    /* V0.59: test "name" { }: taken out, or kept and run by the main of --test */
+    if (!testing_prepare(program, check_only ? 2 : test_mode)) {
         ast_free(program);
         free(source);
         return 1;
@@ -532,6 +545,11 @@ int main(int argc, char **argv) {
         ast_free(program);
         free(source);
         return 1;
+    }
+    if (check_only) {           /* V0.59: clair --check: no C, no clang (the Studio checks while you type) */
+        ast_free(program);
+        free(source);
+        return 0;
     }
     semantic_mangle_c_identifiers(program);
     if (dce_enabled) {

@@ -1,0 +1,52 @@
+
+running 10 tests
+test entiers ... ok
+test chaines, booleens et flottants ... ok
+test assert avec un message ... FAILED
+test assert sans message ... FAILED
+test chaine differente ... FAILED
+test flottant ... FAILED
+test erreur pendant le test ... FAILED
+test booleen ... FAILED
+test boucle sans fin ... FAILED
+test input lit la fin de l'entree au lieu d'attendre ... FAILED
+
+failures:
+
+---- assert avec un message ----
+avant
+Clair runtime error: assertion failed: un carre est negatif ? (line 46)
+
+---- assert sans message ----
+Clair runtime error: assertion failed: x == 10 (line 52)
+
+---- chaine differente ----
+Clair runtime error: assertion failed: salut("ada") == "Bonjour Ada\n": got "Bonjour ada", expected "Bonjour Ada\n" (line 57)
+
+---- flottant ----
+Clair runtime error: assertion failed: 0.1 + 0.2 == 0.3: got 0.30000000000000004, expected 0.3 (line 61)
+
+---- erreur pendant le test ----
+Clair runtime error: list index 5 out of bounds for length 3 (line 66)
+
+---- booleen ----
+Clair runtime error: assertion failed: (carre(1) == 1) == false: got true, expected false (line 70)
+
+---- boucle sans fin ----
+the test did not finish within 1 s
+
+---- input lit la fin de l'entree au lieu d'attendre ----
+Clair runtime error: EOF when reading a line
+
+failures:
+    assert avec un message
+    assert sans message
+    chaine differente
+    flottant
+    erreur pendant le test
+    booleen
+    boucle sans fin
+    input lit la fin de l'entree au lieu d'attendre
+
+test result: FAILED. 2 passed; 8 failed; finished in Xs
+

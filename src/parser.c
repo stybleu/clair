@@ -54,6 +54,7 @@ static AstNode *parse_call_after_name(Parser *p, Token name) {
     if (!call) return NULL;
 
     if (!expect(p, TOKEN_LPAREN, "'('") ) { ast_free(call); return NULL; }
+    const char *args_from = p->current.start;
 
     if (p->current.kind != TOKEN_RPAREN) {
         for (;;) {
@@ -63,6 +64,23 @@ static AstNode *parse_call_after_name(Parser *p, Token name) {
 
             if (p->current.kind != TOKEN_COMMA) break;
             next(p);
+        }
+    }
+
+    /* V0.59: assert(x == 3) says "assertion failed: x == 3" when it fails */
+    if (p->current.kind == TOKEN_RPAREN && call->text &&
+        (strcmp(call->text, "assert") == 0 || strcmp(call->text, "assert_equal") == 0)) {
+        size_t n = (size_t)(p->current.start - args_from);
+        call->src_text = malloc(n + 1);
+        if (call->src_text) {
+            size_t w = 0;
+            for (size_t i = 0; i < n; i++) {                  /* on one line, spaces kept single */
+                char c = args_from[i] == '\n' || args_from[i] == '\t' || args_from[i] == '\r' ? ' ' : args_from[i];
+                if (c == ' ' && w > 0 && call->src_text[w - 1] == ' ') continue;
+                call->src_text[w++] = c;
+            }
+            while (w > 0 && call->src_text[w - 1] == ' ') w--;
+            call->src_text[w] = '\0';
         }
     }
 
@@ -1454,6 +1472,17 @@ static AstNode *parse_identifier_statement(Parser *p) {
 }
 
 static AstNode *parse_statement(Parser *p) {
+    if (p->current.kind == TOKEN_IDENTIFIER && p->current.length == 4 && strncmp(p->current.start, "test", 4) == 0) {
+        Lexer ahead = p->lexer;
+        if (lexer_next(&ahead).kind == TOKEN_STRING) {
+            /* V0.59: a test is a block of the file, like a function */
+            fprintf(stderr, "parse error at %zu:%zu: a test \"...\" { } block goes outside the functions, like a def\n",
+                    p->current.line, p->current.column);
+            clair_diag_show(80, ast_current_file, p->current.line, p->current.column, "test inside a function");
+            p->had_error = 1;
+            return NULL;
+        }
+    }
     if (p->current.kind == TOKEN_ABSOLUE) {
         /* absolue { ... }: kept as `if true { ... }` whose block is marked "absolue" */
         Token at = p->current;
@@ -1914,6 +1943,36 @@ AstNode *parser_parse_program(Parser *p) {
                 return NULL;
             }
             continue;
+        }
+        /* V0.59: test "name" { ... }: a function __test_N, kept only by clair --test */
+        if (p->current.kind == TOKEN_IDENTIFIER && p->current.length == 4 && strncmp(p->current.start, "test", 4) == 0) {
+            Lexer ahead = p->lexer;
+            Token after = lexer_next(&ahead);
+            if (after.kind == TOKEN_STRING) {
+                static int test_count = 0;
+                next(p);
+                AstNode *name = parse_atom(p);
+                char fname[32];
+                snprintf(fname, sizeof(fname), "__test_%d", ++test_count);
+                AstNode *fn = ast_new(AST_FUNCTION, fname, strlen(fname));
+                AstNode *marks = ast_new(AST_BLOCK, NULL, 0);
+                if (!name || name->kind != AST_STRING || !fn || !marks || !ast_set_type(fn, "int", 3) ||
+                    !ast_add_child(marks, name)) {
+                    ast_free(name); ast_free(fn); ast_free(marks); ast_free(program);
+                    return NULL;
+                }
+                fn->decorators = marks;
+                if (!expect(p, TOKEN_LBRACE, "'{' after the name of the test")) { ast_free(fn); ast_free(program); return NULL; }
+                AstNode *body = parse_block(p);
+                if (!body || !expect(p, TOKEN_RBRACE, "'}'")) { ast_free(body); ast_free(fn); ast_free(program); return NULL; }
+                AstNode *ret = ast_new(AST_RETURN, NULL, 0), *zero = ast_new(AST_INTEGER, "0", 1);
+                if (!ret || !zero || !ast_add_child(ret, zero) || !ast_add_child(body, ret) || !ast_add_child(fn, body) ||
+                    !ast_add_child(program, fn)) {
+                    ast_free(ret); ast_free(zero); ast_free(fn); ast_free(program);
+                    return NULL;
+                }
+                continue;
+            }
         }
         if (p->current.kind == TOKEN_IMPORT || p->current.kind == TOKEN_FROM) {
             if (!parse_import(p, program)) {

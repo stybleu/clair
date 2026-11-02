@@ -1,6 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # V0.58 : Clair Studio (tools/studio/studio.cl), interroge comme le ferait l'editeur
 # du navigateur : jeton, fichiers, compilation, lancement, entree, arret.
+# V0.59 : cache de compilation, verification sans compiler, tests, sources des modules.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -80,6 +81,46 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 printf '%s' "$R" | grep -q '"code":137' || echec "la boucle arretee : $R"
+
+# V0.59 : pas de recompilation quand rien n'a change ; le meme programme modifie est recompile
+$C POST /api/ecrire/vite.cl 'corps=def main() -> int {\n    print("v1")\n    return 0\n}\n' "$S" > /dev/null
+$C POST /api/lancer/vite.cl 'corps=' "$S" | corps | grep -q '"cache":false' || echec "premiere compilation"
+$C POST /api/lancer/vite.cl 'corps=' "$S" | corps | grep -q '"cache":true' || echec "le meme programme devrait venir du cache"
+$C POST /api/ecrire/vite.cl 'corps=def main() -> int {\n    print("v2")\n    return 0\n}\n' "$S" > /dev/null
+ID="$($C POST /api/lancer/vite.cl 'corps=' "$S" | corps | grep '"cache":false' | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+[ -n "$ID" ] || echec "un programme modifie devrait etre recompile"
+for _ in $(seq 1 200); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    printf '%s' "$R" | grep -q 'v2' && break
+    sleep 0.05
+done
+printf '%s' "$R" | grep -q 'v2' || echec "le programme recompile : $R"
+
+# V0.59 : les erreurs sans compiler (clair --check)
+$C POST /api/verifier/vite.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "verifier un programme juste"
+$C POST /api/verifier/faux.cl 'corps=' "$S" | corps | grep -q '"ok":false,"erreurs":".*(line 3)' || echec "verifier un programme faux"
+
+# V0.59 : les tests du fichier
+$C POST /api/ecrire/teste.cl 'corps=def carre(x: int) -> int {\n    return x * x\n}\n\ntest "carre" {\n    assert_equal(carre(3), 9)\n}\n\ntest "faux" {\n    assert_equal(carre(2), 5)\n}\n' "$S" > /dev/null
+ID="$($C POST /api/tester/teste.cl 'corps=' "$S" | corps | sed -n 's/.*"id":\([0-9]*\).*/\1/p')"
+[ -n "$ID" ] || echec "tester"
+SORTIE=""
+for _ in $(seq 1 200); do
+    R="$($C GET "/api/suivre/$ID" "$S" | corps)"
+    SORTIE="$SORTIE$(printf '%s' "$R" | sed -n 's/.*"sortie":"\(.*\)","fini".*/\1/p')"
+    printf '%s' "$R" | grep -q '"fini":true' && break
+    sleep 0.05
+done
+printf '%s' "$R" | grep -q '"code":1' || echec "des tests rates : code 1 : $R"
+printf '%s' "$SORTIE" | grep -q 'test carre ... ok' || echec "tests : $SORTIE"
+printf '%s' "$SORTIE" | grep -q 'got 4, expected 5 (line 10)' || echec "tests : $SORTIE"
+printf '%s' "$SORTIE" | grep -q 'test result: FAILED. 1 passed; 1 failed' || echec "tests : $SORTIE"
+$C POST /api/tester/vite.cl 'corps=' "$S" | corps | grep -q '"ok":false,"erreurs":".*has no test' || echec "un fichier sans test"
+
+# V0.59 : les modules pour l'autocompletion
+$C GET /api/module/os "$S" | grep -q '^def run(command: list\[string\]) -> RunResult {' || echec "la source du module os"
+[ "$($C GET /api/module/secret "$S" | code)" = 404 ] || echec "un module qui n'existe pas"
+[ "$($C GET /api/module/os | code)" = 403 ] || echec "la source d'un module sans jeton"
 
 # renommer, supprimer, et rien en dehors du dossier
 $C POST /api/renommer/essai.cl/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "renommer"

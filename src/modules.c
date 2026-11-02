@@ -1,6 +1,7 @@
 #include "modules.h"
 #include "parser.h"
 #include "units.h"
+#include "testing.h"
 #include "clair_web_module.h"   /* V0.55: the module web, written in Clair (src/clair_web.cl) */
 #include "clair_os_module.h"    /* V0.56: the module os, written in Clair (src/clair_os.cl) */
 #include <stdio.h>
@@ -296,6 +297,15 @@ static Module *load_module(const char *name, const char *from) {
         return NULL;
     }
     free(path);
+    /* V0.59: the tests of a module are run by clair --test on the module, not by its importers */
+    {
+        size_t out = 0;
+        for (size_t i = 0; i < program->child_count; i++) {
+            if (testing_is_test(program->children[i])) { ast_free(program->children[i]); continue; }
+            program->children[out++] = program->children[i];
+        }
+        program->child_count = out;
+    }
     for (size_t i = 0; i < program->child_count; i++) {
         const AstNode *c = program->children[i];
         if (c->kind == AST_FUNCTION && c->decorators) {

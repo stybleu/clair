@@ -195,6 +195,16 @@ static int unchecked_mode = 0;
 
 void codegen_set_unchecked(int unchecked) { unchecked_mode = unchecked; }
 
+/* V0.59: clair --test: the tests that the main written runs */
+static const char **test_names = NULL, **test_fns = NULL;
+static size_t test_count = 0;
+
+void codegen_set_tests(const char **names, const char **fns, size_t count) {
+    test_names = names;
+    test_fns = fns;
+    test_count = count;
+}
+
 /* ------------------------------------------------------------------ */
 /* Small string helper (used to build the bounds pre-checks).         */
 /* ------------------------------------------------------------------ */
@@ -3772,6 +3782,49 @@ static int loop_region(const AstNode *n) {
     return region_makes(body) && !region_keeps(body, region_fn, body, 1);
 }
 
+/* V0.59: where the first argument of assert(x > 0, "message") ends, in the text as written */
+static size_t first_argument_end(const char *s) {
+    int depth = 0;
+    char quote = 0;
+    for (size_t i = 0; s[i]; i++) {
+        char c = s[i];
+        if (quote) {
+            if (c == '\\' && s[i + 1]) i++;
+            else if (c == quote) quote = 0;
+        } else if (c == '"' || c == '\'') quote = c;
+        else if (c == '(' || c == '[' || c == '{') depth++;
+        else if (c == ')' || c == ']' || c == '}') depth--;
+        else if (c == ',' && depth == 0) return i;
+    }
+    return strlen(s);
+}
+
+static void emit_c_string(FILE *f, const char *s);
+
+/* V0.59: assert(cond[, message]) and assert_equal(value, expected): the text of the
+   check as written goes into the message, so that a failure says what was checked */
+static void emit_assert_text(FILE *f, const AstNode *n, int equal) {
+    const char *src = n->src_text ? n->src_text : "?";
+    size_t end = first_argument_end(src);
+    char *text = malloc(strlen(src) + 16);
+    if (!text) { fputs("\"?\"", f); return; }
+    if (equal && src[end] == ',') {
+        /* assert_equal(a == 1, false) says "(a == 1) == false" */
+        const char *second = src + end + 1;
+        while (*second == ' ') second++;
+        char *first = strndup(src, end);
+        int wrap1 = first && strpbrk(first, "=<>") != NULL, wrap2 = strpbrk(second, "=<>") != NULL;
+        sprintf(text, "%s%s%s == %s%s%s", wrap1 ? "(" : "", first ? first : "?", wrap1 ? ")" : "",
+                wrap2 ? "(" : "", second, wrap2 ? ")" : "");
+        free(first);
+    } else {
+        memcpy(text, src, end);
+        text[end] = '\0';
+    }
+    emit_c_string(f, text);
+    free(text);
+}
+
 static void emit_c_string(FILE *f, const char *s) {
     fputc('"', f);
     for (; *s; s++) {
@@ -4391,6 +4444,33 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
             }
             if (n->text && n->text[0] == '@') {
                 const char *name = n->text + 1;
+                if (strcmp(name, "assert") == 0) {
+                    /* V0.59: the message is only made when the check fails */
+                    fputs("((", f);
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fputs(") ? (int64_t)0 : clair_rt_assert_fail(", f);
+                    emit_assert_text(f, n, 0);
+                    fputs(", ", f);
+                    if (n->child_count == 2) {
+                        if (!emit_expr(f, n->children[1])) return 0;
+                    } else {
+                        fputs("NULL", f);
+                    }
+                    fprintf(f, ", %zu))", n->line);
+                    return 1;
+                }
+                if (strncmp(name, "assert_equal_", 13) == 0) {
+                    const char *v = name + 13;
+                    const char *cast = v[0] == 'f' ? "(double)" : v[0] == 'u' ? "(uint64_t)" : v[0] == 'i' ? "(int64_t)" : "";
+                    fprintf(f, "clair_rt_assert_eq_%s(%s(", v, cast);
+                    if (!emit_expr(f, n->children[0])) return 0;
+                    fprintf(f, "), %s(", cast);
+                    if (!emit_expr(f, n->children[1])) return 0;
+                    fputs("), ", f);
+                    emit_assert_text(f, n, 1);
+                    fprintf(f, ", %zu)", n->line);
+                    return 1;
+                }
                 if (strcmp(name, "matrix") == 0) {
                     fprintf(f, "clair_rt_matrix_make(");
                     if (!emit_expr(f, n->children[0])) return 0;
@@ -7050,6 +7130,140 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
 
 static int main_takes_args;             /* V0.56: set by codegen_c_file when the program imports os */
 
+/*
+ * V0.59: clair --test: the main runs each test in its own process, so that a test that
+ * fails (assert, any runtime error), crashes or never ends does not stop the others.
+ * What a test writes is kept and shown only when it fails.  ./tests text runs only the
+ * tests whose name contains text.  Exit code 1 when a test failed.
+ */
+static void emit_test_main(FILE *f, int uses_os) {
+    fprintf(f, "\n/* clair --test: the %zu test(s) of the program */\n", test_count);
+    fputs("static const char *const clair_test_names[] = {\n", f);
+    for (size_t i = 0; i < test_count; i++) {
+        fputs("    ", f);
+        emit_c_string(f, test_names[i]);
+        fputs(",\n", f);
+    }
+    fputs("};\n\nstatic int64_t (*const clair_test_fns[])(void) = {\n", f);
+    for (size_t i = 0; i < test_count; i++) fprintf(f, "    clair_fn_%s,\n", test_fns[i]);
+    fputs("};\n\n", f);
+    fputs(
+        "static double clair_test_now(void) {\n"
+        "    struct timespec t;\n"
+        "    clock_gettime(CLOCK_MONOTONIC, &t);\n"
+        "    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;\n"
+        "}\n"
+        "\n"
+        "/* runs test i in a child process: 1 when it passed; what it wrote goes in *out */\n"
+        "static int clair_test_run(size_t i, double limit, char **out) {\n"
+        "    int fds[2];\n"
+        "    *out = NULL;\n"
+        "    if (pipe(fds) != 0) return 0;\n"
+        "    fflush(stdout);\n"
+        "    fflush(stderr);\n"
+        "    pid_t pid = fork();\n"
+        "    if (pid < 0) { close(fds[0]); close(fds[1]); return 0; }\n"
+        "    if (pid == 0) {\n"
+        "        int nothing = open(\"/dev/null\", O_RDONLY);    /* input() reads nothing: the test does not wait */\n"
+        "        if (nothing >= 0) { dup2(nothing, 0); close(nothing); }\n"
+        "        dup2(fds[1], 1);\n"
+        "        dup2(fds[1], 2);\n"
+        "        close(fds[0]);\n"
+        "        close(fds[1]);\n"
+        "        clair_test_fns[i]();\n"
+        "        fflush(stdout);\n"
+        "        exit(0);\n"
+        "    }\n"
+        "    close(fds[1]);\n"
+        "    size_t len = 0, cap = 4096;\n"
+        "    char *text = malloc(cap);\n"
+        "    double end = clair_test_now() + limit;\n"
+        "    int late = 0;\n"
+        "    for (;;) {\n"
+        "        double left = end - clair_test_now();\n"
+        "        if (left <= 0) { late = 1; break; }\n"
+        "        struct pollfd p = { fds[0], POLLIN, 0 };\n"
+        "        int r = poll(&p, 1, (int)(left * 1000) + 1);\n"
+        "        if (r < 0 && errno == EINTR) continue;\n"
+        "        if (r <= 0) continue;\n"
+        "        char chunk[4096];\n"
+        "        ssize_t k = read(fds[0], chunk, sizeof(chunk));\n"
+        "        if (k < 0 && errno == EINTR) continue;\n"
+        "        if (k <= 0) break;\n"
+        "        if (text && len + (size_t)k + 1 > cap && len < (1u << 20)) {   /* at most 1 MB kept */\n"
+        "            while (len + (size_t)k + 1 > cap) cap *= 2;\n"
+        "            char *bigger = realloc(text, cap);\n"
+        "            if (!bigger) { free(text); text = NULL; }\n"
+        "            else text = bigger;\n"
+        "        }\n"
+        "        if (text && len + (size_t)k + 1 <= cap) { memcpy(text + len, chunk, (size_t)k); len += (size_t)k; }\n"
+        "    }\n"
+        "    if (late) kill(pid, SIGKILL);\n"
+        "    close(fds[0]);\n"
+        "    int status = 0;\n"
+        "    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}\n"
+        "    int ok = !late && WIFEXITED(status) && WEXITSTATUS(status) == 0;\n"
+        "    char why[96] = \"\";\n"
+        "    if (late) snprintf(why, sizeof(why), \"the test did not finish within %g s\\n\", limit);\n"
+        "    else if (WIFSIGNALED(status)) snprintf(why, sizeof(why), \"the test stopped: signal %d%s\\n\", WTERMSIG(status),\n"
+        "                                       WTERMSIG(status) == SIGSEGV ? \" (bad memory access)\" : \"\");\n"
+        "    else if (!ok && len == 0) snprintf(why, sizeof(why), \"the test stopped with the code %d\\n\", WEXITSTATUS(status));\n"
+        "    if (text) {\n"
+        "        if (len > 0 && text[len - 1] != '\\n' && why[0]) text[len++] = '\\n';\n"
+        "        size_t w = strlen(why);\n"
+        "        if (len + w + 1 > cap) { char *bigger = realloc(text, len + w + 1); if (bigger) text = bigger; else w = 0; }\n"
+        "        memcpy(text + len, why, w);\n"
+        "        len += w;\n"
+        "        text[len] = '\\0';\n"
+        "    }\n"
+        "    *out = text;\n"
+        "    return ok;\n"
+        "}\n"
+        "\n", f);
+    fputs(uses_os ? "int main(int clair_argc, char **clair_argv) {\n" : "int main(int clair_argc, char **clair_argv) {\n", f);
+    if (uses_os) fputs("    clair_os_argc = 1;      /* os.args() is empty in a test */\n    clair_os_argv = clair_argv;\n", f);
+    fputs(
+        "    const size_t total = sizeof(clair_test_names) / sizeof(clair_test_names[0]);\n"
+        "    const char *filter = clair_argc > 1 ? clair_argv[1] : NULL;\n"
+        "    const char *limit_text = getenv(\"CLAIR_TEST_TIMEOUT\");\n"
+        "    double limit = limit_text && atof(limit_text) > 0 ? atof(limit_text) : 10.0;\n"
+        "    size_t chosen = 0, passed = 0, failed = 0;\n"
+        "    for (size_t i = 0; i < total; i++) if (!filter || strstr(clair_test_names[i], filter)) chosen++;\n"
+        "    char **outputs = calloc(total, sizeof(char *));\n"
+        "    unsigned char *bad = calloc(total, 1);\n"
+        "    if (!outputs || !bad) return 1;\n"
+        "    printf(\"\\nrunning %zu test%s\\n\", chosen, chosen == 1 ? \"\" : \"s\");\n"
+        "    double start = clair_test_now();\n"
+        "    for (size_t i = 0; i < total; i++) {\n"
+        "        if (filter && !strstr(clair_test_names[i], filter)) continue;\n"
+        "        printf(\"test %s ... \", clair_test_names[i]);\n"
+        "        fflush(stdout);\n"
+        "        int ok = clair_test_run(i, limit, &outputs[i]);\n"
+        "        printf(\"%s\\n\", ok ? \"ok\" : \"FAILED\");\n"
+        "        if (ok) passed++;\n"
+        "        else { failed++; bad[i] = 1; }\n"
+        "    }\n"
+        "    if (failed) {\n"
+        "        printf(\"\\nfailures:\\n\");\n"
+        "        for (size_t i = 0; i < total; i++) {\n"
+        "            if (!bad[i]) continue;\n"
+        "            const char *o = outputs[i] ? outputs[i] : \"\";\n"
+        "            size_t n = strlen(o);\n"
+        "            printf(\"\\n---- %s ----\\n%s%s\", clair_test_names[i], o, n && o[n - 1] != '\\n' ? \"\\n\" : \"\");\n"
+        "        }\n"
+        "        printf(\"\\nfailures:\\n\");\n"
+        "        for (size_t i = 0; i < total; i++) if (bad[i]) printf(\"    %s\\n\", clair_test_names[i]);\n"
+        "    }\n"
+        "    printf(\"\\ntest result: %s. %zu passed; %zu failed; \", failed ? \"FAILED\" : \"ok\", passed, failed);\n"
+        "    if (filter) printf(\"%zu filtered out; \", total - chosen);\n"
+        "    printf(\"finished in %.2fs\\n\\n\", clair_test_now() - start);\n"
+        "    for (size_t i = 0; i < total; i++) free(outputs[i]);\n"
+        "    free(outputs);\n"
+        "    free(bad);\n"
+        "    return failed ? 1 : 0;\n"
+        "}\n", f);
+}
+
 static int emit_function_signature(FILE *f, const AstNode *fn, int prototype) {
     int is_main = strcmp(fn->text, "main") == 0;
 
@@ -7354,6 +7568,14 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
     return 1;
 }
 
+/* V0.59: the program calls a builtin whose name starts with prefix (@assert...) */
+static int node_uses_call_prefix(const AstNode *n, const char *prefix) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && strncmp(n->text, prefix, strlen(prefix)) == 0) return 1;
+    for (size_t i = 0; i < n->child_count; i++) if (node_uses_call_prefix(n->children[i], prefix)) return 1;
+    return 0;
+}
+
 static int node_uses_call_named(const AstNode *n, const char *name) {
     if (!n) return 0;
     if (n->kind == AST_CALL && n->text && strcmp(n->text, name) == 0) return 1;
@@ -7443,7 +7665,7 @@ static int node_uses_math(const AstNode *n) {
         strcmp(n->text, "@matrix") != 0 && strcmp(n->text, "@rows") != 0 && strcmp(n->text, "@cols") != 0 &&
         strncmp(n->text, "@slice", 6) != 0 && !small_machine_bits(n->text + 1) &&
         (!is_random_call(n->text + 1) || strcmp(n->text, "@gauss") == 0) && !is_text_call(n->text + 1) &&
-        !is_io_call(n->text + 1) &&
+        !is_io_call(n->text + 1) && strncmp(n->text, "@assert", 7) != 0 &&
         !is_absolue_call(n->text + 1) &&
         !is_string_conversion(n) &&
         !(machine_type_bits(n->type_name) &&
@@ -9163,6 +9385,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
     if (uses_cores) fputs("#define _GNU_SOURCE   /* sched_getaffinity: how many cores the program may use */\n", f);
     else if (uses_web) fputs("#define _GNU_SOURCE   /* the web server: sockets, memmem, open_memstream */\n", f);
     else if (uses_os) fputs("#define _GNU_SOURCE   /* the module os: pipes, setenv, nanosleep */\n", f);
+    else if (test_count) fputs("#define _POSIX_C_SOURCE 200809L   /* clair --test: fork, pipe, poll */\n", f);
     else if (node_uses_call_named(program, "@alloc")) fputs("#define _POSIX_C_SOURCE 200809L   /* posix_memalign */\n", f);
     fputs(
         "#include <inttypes.h>\n"
@@ -9189,6 +9412,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
         fputs("#include <dirent.h>\n#include <errno.h>\n#include <fcntl.h>\n#include <poll.h>\n#include <signal.h>\n"
               "#include <sys/resource.h>\n#include <sys/stat.h>\n#include <sys/types.h>\n#include <sys/wait.h>\n"
               "#include <time.h>\n#include <unistd.h>\n", f);
+    if (test_count)                                                    /* V0.59: the main of clair --test */
+        fputs("#include <errno.h>\n#include <fcntl.h>\n#include <poll.h>\n#include <signal.h>\n#include <sys/types.h>\n"
+              "#include <sys/wait.h>\n#include <time.h>\n#include <unistd.h>\n", f);
     if (uses_web) fputs((const char *)clair_web_prelude_text, f);    /* V0.55: before any code that may call exit() */
     if (node_uses_type(program, "bigint") || node_uses_type(program, "bigfloat") ||
         node_uses_type(program, "certfloat"))
@@ -9201,6 +9427,91 @@ int codegen_c_file(const AstNode *program, const char *path) {
     memset(&machine_needs, 0, sizeof(machine_needs));
     scan_machine_needs(program, &machine_needs);
     emit_machine_runtime(f, &machine_needs);
+
+    if (node_uses_call_prefix(program, "@assert")) {
+        fputs(
+            "/* V0.59: assert(...) and assert_equal(...): what was checked, and where */\n"
+            "static int64_t clair_rt_assert_fail(const char *text, const char *message, size_t line) {\n"
+            "    fflush(stdout);\n"
+            "    fprintf(stderr, \"Clair runtime error: assertion failed: %s (line %zu)\\n\", message ? message : text, line);\n"
+            "    exit(EXIT_FAILURE);\n"
+            "}\n"
+            "\n"
+            "static void clair_rt_assert_head(const char *text) {\n"
+            "    fflush(stdout);\n"
+            "    fprintf(stderr, \"Clair runtime error: assertion failed: %s: got \", text);\n"
+            "}\n"
+            "\n",
+            f);
+        if (node_uses_call_named(program, "@assert_equal_i"))
+            fputs(
+                "static int64_t clair_rt_assert_eq_i(int64_t got, int64_t expected, const char *text, size_t line) {\n"
+                "    if (got == expected) return 0;\n"
+                "    clair_rt_assert_head(text);\n"
+                "    fprintf(stderr, \"%\" PRId64 \", expected %\" PRId64 \" (line %zu)\\n\", got, expected, line);\n"
+                "    exit(EXIT_FAILURE);\n"
+                "}\n\n", f);
+        if (node_uses_call_named(program, "@assert_equal_u"))
+            fputs(
+                "static int64_t clair_rt_assert_eq_u(uint64_t got, uint64_t expected, const char *text, size_t line) {\n"
+                "    if (got == expected) return 0;\n"
+                "    clair_rt_assert_head(text);\n"
+                "    fprintf(stderr, \"%\" PRIu64 \", expected %\" PRIu64 \" (line %zu)\\n\", got, expected, line);\n"
+                "    exit(EXIT_FAILURE);\n"
+                "}\n\n", f);
+        if (node_uses_call_named(program, "@assert_equal_f"))
+            fputs(
+                "/* the fewest digits that read back the same number: 0.30000000000000004, not 0.3 */\n"
+                "static void clair_rt_assert_put_float(double x) {\n"
+                "    char text[40];\n"
+                "    for (int digits = 1; digits <= 17; digits++) {\n"
+                "        snprintf(text, sizeof(text), \"%.*g\", digits, x);\n"
+                "        if (strtod(text, NULL) == x) break;\n"
+                "    }\n"
+                "    fputs(text, stderr);\n"
+                "}\n"
+                "\n"
+                "static int64_t clair_rt_assert_eq_f(double got, double expected, const char *text, size_t line) {\n"
+                "    if (got == expected || (got != got && expected != expected)) return 0;   /* nan is nan */\n"
+                "    clair_rt_assert_head(text);\n"
+                "    clair_rt_assert_put_float(got);\n"
+                "    fputs(\", expected \", stderr);\n"
+                "    clair_rt_assert_put_float(expected);\n"
+                "    fprintf(stderr, \" (line %zu)\\n\", line);\n"
+                "    exit(EXIT_FAILURE);\n"
+                "}\n\n", f);
+        if (node_uses_call_named(program, "@assert_equal_s"))
+            fputs(
+                "/* a string between quotes, on one line: \"a\\nb\" */\n"
+                "static void clair_rt_assert_put_text(const char *s) {\n"
+                "    fputc('\"', stderr);\n"
+                "    for (; *s; s++) {\n"
+                "        if (*s == '\\n') fputs(\"\\\\n\", stderr);\n"
+                "        else if (*s == '\\t') fputs(\"\\\\t\", stderr);\n"
+                "        else if (*s == '\"' || *s == '\\\\') { fputc('\\\\', stderr); fputc(*s, stderr); }\n"
+                "        else fputc(*s, stderr);\n"
+                "    }\n"
+                "    fputc('\"', stderr);\n"
+                "}\n"
+                "\n"
+                "static int64_t clair_rt_assert_eq_s(const char *got, const char *expected, const char *text, size_t line) {\n"
+                "    if (strcmp(got, expected) == 0) return 0;\n"
+                "    clair_rt_assert_head(text);\n"
+                "    clair_rt_assert_put_text(got);\n"
+                "    fputs(\", expected \", stderr);\n"
+                "    clair_rt_assert_put_text(expected);\n"
+                "    fprintf(stderr, \" (line %zu)\\n\", line);\n"
+                "    exit(EXIT_FAILURE);\n"
+                "}\n\n", f);
+        if (node_uses_call_named(program, "@assert_equal_b"))
+            fputs(
+                "static int64_t clair_rt_assert_eq_b(bool got, bool expected, const char *text, size_t line) {\n"
+                "    if (got == expected) return 0;\n"
+                "    clair_rt_assert_head(text);\n"
+                "    fprintf(stderr, \"%s, expected %s (line %zu)\\n\", got ? \"true\" : \"false\", expected ? \"true\" : \"false\", line);\n"
+                "    exit(EXIT_FAILURE);\n"
+                "}\n\n", f);
+    }
 
     if (node_uses_int_mod(program)) {
         fputs(
@@ -10311,6 +10622,7 @@ int codegen_c_file(const AstNode *program, const char *path) {
         /* V0.55: the server calls the routes through this */
         fputs("static int64_t clair_web_handler(void) {\n    return clair_fn___web_handle();\n}\n", f);
     }
+    if (test_count) emit_test_main(f, uses_os);
     fclose(f);
     return 1;
 }

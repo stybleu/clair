@@ -64,6 +64,11 @@ AstNode *ast_clone(const AstNode *node) {
         if (!copy->unit) { ast_free(copy); return NULL; }
         strcpy(copy->unit, node->unit);
     }
+    if (node->src_text) {
+        copy->src_text = malloc(strlen(node->src_text) + 1);
+        if (!copy->src_text) { ast_free(copy); return NULL; }
+        strcpy(copy->src_text, node->src_text);
+    }
     if (node->decorators) {
         copy->decorators = ast_clone(node->decorators);
         if (!copy->decorators) { ast_free(copy); return NULL; }
@@ -87,6 +92,7 @@ void ast_free(AstNode *node) {
     free(node->type_name);
     free(node->unit);
     ast_free(node->decorators);
+    free(node->src_text);
     free(node);
 }
 

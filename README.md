@@ -46,7 +46,8 @@ Son compilateur est écrit en C et utilise Clang.
 - Différentiation automatique (--ad) : dérivées et gradients, compatible --dce.
 - Division entière contrôlée
 - Serveur web intégré (`import web`), aussi simple que Flask : routes `@web.route("/bonjour/<nom>")` vérifiées à la compilation, modèles de pages (`extends`, `if`, `for`), formulaires, cookies, fichiers de `static/`, pages PHP, données gardées dans `data/`, erreurs 500 sans arrêter le serveur ([documentation](docs/README_V0.55.md), exemple `exemples/web/`) ; sessions signées, mots de passe hachés comme Werkzeug, protection CSRF et DNS rebinding automatiques ([documentation](docs/README_V0.57.md))
-- Clair Studio (`sh ~/clair/tools/studio/studio.sh`) : un IDE dans le navigateur du téléphone, écrit en Clair : éditeur avec couleurs et retrait automatique, ▶ compile et lance, erreurs sur leur ligne, programmes qui demandent une entrée, ■ arrête, fichiers, le C généré ([documentation](docs/README_V0.58.md))
+- Clair Studio (`sh ~/clair/tools/studio/studio.sh`) : un IDE dans le navigateur du téléphone, écrit en Clair : éditeur avec couleurs et retrait automatique, ▶ compile et lance, erreurs sur leur ligne, programmes qui demandent une entrée, ■ arrête, fichiers, le C généré ([documentation](docs/README_V0.58.md)) ; erreurs soulignées pendant qu'on tape, autocomplétion selon l'endroit (modules, champs et méthodes, types, variables visibles), bouton 🧪 des tests, pas de recompilation d'un programme inchangé, gros fichiers fluides ([documentation](docs/README_V0.59.md))
+- Tests dans le programme : `test "nom" { assert_equal(carre(3), 9) }`, `clair --test prog.cl -o tests` lance chaque test à part (un test qui plante ou ne finit pas n'arrête pas les autres), `clair prog.cl --check` trouve les erreurs sans compiler ([documentation](docs/README_V0.59.md))
 - Module `os` : lancer un programme et lire sa sortie pendant qu'il tourne (`os.run`, `os.start`), fichiers et dossiers (`os.listdir`, `os.mkdir`, `os.copy_file`...), chemins, arguments de la ligne de commande, environnement, temps ([documentation](docs/README_V0.56.md), exemple `exemples/os/lancer.cl` : le bouton ▶ d'un IDE)
 
 - Grands nombres dynamiques `bigint` et `bigfloat` (exacts, sans limite de taille), mélangés aux `int` comme en Python (`num * k + acc`), avec leurs fonctions mathématiques (`sqrt`, `sin`, `exp`, `log`, `pi(1000)`, `isqrt`, `gcd`...), mémoire rendue pendant le programme, même dans les fonctions et les méthodes
@@ -109,6 +110,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
+- [Clair V0.59](docs/README_V0.59.md) : les tests dans le programme (`test "nom" { }`, `assert`, `assert_equal`, `clair --test`), `clair --check`, et dans Clair Studio les erreurs pendant qu'on tape, l'autocomplétion, le bouton des tests et le cache de compilation
 - [Clair V0.58](docs/README_V0.58.md) : Clair Studio, un IDE dans le navigateur du téléphone, écrit en Clair (modules `web` et `os`)
 - [Clair V0.57](docs/README_V0.57.md) : le module web protégé comme Flask : sessions signées (HMAC-SHA256), mots de passe (PBKDF2, format Werkzeug), CSRF et DNS rebinding bloqués sans rien écrire
 - [Clair V0.56](docs/README_V0.56.md) : le module `os` : lancer des programmes et lire leur sortie, fichiers, dossiers, chemins, arguments, temps

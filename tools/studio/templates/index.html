@@ -16,6 +16,7 @@
       <span id="etat-sauve" class="discret"></span>
     </div>
     <button id="b-c" class="texte" title="Voir le C écrit par Clair">C</button>
+    <button id="b-tester" class="icone" title="Lancer les tests (test &quot;nom&quot; { ... })" aria-label="Tests">🧪</button>
     <button id="b-arreter" class="icone arreter" title="Arrêter" aria-label="Arrêter" hidden>■</button>
     <button id="b-lancer" class="lancer" title="Compiler et lancer" aria-label="Lancer">▶</button>
   </header>
@@ -28,6 +29,12 @@
                 wrap="off" aria-label="Code Clair"></textarea>
     </div>
   </main>
+
+  <div class="diag" id="diag" role="status" hidden></div>
+  <div class="aide" id="aide" hidden>
+    <div id="signature"></div>
+    <div id="suggestions"></div>
+  </div>
 
   <nav class="touches" id="touches" aria-label="Touches">
     <button data-t="    ">⇥</button><button data-t="{">{</button><button data-t="}">}</button>

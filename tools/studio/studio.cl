@@ -1,4 +1,4 @@
-// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58).
+// Clair Studio : un IDE pour Clair, ecrit en Clair (V0.58, V0.59).
 // Le serveur est ce programme (modules web et os) ; l'editeur s'ouvre dans le navigateur.
 //   sh ~/clair/tools/studio/studio.sh [dossier] [port]
 import web
@@ -16,6 +16,11 @@ def compilateur() -> string {
 
 def binaire(nom: string) -> string {
     return os.join(os.join(os.env("TMPDIR", "/tmp"), "clair_studio"), nom + ".bin")
+}
+
+// le dossier de Clair (build/clair est dedans) : les sources des modules sont dans src/
+def racine() -> string {
+    return os.dirname(os.dirname(compilateur()))
 }
 
 // seule la personne qui a ouvert l'adresse avec le jeton (affichee dans Termux) entre
@@ -122,26 +127,115 @@ def renommer(req: Request, nom: string, nouveau: string) -> Response {
     return web.json("{\"ok\":" + oui(ok) + ",\"erreur\":" + web.json_string(os.error()) + "}")
 }
 
-// compile, puis lance le programme (dans le dossier des fichiers) sans l'attendre
+// ---- compiler, lancer, tester ----
+
+Class Compilation {
+    ok: bool
+    erreurs: string
+    duree: string
+    cache: bool
+}
+
+// V0.59 : ce qui decide du programme : le compilateur, puis chaque .cl du dossier
+// (les modules importes en font partie). La meme cle : pas besoin de recompiler.
+def cle_sources(mode: string) -> string {
+    let d: string = dossier()
+    let c: string = compilateur()
+    let cle: string = mode + "|" + str(os.modified(c)) + "|" + str(os.size(c)) + "\n"
+    for n in os.listdir(d) {
+        let chemin: string = os.join(d, n)
+        if valide(n) and os.extension(n) == ".cl" and os.is_file(chemin) {
+            let texte: string = read_text(chemin)
+            cle = cle + n + "|" + str(len(texte)) + "\n" + texte
+        }
+    }
+    return cle
+}
+
+// compile nom vers sortie (mode "" ou "--test"), sauf si rien n'a change depuis la derniere fois
+def compiler(nom: string, sortie: string, mode: string) -> Compilation {
+    os.mkdir(os.dirname(sortie))
+    let cle: string = cle_sources(mode)
+    let fichier_cle: string = sortie + ".cle"
+    if os.is_file(sortie) and os.is_file(fichier_cle) {
+        if read_text(fichier_cle) == cle {
+            return Compilation(true, "", "0.00", true)
+        }
+    }
+    os.remove(fichier_cle)
+    let commande: list[string] = [compilateur(), os.join(dossier(), nom), "-o", sortie]
+    if mode != "" {
+        commande.append(mode)
+    }
+    let t0: float = os.clock()
+    let c: RunResult = os.run(commande)
+    let duree: string = format(os.clock() - t0, ".2f")
+    if c.code != 0 {
+        return Compilation(false, c.err + c.out, duree, false)
+    }
+    write_file(fichier_cle, cle)
+    return Compilation(true, "", duree, false)
+}
+
+// lance sortie dans le dossier des fichiers, sans l'attendre
+def demarrer(sortie: string, c: Compilation, entree: string) -> Response {
+    if not c.ok {
+        return web.json("{\"ok\":false,\"erreurs\":" + web.json_string(c.erreurs) + ",\"duree\":" + web.json_string(c.duree) + "}")
+    }
+    let p: Process = os.start_merged(["sh", "-c", "cd \"$1\" && exec \"$2\"", "sh", dossier(), sortie])
+    if entree != "" {
+        p.write(entree)
+    }
+    return web.json("{\"ok\":true,\"id\":" + str(p.id) + ",\"duree\":" + web.json_string(c.duree) + ",\"cache\":" + oui(c.cache) + "}")
+}
+
+// compile (si besoin), puis lance le programme
 @web.route("/api/lancer/<nom>", "POST")
 def lancer(req: Request, nom: string) -> Response {
     if not autorise(req) or not valide(nom) {
         return refus()
     }
-    let source: string = os.join(dossier(), nom)
     let sortie: string = binaire(nom)
-    os.mkdir(os.dirname(sortie))
+    return demarrer(sortie, compiler(nom, sortie, ""), req.body)
+}
+
+// V0.59 : les blocs test "nom" { ... } du fichier, chacun a part (clair --test)
+@web.route("/api/tester/<nom>", "POST")
+def tester(req: Request, nom: string) -> Response {
+    if not autorise(req) or not valide(nom) {
+        return refus()
+    }
+    let sortie: string = binaire(nom) + ".tests"
+    return demarrer(sortie, compiler(nom, sortie, "--test"), "")
+}
+
+// V0.59 : les erreurs du fichier, sans le compiler (clair --check : quelques millisecondes)
+@web.route("/api/verifier/<nom>", "POST")
+def verifier(req: Request, nom: string) -> Response {
+    if not autorise(req) or not valide(nom) {
+        return refus()
+    }
+    let source: string = os.join(dossier(), nom)
+    if not os.is_file(source) {
+        return web.error(404, "pas de fichier " + nom)
+    }
     let t0: float = os.clock()
-    let c: RunResult = os.run([compilateur(), source, "-o", sortie])
-    let duree: string = format(os.clock() - t0, ".2f")
-    if c.code != 0 {
-        return web.json("{\"ok\":false,\"erreurs\":" + web.json_string(c.err + c.out) + ",\"duree\":" + web.json_string(duree) + "}")
+    let c: RunResult = os.run([compilateur(), source, "--check"])
+    let duree: string = format((os.clock() - t0) * 1000.0, ".0f")
+    return web.json("{\"ok\":" + oui(c.code == 0) + ",\"erreurs\":" + web.json_string(c.err + c.out) + ",\"ms\":" + duree + "}")
+}
+
+// V0.59 : la source des modules os et web, pour l'autocompletion de l'editeur
+@web.route("/api/module/<nom>")
+def module_source(req: Request, nom: string) -> Response {
+    if not autorise(req) {
+        return refus()
     }
-    let p: Process = os.start_merged(["sh", "-c", "cd \"$1\" && exec \"$2\"", "sh", dossier(), sortie])
-    if req.body != "" {
-        p.write(req.body)
+    let chemin: string = os.join(racine(), "src/clair_" + nom + ".cl")
+    if (nom != "os" and nom != "web" and nom != "gfx") or not os.is_file(chemin) {
+        return web.error(404, "pas de module " + nom)
     }
-    return web.json("{\"ok\":true,\"id\":" + str(p.id) + ",\"duree\":" + web.json_string(duree) + "}")
+    return web.text(read_text(chemin))
 }
 
 // ce que le programme a ecrit depuis la derniere fois, et s'il a fini

@@ -1089,13 +1089,53 @@ pkill -P "$PID_OS_WEB" 2> /dev/null || true
 [ "$out_ow2" = 'a.css;b.js;' ]
 printf '%s\n' 'os_web.cl : OK -> une page web qui lance un programme et lit un dossier'
 
+# V0.59 : les tests dans le programme : test "nom" { ... }, assert, assert_equal, clair --test, clair --check
+./build/clair tests/test_blocs.cl -o build/test_blocs_main
+[ "$(./build/test_blocs_main)" = "$(printf '16\n10')" ] || { printf '%s\n' 'test_blocs.cl : ECHEC -> sans --test, seul main tourne' >&2; exit 1; }
+./build/clair --test tests/test_blocs.cl -o build/test_blocs_tests
+code_tb=0
+CLAIR_TEST_TIMEOUT=1 ./build/test_blocs_tests < /dev/null > build/test_blocs.raw 2>&1 || code_tb=$?
+sed 's/finished in [0-9.]*s/finished in Xs/' build/test_blocs.raw > build/test_blocs.out
+if [ "$code_tb" != 1 ] || ! cmp -s build/test_blocs.out tests/test_blocs.expected; then
+    printf '%s\n' "test_blocs.cl : ECHEC (code $code_tb)" >&2
+    diff tests/test_blocs.expected build/test_blocs.out | head -n 10 >&2
+    exit 1
+fi
+tb_filtre="$(./build/test_blocs_tests entiers | grep '^test result')"
+case "$tb_filtre" in
+    "test result: ok. 1 passed; 0 failed; 9 filtered out; finished in "*) ;;
+    *) printf '%s\n' "test_blocs.cl : ECHEC -> filtre : $tb_filtre" >&2; exit 1 ;;
+esac
+grep -q 'clair_fn___test' build/test_blocs_main.generated.c && { printf '%s\n' 'test_blocs.cl : ECHEC -> les tests sont dans le programme sans --test' >&2; exit 1; }
+printf '%s\n' 'test_blocs.cl : OK -> main seul sans --test ; avec --test chaque test a part : assert, assert_equal (int, u8, u64, float, string, bool), erreur, boucle arretee, filtre, tests d un module importe ignores'
+./build/clair tests/test_blocs.cl --check > build/check.out 2>&1 || { printf '%s\n' 'clair --check : ECHEC sur un programme juste' >&2; cat build/check.out >&2; exit 1; }
+[ ! -s build/check.out ] || { printf '%s\n' 'clair --check : ECHEC -> un programme juste ne dit rien' >&2; exit 1; }
+expect_check_error() {
+    if ./build/clair "tests/$1.cl" --check > /dev/null 2> "build/$1.stderr"; then
+        printf '%s\n' "$1.cl : ECHEC -> clair --check aurait du refuser" >&2
+        exit 1
+    fi
+    grep -Fq "$2" "build/$1.stderr" || { printf '%s\n' "$1.cl : ECHEC -> message attendu : $2" >&2; cat "build/$1.stderr" >&2; exit 1; }
+}
+expect_check_error invalid_assert_condition "assert() checks a condition (a bool), got int: write assert(x == 3), or assert_equal(x, 3) (line 2)"
+expect_check_error invalid_assert_equal "assert_equal() compares two ints, floats, strings or bools, got int and string (line 2)"
+expect_check_error invalid_test_dans_fonction 'parse error at 2:5: a test "..." { } block goes outside the functions, like a def'
+expect_check_error invalid_test_double 'test error: two tests are named "meme nom" (line 5): give each test its own name'
+./build/clair tests/invalid_assert_condition.cl -o build/test_invalid_assert_condition || { printf '%s\n' 'sans --test, un test faux ne compte pas' >&2; exit 1; }
+if ./build/clair --test tests/os_module.cl -o build/test_sans_test 2> build/sans_test.stderr; then
+    printf '%s\n' 'clair --test : ECHEC -> un programme sans test aurait du etre refuse' >&2
+    exit 1
+fi
+grep -Fq 'this program has no test' build/sans_test.stderr
+printf '%s\n' 'clair --check : OK -> les erreurs sans compiler (tests compris), assert et assert_equal mal employes, test dans une fonction, deux tests du meme nom, --test sans test refuse'
+
 # V0.58 : Clair Studio, l'IDE ecrit en Clair (tools/studio)
 if ! bash tests/run_studio.sh > build/studio.log 2>&1; then
     printf '%s\n' 'tools/studio : ECHEC' >&2
     tail -n 8 build/studio.log >&2
     exit 1
 fi
-printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier'
+printf '%s\n' 'tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules'
 
 printf '%s\n' ' TOUS LES TESTS SONT OK'
 printf '%s\n' '=================================================='

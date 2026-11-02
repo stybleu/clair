@@ -1001,6 +1001,68 @@ static int check_module_call(Semantic *s, AstNode *n) {
 }
 
 /*
+ * V0.59: the checks of the tests (test "name" { ... }), and of any function:
+ *   assert(cond)  assert(cond, message)    cond a bool, message a string
+ *   assert_equal(value, expected)          two ints, floats, strings or bools
+ * When the check fails, the program stops: "assertion failed: ... (line N)".
+ * assert_equal is renamed @assert_equal_i, _u (u64), _f, _s or _b.
+ * 1 when n is one of them, 0 otherwise, -1 on error.
+ */
+static int check_assert_call(Semantic *s, AstNode *n) {
+    int is_assert = strcmp(n->text, "assert") == 0;
+    if (!is_assert && strcmp(n->text, "assert_equal") != 0) return 0;
+    if (is_assert && (n->child_count < 1 || n->child_count > 2)) {
+        report("semantic error: assert() expects a condition, and maybe a message: assert(x > 0) or assert(x > 0, \"x is positive\"), got %zu argument(s)\n", n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    if (!is_assert && n->child_count != 2) {
+        report("semantic error: assert_equal() expects 2 arguments, the value then the value expected: assert_equal(square(3), 9), got %zu\n", n->child_count);
+        s->had_error = 1;
+        return -1;
+    }
+    const char *t0 = expr_type(s, n->children[0]);
+    if (!t0) return -1;
+    const char *variant = NULL;
+    if (is_assert) {
+        if (strcmp(t0, "bool") != 0) {
+            report("semantic error: assert() checks a condition (a bool), got %s: write assert(x == 3), or assert_equal(x, 3)\n", t0);
+            s->had_error = 1;
+            return -1;
+        }
+        if (n->child_count == 2) {
+            const char *t1 = expr_type(s, n->children[1]);
+            if (!t1) return -1;
+            if (strcmp(t1, "string") != 0) {
+                report("semantic error: the message of assert() is a string, got %s\n", t1);
+                s->had_error = 1;
+                return -1;
+            }
+        }
+    } else {
+        const char *t1 = expr_type_expected(s, n->children[1], t0);
+        if (!t1) return -1;
+        if (strcmp(t0, "string") == 0 && strcmp(t1, "string") == 0) variant = "s";
+        else if (strcmp(t0, "bool") == 0 && strcmp(t1, "bool") == 0) variant = "b";
+        else if (machine_bits(t0) && machine_bits(t1))
+            variant = strcmp(t0, "u64") == 0 || strcmp(t1, "u64") == 0 ? "u" : "i";
+        else if (is_numeric(t0) && is_numeric(t1) && !is_measure(t0) && !is_measure(t1)) variant = "f";
+        if (!variant) {
+            report("semantic error: assert_equal() compares two ints, floats, strings or bools, got %s and %s\n", t0, t1);
+            s->had_error = 1;
+            return -1;
+        }
+    }
+    char *renamed = malloc(32);
+    if (!renamed) return -1;
+    if (is_assert) strcpy(renamed, "@assert");
+    else snprintf(renamed, 32, "@assert_equal_%s", variant);
+    free(n->text);
+    n->text = renamed;
+    return set_type(n, "int") ? 1 : -1;
+}
+
+/*
  * Standard input and output, files and bytes (V0.46):
  *   input() / input(prompt) -> string          read_text() / read_text(path) -> string
  *   read_bytes() / read_bytes(path) -> list[u8]
@@ -2464,6 +2526,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 if (builtin == 0) builtin = check_random_call(s, n);
                 if (builtin == 0) builtin = check_text_call(s, n);
                 if (builtin == 0) builtin = check_io_call(s, n);
+                if (builtin == 0) builtin = check_assert_call(s, n);
                 if (builtin == 0) builtin = check_module_call(s, n);
                 if (builtin == 0) builtin = check_absolue_call(s, n);
                 if (builtin == 0) builtin = check_format_call(s, n);
