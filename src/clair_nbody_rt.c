@@ -2,6 +2,7 @@
  * V0.66: the module nbody (import nbody): N bodies pulled by Newton's gravity.
  * V0.68: IAS15 (s.integrator = "ias15"), the orbital elements, the solar system.
  * V0.69: WHFast (s.integrator = "whfast"), s.save() and nbody.load().
+ * V0.70: the tree of Barnes and Hut (s.gravity = "tree") on every core, Plummer spheres.
  *
  * Copied into the C of the programs that import nbody (tools/embed_file.cmake), after the
  * runtime of gui (nbody imports gui: the window of s.show() is the window of gui).
@@ -22,7 +23,7 @@ static struct {
     ClairList names, colors;
     double *ax, *ay, *az;
     size_t cap;
-    double dt, speed, trail, tscale, lscale, G, soft, t, epsilon;
+    double dt, speed, trail, tscale, lscale, G, soft, t, epsilon, theta_saved;
     int flags;
     char tunit[32], lunit[32];
 } clair_nb;
@@ -59,9 +60,359 @@ static int64_t clair_nbody_use(ClairList x, ClairList y, ClairList z, ClairList 
     return (int64_t)n;
 }
 
+/* ---- V0.70: the tree of Barnes and Hut (s.gravity = "tree"), on every core ----
+ *
+ * After Barnes & Hut (1986), "A hierarchical O(N log N) force-calculation algorithm", Nature 324, 446.
+ * The bodies go into an octree (a cube cut into 8, again and again, until one body per cube).  Each
+ * cube keeps its mass, its center of mass and its quadrupole.  For the force on a body, a cube seen
+ * under a small angle (side / distance < theta) counts as one mass at its center of mass, corrected by
+ * its quadrupole; otherwise its 8 smaller cubes are looked at (the distance also counts how far its
+ * center of mass is from its middle: Barnes 1994, fewer large errors).  N log N instead of N^2: the forces of
+ * 100 000 bodies in a fraction of a second.  The error of a force is about theta^4 with the quadrupole
+ * (theta = 0.5: about 1e-4 to 1e-3 of the force).  Each body is computed alone, in a fixed order: the
+ * result does not depend on the number of cores.
+ */
+
+#include <pthread.h>
+
+typedef struct {
+    double c[3], half;                               /* the cube: its center, half its side */
+    double m, com[3], q[6];                          /* mass, center of mass, quadrupole xx xy xz yy yz zz */
+    int32_t child[8];                                /* -1: none */
+    int32_t first, count, leaf;                      /* a leaf: its bodies (first, then next[]) */
+} ClairBhNode;
+
+static struct {
+    ClairBhNode *node;
+    size_t nnode, capnode, capnext;
+    int32_t *next, root;
+    double theta;                                    /* 0: no tree, the direct sums */
+    int threads;                                     /* 0: all the cores */
+} clair_bh = { .root = -1 };
+
+static int32_t clair_bh_node(const double c[3], double half) {
+    if (clair_bh.nnode == clair_bh.capnode) {
+        size_t cap = clair_bh.capnode ? clair_bh.capnode * 2 : 1024;
+        ClairBhNode *n = realloc(clair_bh.node, cap * sizeof(ClairBhNode));
+        if (!n) clair_nbody_die("out of memory");
+        clair_bh.node = n;
+        clair_bh.capnode = cap;
+    }
+    ClairBhNode *n = &clair_bh.node[clair_bh.nnode];
+    memset(n, 0, sizeof(*n));
+    for (int k = 0; k < 3; k++) n->c[k] = c[k];
+    n->half = half;
+    for (int k = 0; k < 8; k++) n->child[k] = -1;
+    n->first = -1;
+    n->leaf = 1;
+    return (int32_t)clair_bh.nnode++;
+}
+
+static int clair_bh_octant(const ClairBhNode *n, const double p[3]) {
+    return (p[0] > n->c[0]) | ((p[1] > n->c[1]) << 1) | ((p[2] > n->c[2]) << 2);
+}
+
+static void clair_bh_place(int32_t k, size_t b, const double *x, const double *y, const double *z) {
+    double p[3] = { x[b], y[b], z[b] };
+    for (int depth = 0;; depth++) {
+        ClairBhNode *n = &clair_bh.node[k];
+        if (!n->leaf) {
+            int o = clair_bh_octant(n, p);
+            if (n->child[o] < 0) {
+                double c[3], h = n->half / 2;
+                for (int d = 0; d < 3; d++) c[d] = n->c[d] + ((o >> d) & 1 ? h : -h);
+                int32_t nk = clair_bh_node(c, h);
+                n = &clair_bh.node[k];
+                n->child[o] = nk;
+            }
+            k = n->child[o];
+            continue;
+        }
+        if (n->count == 0 || depth >= 48) {           /* empty, or bodies on top of one another: they share it */
+            clair_bh.next[b] = n->first;
+            n->first = (int32_t)b;
+            n->count++;
+            return;
+        }
+        int32_t list = n->first;                      /* one body already: the cube is cut in 8 */
+        n->first = -1;
+        n->count = 0;
+        n->leaf = 0;
+        while (list >= 0) {
+            int32_t nx = clair_bh.next[list];
+            clair_bh_place(k, (size_t)list, x, y, z);
+            list = nx;
+        }
+    }
+}
+
+/* the tree of the bodies still there (massive = 1: only those with a mass; 2: only those with a size) */
+static void clair_bh_build(int which) {
+    size_t n = clair_nbody_n();
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    if (n > clair_bh.capnext) {
+        int32_t *nx = realloc(clair_bh.next, n * sizeof(int32_t));
+        if (!nx) clair_nbody_die("out of memory");
+        clair_bh.next = nx;
+        clair_bh.capnext = n;
+    }
+    clair_bh.nnode = 0;
+    clair_bh.root = -1;
+    double lo[3] = { INFINITY, INFINITY, INFINITY }, hi[3] = { -INFINITY, -INFINITY, -INFINITY };
+    size_t used = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (r[i] < 0 || (which == 1 && !(m[i] > 0)) || (which == 2 && !(r[i] > 0))) continue;
+        double p[3] = { x[i], y[i], z[i] };
+        for (int d = 0; d < 3; d++) { if (p[d] < lo[d]) lo[d] = p[d]; if (p[d] > hi[d]) hi[d] = p[d]; }
+        used++;
+    }
+    if (!used) return;
+    double c[3], half = 0;
+    for (int d = 0; d < 3; d++) {
+        c[d] = (lo[d] + hi[d]) / 2;
+        if ((hi[d] - lo[d]) / 2 > half) half = (hi[d] - lo[d]) / 2;
+    }
+    if (!isfinite(half)) clair_nbody_die("a body is at an infinite place (or not a number)");
+    half = half * 1.0001 + 1e-300;
+    clair_bh.root = clair_bh_node(c, half);
+    for (size_t i = 0; i < n; i++) {
+        if (r[i] < 0 || (which == 1 && !(m[i] > 0)) || (which == 2 && !(r[i] > 0))) continue;
+        clair_bh_place(clair_bh.root, i, x, y, z);
+    }
+}
+
+/* mass, center of mass and quadrupole of each cube, from the small ones up */
+static void clair_bh_moments(int32_t k) {
+    ClairBhNode *n = &clair_bh.node[k];
+    const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m);
+    double M = 0, s[3] = { 0, 0, 0 };
+    if (n->leaf) {
+        for (int32_t b = n->first; b >= 0; b = clair_bh.next[b]) { M += m[b]; s[0] += m[b] * x[b]; s[1] += m[b] * y[b]; s[2] += m[b] * z[b]; }
+    } else {
+        for (int o = 0; o < 8; o++) {
+            int32_t ck = n->child[o];
+            if (ck < 0) continue;
+            clair_bh_moments(ck);
+            n = &clair_bh.node[k];
+            const ClairBhNode *c = &clair_bh.node[ck];
+            M += c->m;
+            for (int d = 0; d < 3; d++) s[d] += c->m * c->com[d];
+        }
+    }
+    n->m = M;
+    for (int d = 0; d < 3; d++) n->com[d] = M > 0 ? s[d] / M : n->c[d];
+    double q[6] = { 0, 0, 0, 0, 0, 0 };
+    if (n->leaf) {
+        for (int32_t b = n->first; b >= 0; b = clair_bh.next[b]) {
+            double d[3] = { x[b] - n->com[0], y[b] - n->com[1], z[b] - n->com[2] }, d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            q[0] += m[b] * (3 * d[0] * d[0] - d2); q[1] += m[b] * 3 * d[0] * d[1]; q[2] += m[b] * 3 * d[0] * d[2];
+            q[3] += m[b] * (3 * d[1] * d[1] - d2); q[4] += m[b] * 3 * d[1] * d[2]; q[5] += m[b] * (3 * d[2] * d[2] - d2);
+        }
+    } else {
+        for (int o = 0; o < 8; o++) {
+            int32_t ck = n->child[o];
+            if (ck < 0) continue;
+            const ClairBhNode *c = &clair_bh.node[ck];
+            double d[3] = { c->com[0] - n->com[0], c->com[1] - n->com[1], c->com[2] - n->com[2] }, d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            q[0] += c->q[0] + c->m * (3 * d[0] * d[0] - d2); q[1] += c->q[1] + c->m * 3 * d[0] * d[1]; q[2] += c->q[2] + c->m * 3 * d[0] * d[2];
+            q[3] += c->q[3] + c->m * (3 * d[1] * d[1] - d2); q[4] += c->q[4] + c->m * 3 * d[1] * d[2]; q[5] += c->q[5] + c->m * (3 * d[2] * d[2] - d2);
+        }
+    }
+    for (int k6 = 0; k6 < 6; k6++) n->q[k6] = q[k6];
+}
+
+/* the tree laid flat in the order of the walk (depth first): after a cube come its small cubes, and
+   skip[k] is the first cube after all of them; the bodies of the leaves follow one another in memory */
+static struct {
+    size_t n, cap, nb, capb;
+    double *m, *com, *q, *w2, *box;                 /* com: 3, q: 6, w2: the distance to open it, squared; box: center 3 + half */
+    int32_t *start, *count, *skip;                  /* start: first body of a leaf (-1: not a leaf) */
+    size_t *bidx;                                   /* the bodies in the order of the leaves */
+    double *bp;                                     /* x y z m of those bodies */
+} clair_bf;
+
+static void clair_bf_grow(void) {
+    size_t cap = clair_bf.cap ? clair_bf.cap * 2 : 1024;
+    double *m = realloc(clair_bf.m, cap * sizeof(double));
+    if (m) clair_bf.m = m;
+    double *com = realloc(clair_bf.com, 3 * cap * sizeof(double));
+    if (com) clair_bf.com = com;
+    double *q = realloc(clair_bf.q, 6 * cap * sizeof(double));
+    if (q) clair_bf.q = q;
+    double *w2 = realloc(clair_bf.w2, cap * sizeof(double));
+    if (w2) clair_bf.w2 = w2;
+    double *box = realloc(clair_bf.box, 4 * cap * sizeof(double));
+    if (box) clair_bf.box = box;
+    int32_t *st = realloc(clair_bf.start, cap * sizeof(int32_t));
+    if (st) clair_bf.start = st;
+    int32_t *ct = realloc(clair_bf.count, cap * sizeof(int32_t));
+    if (ct) clair_bf.count = ct;
+    int32_t *sk = realloc(clair_bf.skip, cap * sizeof(int32_t));
+    if (sk) clair_bf.skip = sk;
+    if (!m || !com || !q || !w2 || !box || !st || !ct || !sk) clair_nbody_die("out of memory");
+    clair_bf.cap = cap;
+}
+
+static void clair_bf_lay(int32_t k) {
+    if (clair_bf.n == clair_bf.cap) clair_bf_grow();
+    size_t f = clair_bf.n++;
+    const ClairBhNode *n = &clair_bh.node[k];
+    clair_bf.m[f] = n->m;
+    for (int d = 0; d < 3; d++) { clair_bf.com[3 * f + d] = n->com[d]; clair_bf.box[4 * f + d] = n->c[d]; }
+    for (int d = 0; d < 6; d++) clair_bf.q[6 * f + d] = n->q[d];
+    clair_bf.box[4 * f + 3] = n->half;
+    {   /* opened when nearer than side / theta + the distance from its center to its center of mass (Barnes 1994) */
+        double dc = sqrt((n->com[0] - n->c[0]) * (n->com[0] - n->c[0]) + (n->com[1] - n->c[1]) * (n->com[1] - n->c[1]) + (n->com[2] - n->c[2]) * (n->com[2] - n->c[2]));
+        double lim = 2 * n->half / clair_bh.theta + dc;
+        clair_bf.w2[f] = lim * lim;
+    }
+    clair_bf.start[f] = -1;
+    clair_bf.count[f] = 0;
+    if (n->leaf) {
+        const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m);
+        clair_bf.start[f] = (int32_t)clair_bf.nb;
+        for (int32_t b = n->first; b >= 0; b = clair_bh.next[b]) {
+            size_t q = clair_bf.nb++;
+            clair_bf.bidx[q] = (size_t)b;
+            clair_bf.bp[4 * q] = x[b]; clair_bf.bp[4 * q + 1] = y[b]; clair_bf.bp[4 * q + 2] = z[b]; clair_bf.bp[4 * q + 3] = m[b];
+            clair_bf.count[f]++;
+        }
+    } else {
+        for (int o = 0; o < 8; o++) if (clair_bh.node[k].child[o] >= 0) clair_bf_lay(clair_bh.node[k].child[o]);
+    }
+    clair_bf.skip[f] = (int32_t)clair_bf.n;
+}
+
+static void clair_bf_build(void) {
+    size_t n = clair_nbody_n();
+    if (n > clair_bf.capb) {
+        size_t *bi = realloc(clair_bf.bidx, n * sizeof(size_t));
+        if (bi) clair_bf.bidx = bi;
+        double *bp = realloc(clair_bf.bp, 4 * n * sizeof(double));
+        if (bp) clair_bf.bp = bp;
+        if (!bi || !bp) clair_nbody_die("out of memory");
+        clair_bf.capb = n;
+    }
+    clair_bf.n = clair_bf.nb = 0;
+    if (clair_bh.root >= 0) clair_bf_lay(clair_bh.root);
+}
+
+/* the pull of the tree on the body i at p (and its potential, per unit of mass) */
+static void clair_bh_walk(size_t i, const double p[3], double G, double eps2, double a[3], double *phi) {
+    size_t k = 0, nn = clair_bf.n;
+    double ax = 0, ay = 0, az = 0, ph = 0;
+    while (k < nn) {
+        if (!(clair_bf.m[k] > 0)) { k = (size_t)clair_bf.skip[k]; continue; }
+        int32_t st = clair_bf.start[k];
+        if (st >= 0) {                                /* a leaf: its bodies one by one */
+            for (int32_t q = st; q < st + clair_bf.count[k]; q++) {
+                if (clair_bf.bidx[q] == i) continue;
+                const double *b = clair_bf.bp + 4 * q;
+                double dx = b[0] - p[0], dy = b[1] - p[1], dz = b[2] - p[2], d2 = dx * dx + dy * dy + dz * dz + eps2;
+                if (d2 == 0) continue;
+                double rinv = 1 / sqrt(d2), gm = G * b[3] * rinv, f = gm * rinv * rinv;
+                ax += f * dx; ay += f * dy; az += f * dz;
+                ph -= gm;
+            }
+            k = (size_t)clair_bf.skip[k];
+            continue;
+        }
+        const double *c = clair_bf.com + 3 * k, *bx = clair_bf.box + 4 * k;
+        double d0 = p[0] - c[0], d1 = p[1] - c[1], d2 = p[2] - c[2];
+        double r2 = d0 * d0 + d1 * d1 + d2 * d2;
+        if (r2 > clair_bf.w2[k] && !(fabs(p[0] - bx[0]) <= bx[3] && fabs(p[1] - bx[1]) <= bx[3] && fabs(p[2] - bx[2]) <= bx[3])) {
+            const double *Q = clair_bf.q + 6 * k;     /* far enough: one mass and its quadrupole */
+            double s2 = r2 + eps2, rinv = 1 / sqrt(s2), ri2 = rinv * rinv, r3 = rinv * ri2, r5 = r3 * ri2, r7 = r5 * ri2;
+            double q0 = Q[0] * d0 + Q[1] * d1 + Q[2] * d2, q1 = Q[1] * d0 + Q[3] * d1 + Q[4] * d2, q2 = Q[2] * d0 + Q[4] * d1 + Q[5] * d2;
+            double dQd = d0 * q0 + d1 * q1 + d2 * q2, m = clair_bf.m[k];
+            double radial = -m * r3 - 2.5 * dQd * r7;
+            ax += G * (radial * d0 + q0 * r5); ay += G * (radial * d1 + q1 * r5); az += G * (radial * d2 + q2 * r5);
+            ph -= G * (m * rinv + 0.5 * dQd * r5);
+            k = (size_t)clair_bf.skip[k];
+        } else {
+            k++;                                      /* its small cubes come next */
+        }
+    }
+    a[0] += ax; a[1] += ay; a[2] += az;
+    *phi += ph;
+}
+
+typedef struct { size_t lo, hi; double G, eps2, phi; int want_phi; } ClairBhWork;
+
+/* the bodies in the order of the leaves (neighbours together: the same cubes stay in the cache) */
+static void *clair_bh_worker(void *arg) {
+    ClairBhWork *w = arg;
+    const double *m = CLAIR_NB(m);
+    double total = 0;
+    for (size_t q = w->lo; q < w->hi; q++) {
+        size_t i = clair_bf.bidx[q];
+        const double *p = clair_bf.bp + 4 * q;
+        double a[3] = { 0, 0, 0 }, phi = 0;
+        clair_bh_walk(i, p, w->G, w->eps2, a, &phi);
+        if (w->want_phi) total += 0.5 * m[i] * phi;
+        else { clair_nb.ax[i] = a[0]; clair_nb.ay[i] = a[1]; clair_nb.az[i] = a[2]; }
+    }
+    w->phi = total;
+    return NULL;
+}
+
+static int clair_bh_cores(void) {
+    int t = clair_bh.threads;
+    if (t <= 0) {
+        long c = sysconf(_SC_NPROCESSORS_ONLN);
+        t = c > 0 ? (int)c : 1;
+    }
+    return t < 1 ? 1 : t > 64 ? 64 : t;
+}
+
+/* the forces with the tree (want_phi: the potential energy instead), on every core */
+static double clair_bh_run(double G, double eps2, int want_phi) {
+    size_t n = clair_nbody_n();
+    const double *r = CLAIR_NB(r);
+    if (!want_phi) for (size_t i = 0; i < n; i++) clair_nb.ax[i] = clair_nb.ay[i] = clair_nb.az[i] = 0;
+    clair_bh_build(0);                                /* every body still there: those without mass are pulled too */
+    if (clair_bh.root >= 0) clair_bh_moments(clair_bh.root);
+    clair_bf_build();
+    (void)r;
+    n = clair_bf.nb;
+    int t = n >= 256 ? clair_bh_cores() : 1;
+    if ((size_t)t > n) t = n ? (int)n : 1;
+    ClairBhWork w[64];
+    pthread_t th[64];
+    int started[64] = { 0 };
+    for (int k = 0; k < t; k++) {
+        w[k] = (ClairBhWork){ n * (size_t)k / (size_t)t, n * (size_t)(k + 1) / (size_t)t, G, eps2, 0, want_phi };
+        if (k > 0) started[k] = pthread_create(&th[k], NULL, clair_bh_worker, &w[k]) == 0;
+    }
+    clair_bh_worker(&w[0]);
+    for (int k = 1; k < t; k++) {
+        if (started[k]) pthread_join(th[k], NULL);
+        else clair_bh_worker(&w[k]);              /* no thread: done here */
+    }
+    double phi = 0;
+    for (int k = 0; k < t; k++) phi += w[k].phi;  /* in a fixed order: the same whatever the cores */
+    return phi;
+}
+
+static void clair_bh_search(int32_t k, size_t i, const double p[3], double reach, size_t *found, size_t *nfound, size_t cap) {
+    const ClairBhNode *n = &clair_bh.node[k];
+    for (int d = 0; d < 3; d++) if (fabs(p[d] - n->c[d]) > n->half + reach) return;
+    if (n->leaf) {
+        for (int32_t b = n->first; b >= 0; b = clair_bh.next[b]) if ((size_t)b > i && *nfound < cap) found[(*nfound)++] = (size_t)b;
+        return;
+    }
+    for (int o = 0; o < 8; o++) if (n->child[o] >= 0) clair_bh_search(n->child[o], i, p, reach, found, nfound, cap);
+}
+
+static int clair_bh_less(const void *a, const void *b) {
+    size_t x = *(const size_t *)a, y = *(const size_t *)b;
+    return (x > y) - (x < y);
+}
+
 /* the accelerations of every body (the absorbed ones: none) */
 static void clair_nbody_forces(double G, double eps2) {
     size_t n = clair_nbody_n();
+    if (clair_bh.theta > 0) { clair_bh_run(G, eps2, 0); return; }     /* V0.70: with the tree */
     const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *m = CLAIR_NB(m), *r = CLAIR_NB(r);
     double *ax = clair_nb.ax, *ay = clair_nb.ay, *az = clair_nb.az;
     for (size_t i = 0; i < n; i++) ax[i] = ay[i] = az[i] = 0;
@@ -103,36 +454,98 @@ static void clair_nbody_kick(double h) {
     }
 }
 
+/* the bodies i and j touch? then they become one (the lighter one is absorbed): gives 1 */
+static int clair_nbody_merge(size_t i, size_t j, int *i_gone) {
+    double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
+    double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    if (r[j] <= 0) return 0;
+    double dx = x[j] - x[i], dy = y[j] - y[i], dz = z[j] - z[i], s = r[i] + r[j];
+    if (dx * dx + dy * dy + dz * dz >= s * s) return 0;
+    double M = m[i] + m[j];
+    double a = M > 0 ? m[i] / M : 0.5, b = 1 - a;
+    size_t keep = m[j] > m[i] ? j : i, gone = keep == i ? j : i;
+    x[keep] = a * x[i] + b * x[j]; y[keep] = a * y[i] + b * y[j]; z[keep] = a * z[i] + b * z[j];
+    vx[keep] = a * vx[i] + b * vx[j]; vy[keep] = a * vy[i] + b * vy[j]; vz[keep] = a * vz[i] + b * vz[j];
+    m[keep] = M;
+    r[keep] = cbrt(r[i] * r[i] * r[i] + r[j] * r[j] * r[j]);
+    m[gone] = 0;
+    r[gone] = -1;
+    vx[gone] = vy[gone] = vz[gone] = 0;
+    *i_gone = gone == i;
+    return 1;
+}
+
 /* the bodies that touch become one; gives how many collisions */
 static int64_t clair_nbody_collide(void) {
     size_t n = clair_nbody_n();
-    double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
-    double *m = CLAIR_NB(m), *r = CLAIR_NB(r);
+    double *r = CLAIR_NB(r);
     int64_t hits = 0;
+    if (clair_bh.theta > 0 && n > 64) {               /* V0.70: the tree finds the neighbours */
+        clair_bh_build(2);
+        if (clair_bh.root < 0) return 0;
+        double rmax = 0;
+        for (size_t i = 0; i < n; i++) if (r[i] > rmax) rmax = r[i];
+        size_t cap = 256, *found = malloc(cap * sizeof(size_t));
+        if (!found) clair_nbody_die("out of memory");
+        for (size_t i = 0; i < n; i++) {
+            if (r[i] <= 0) continue;
+            double p[3] = { CLAIR_NB(x)[i], CLAIR_NB(y)[i], CLAIR_NB(z)[i] };
+            size_t nf = 0;
+            clair_bh_search(clair_bh.root, i, p, r[i] + rmax, found, &nf, cap);
+            qsort(found, nf, sizeof(size_t), clair_bh_less);
+            for (size_t q = 0; q < nf; q++) {
+                int i_gone = 0;
+                if (r[i] <= 0) break;
+                if (clair_nbody_merge(i, found[q], &i_gone)) { hits++; if (i_gone) break; }
+            }
+        }
+        free(found);
+        return hits;
+    }
     for (size_t i = 0; i < n; i++) {
         if (r[i] <= 0) continue;                           /* a body without a size never touches */
         for (size_t j = i + 1; j < n; j++) {
-            if (r[j] <= 0) continue;
-            double dx = x[j] - x[i], dy = y[j] - y[i], dz = z[j] - z[i], s = r[i] + r[j];
-            if (dx * dx + dy * dy + dz * dz >= s * s) continue;
-            double M = m[i] + m[j];
-            double a = M > 0 ? m[i] / M : 0.5, b = 1 - a;
-            size_t keep = m[j] > m[i] ? j : i, gone = keep == i ? j : i;
-            x[keep] = a * x[i] + b * x[j]; y[keep] = a * y[i] + b * y[j]; z[keep] = a * z[i] + b * z[j];
-            vx[keep] = a * vx[i] + b * vx[j]; vy[keep] = a * vy[i] + b * vy[j]; vz[keep] = a * vz[i] + b * vz[j];
-            m[keep] = M;
-            r[keep] = cbrt(r[i] * r[i] * r[i] + r[j] * r[j] * r[j]);
-            m[gone] = 0;
-            r[gone] = -1;
-            vx[gone] = vy[gone] = vz[gone] = 0;
-            hits++;
-            if (gone == i) break;
+            int i_gone = 0;
+            if (clair_nbody_merge(i, j, &i_gone)) { hits++; if (i_gone) break; }
         }
     }
     return hits;
 }
 
 static int64_t clair_nbody_whfast(double h, int64_t steps, double G, double soft);
+
+/* V0.70: the forces at the end of a leapfrog are those its next call starts with, if the program has
+   moved nothing in between (checked to the last bit: the result is the same as computing them again) */
+static struct { size_t n, cap; double *keep; double G, eps2, theta; int valid; } clair_fk;
+
+static void clair_nbody_forces_keep(double G, double eps2) {
+    size_t n = clair_nbody_n();
+    if (8 * n > clair_fk.cap) {
+        double *k = realloc(clair_fk.keep, 8 * n * sizeof(double));
+        if (!k) { clair_fk.valid = 0; return; }
+        clair_fk.keep = k;
+        clair_fk.cap = 8 * n;
+    }
+    double *k = clair_fk.keep;
+    memcpy(k, CLAIR_NB(x), n * sizeof(double)); memcpy(k + n, CLAIR_NB(y), n * sizeof(double));
+    memcpy(k + 2 * n, CLAIR_NB(z), n * sizeof(double)); memcpy(k + 3 * n, CLAIR_NB(m), n * sizeof(double));
+    memcpy(k + 4 * n, CLAIR_NB(r), n * sizeof(double));
+    memcpy(k + 5 * n, clair_nb.ax, n * sizeof(double)); memcpy(k + 6 * n, clair_nb.ay, n * sizeof(double));
+    memcpy(k + 7 * n, clair_nb.az, n * sizeof(double));
+    clair_fk.n = n; clair_fk.G = G; clair_fk.eps2 = eps2; clair_fk.theta = clair_bh.theta; clair_fk.valid = 1;
+}
+
+static int clair_nbody_forces_kept(double G, double eps2) {
+    size_t n = clair_nbody_n();
+    if (!clair_fk.valid || clair_fk.n != n || clair_fk.G != G || clair_fk.eps2 != eps2 || clair_fk.theta != clair_bh.theta) return 0;
+    const double *k = clair_fk.keep;
+    if (memcmp(k, CLAIR_NB(x), n * sizeof(double)) || memcmp(k + n, CLAIR_NB(y), n * sizeof(double)) ||
+        memcmp(k + 2 * n, CLAIR_NB(z), n * sizeof(double)) || memcmp(k + 3 * n, CLAIR_NB(m), n * sizeof(double)) ||
+        memcmp(k + 4 * n, CLAIR_NB(r), n * sizeof(double))) return 0;
+    memcpy(clair_nb.ax, k + 5 * n, n * sizeof(double)); memcpy(clair_nb.ay, k + 6 * n, n * sizeof(double));
+    memcpy(clair_nb.az, k + 7 * n, n * sizeof(double));
+    return 1;
+}
 
 /* n steps of h; flags: 1 collisions, 2 Yoshida's fourth order, 8 WHFast (V0.69). Gives the number of collisions. */
 static int64_t clair_nbody_step(double h, int64_t steps, double G, double soft, int64_t flags) {
@@ -142,7 +555,7 @@ static int64_t clair_nbody_step(double h, int64_t steps, double G, double soft, 
     int64_t hits = 0;
     static const double w1 = 1.3512071919596578, w0 = -1.7024143839193153;     /* 1/(2-2^(1/3)), -2^(1/3)/(2-2^(1/3)) */
     if (!(flags & 2)) {
-        clair_nbody_forces(G, eps2);
+        if (!clair_nbody_forces_kept(G, eps2)) clair_nbody_forces(G, eps2);   /* V0.70: the forces of the last step, when nothing moved */
         for (int64_t s = 0; s < steps; s++) {
             clair_nbody_kick(h / 2);
             clair_nbody_drift(h);
@@ -153,6 +566,7 @@ static int64_t clair_nbody_step(double h, int64_t steps, double G, double soft, 
             clair_nbody_forces(G, eps2);
             clair_nbody_kick(h / 2);
         }
+        clair_nbody_forces_keep(G, eps2);
     } else {
         const double c[4] = { w1 / 2, (w0 + w1) / 2, (w0 + w1) / 2, w1 / 2 }, d[3] = { w1, w0, w1 };
         for (int64_t s = 0; s < steps; s++) {
@@ -168,8 +582,9 @@ static int64_t clair_nbody_step(double h, int64_t steps, double G, double soft, 
     return hits;
 }
 
-/* 0 the kinetic energy, 1 the potential energy */
+/* 0 the kinetic energy, 1 the potential energy (2: the potential energy with the tree, V0.70) */
 static double clair_nbody_energy(double G, double soft, int64_t what) {
+    if (what == 2) return clair_bh.theta > 0 ? clair_bh_run(G, soft * soft, 1) : clair_nbody_energy(G, soft, 1);
     size_t n = clair_nbody_n();
     if (!n) return 0;
     const double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *z = CLAIR_NB(z), *vx = CLAIR_NB(vx), *vy = CLAIR_NB(vy), *vz = CLAIR_NB(vz);
@@ -268,6 +683,9 @@ static int64_t clair_nbody_param(int64_t which, double v) {
         case 7: clair_nb.flags = (int)v; break;
         case 8: clair_nb.t = v; break;
         case 9: clair_nb.epsilon = v; break;          /* V0.68: the precision of IAS15 */
+        case 10: clair_bh.theta = v > 0 ? v : 0; break;   /* V0.70: the tree (0: direct sums) */
+        case 12: clair_nb.theta_saved = v; break;     /* V0.70: s.theta, kept even without the tree */
+        case 11: clair_bh.threads = (int)v; break;    /* V0.70: the cores (0: all) */
         default: break;
     }
     return 0;
@@ -951,6 +1369,92 @@ static int64_t clair_nbody_elements(int64_t i, int64_t j, double G) {
     return 0;
 }
 
+/* ---- V0.70: a Plummer sphere (a cluster of stars in equilibrium) ----
+ * Aarseth, Henon & Wielen (1974), "A comparison of numerical methods for the study of star cluster
+ * dynamics", A&A 37, 183: the radius from the mass inside it, the speed by von Neumann's rejection on
+ * q^2 (1 - q^2)^(7/2), both in random directions.  The random numbers are SplitMix64 (Steele, Lea &
+ * Flood 2014): the same seed gives the same cluster everywhere.
+ */
+
+static uint64_t clair_rng_state;
+
+static uint64_t clair_rng_next(void) {
+    uint64_t z = (clair_rng_state += 0x9e3779b97f4a7c15ull);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+}
+
+static double clair_rng_uniform(void) { return (double)(clair_rng_next() >> 11) * (1.0 / 9007199254740992.0); }
+
+static struct { size_t n, cap; double *v; } clair_gen;
+
+static void clair_rng_direction(double len, double out[3]) {
+    double z = 2 * clair_rng_uniform() - 1, ph = 2 * 3.141592653589793238 * clair_rng_uniform(), s = sqrt(1 - z * z);
+    out[0] = len * s * cos(ph); out[1] = len * s * sin(ph); out[2] = len * z;
+}
+
+/* n stars of a cluster of mass M and Plummer radius a (G given), around 0, not moving as a whole */
+static int64_t clair_nbody_plummer(int64_t n, double G, double M, double a, int64_t seed) {
+    if (n <= 0) return 0;
+    if (!(M > 0) || !(a > 0) || !(G > 0)) clair_nbody_die("add_plummer(): the mass, the radius and G must be more than 0");
+    if ((size_t)n > clair_gen.cap) {
+        double *v = realloc(clair_gen.v, (size_t)n * 6 * sizeof(double));
+        if (!v) clair_nbody_die("out of memory");
+        clair_gen.v = v;
+        clair_gen.cap = (size_t)n;
+    }
+    clair_rng_state = (uint64_t)seed;
+    double c[6] = { 0, 0, 0, 0, 0, 0 };
+    for (int64_t i = 0; i < n; i++) {
+        double X;
+        do X = clair_rng_uniform(); while (X < 1e-10 || X > 0.999);       /* the mass inside: no star farther than 22 a */
+        double r = a / sqrt(pow(X, -2.0 / 3) - 1);
+        double q, g;
+        do { q = clair_rng_uniform(); g = 0.1 * clair_rng_uniform(); } while (g > q * q * pow(1 - q * q, 3.5));
+        double ve = sqrt(2 * G * M) * pow(r * r + a * a, -0.25);         /* the speed of escape there */
+        double *v = clair_gen.v + 6 * i;
+        clair_rng_direction(r, v);
+        clair_rng_direction(q * ve, v + 3);
+        for (int k = 0; k < 6; k++) c[k] += v[k];
+    }
+    for (int64_t i = 0; i < n; i++) for (int k = 0; k < 6; k++) clair_gen.v[6 * i + k] -= c[k] / (double)n;
+    clair_gen.n = (size_t)n;
+    return n;
+}
+
+static const double *clair_q_keys;
+
+static int clair_q_less(const void *a, const void *b) {
+    double x = clair_q_keys[*(const size_t *)a], y = clair_q_keys[*(const size_t *)b];
+    return (x > y) - (x < y);
+}
+
+/* the smallest d such that the weights of the d below it reach want (the Lagrange radii) */
+static double clair_nbody_quantile(ClairList d, ClairList w, double want) {
+    size_t n = d ? d->len : 0;
+    if (!n || !w || w->len != n) return 0;
+    size_t *idx = malloc(n * sizeof(size_t));
+    if (!idx) clair_nbody_die("out of memory");
+    for (size_t i = 0; i < n; i++) idx[i] = i;
+    clair_q_keys = (const double *)d->data;
+    qsort(idx, n, sizeof(size_t), clair_q_less);
+    double sum = 0, out = clair_q_keys[idx[n - 1]];
+    const double *wv = (const double *)w->data;
+    for (size_t i = 0; i < n; i++) {
+        sum += wv[idx[i]];
+        if (sum >= want) { out = clair_q_keys[idx[i]]; break; }
+    }
+    free(idx);
+    return out;
+}
+
+/* star i, 0-2 its place, 3-5 its speed */
+static double clair_nbody_gen(int64_t i, int64_t k) {
+    if (i < 0 || (size_t)i >= clair_gen.n || k < 0 || k > 5) return 0;
+    return clair_gen.v[6 * i + k];
+}
+
 /* ---- V0.69: s.save(path) and nbody.load(path): a simulation in a text file ----
  * One "key value" per line, then one line per body: name <tab> m x y z vx vy vz r color.  The numbers
  * are written with 17 digits: read back, they are the same doubles, to the last bit.  A run that goes on
@@ -960,7 +1464,7 @@ static int64_t clair_nbody_elements(int64_t i, int64_t j, double G) {
 
 static const char *clair_nbody_name(size_t i);
 
-static int64_t clair_nbody_save(const char *path, const char *integrator, const char *tunit, const char *lunit) {
+static int64_t clair_nbody_save(const char *path, const char *integrator, const char *tunit, const char *lunit, const char *gravity) {
     if (!clair_nb.m) clair_nbody_die("no simulation");
     FILE *f = fopen(path, "w");
     if (!f) { fprintf(stderr, "Clair runtime error: nbody: s.save(): cannot write %s\n", path); exit(EXIT_FAILURE); }
@@ -972,6 +1476,7 @@ static int64_t clair_nbody_save(const char *path, const char *integrator, const 
     fprintf(f, "integrator %s\nmerge %d\norder %d\n", integrator, clair_nb.flags & 1, (clair_nb.flags & 2) ? 4 : 2);
     fprintf(f, "speed %.17g\ntrail %.17g\n", clair_nb.speed, clair_nb.trail);
     fprintf(f, "time_unit %s\ntime_scale %.17g\nlength_unit %s\nlength_scale %.17g\n", tunit, clair_nb.tscale, lunit, clair_nb.lscale);
+    fprintf(f, "gravity %s\ntheta %.17g\nthreads %d\n", gravity, clair_nb.theta_saved, clair_bh.threads);   /* V0.70 */
     fprintf(f, "bodies %zu\n", n);
     for (size_t i = 0; i < n; i++) {
         for (const char *c = clair_nbody_name(i); *c; c++) fputc(*c == '\t' || *c == '\n' || *c == '\r' ? ' ' : *c, f);
@@ -984,8 +1489,8 @@ static int64_t clair_nbody_save(const char *path, const char *integrator, const 
 }
 
 static struct {
-    double p[11];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale */
-    char text[3][64];                                /* integrator, time unit, length unit */
+    double p[13];                                    /* G t dt soft epsilon merge order speed trail time_scale length_scale theta threads */
+    char text[4][64];                                /* integrator, time unit, length unit, gravity */
     size_t n, cap;
     double *v;                                       /* 9 numbers per body */
     char **names;
@@ -1002,10 +1507,11 @@ static int64_t clair_nbody_load(const char *path) {
     if (!f) { fprintf(stderr, "Clair runtime error: nbody: nbody.load(): cannot read %s\n", path); exit(EXIT_FAILURE); }
     for (size_t i = 0; i < clair_nl.n; i++) free(clair_nl.names[i]);
     clair_nl.n = 0;
-    static const char *keys[11] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale" };
-    static const double defaults[11] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1 };
+    static const char *keys[13] = { "G", "t", "dt", "soft", "epsilon", "merge", "order", "speed", "trail", "time_scale", "length_scale", "theta", "threads" };
+    static const double defaults[13] = { 1, 0, 0, 0, 1e-9, 0, 2, 0, 400, 1, 1, 0.5, 0 };
     memcpy(clair_nl.p, defaults, sizeof(defaults));
     snprintf(clair_nl.text[0], 64, "leapfrog");
+    snprintf(clair_nl.text[3], 64, "direct");
     clair_nl.text[1][0] = clair_nl.text[2][0] = '\0';
     char line[4096];
     long ln = 0, want = -1;
@@ -1043,15 +1549,15 @@ static int64_t clair_nbody_load(const char *path) {
                 continue;
             }
             int found = 0;
-            for (int k = 0; k < 11; k++) {
+            for (int k = 0; k < 13; k++) {
                 if (strcmp(line, keys[k]) != 0) continue;
                 char *end;
                 clair_nl.p[k] = strtod(val, &end);
                 if (end == val || *end) clair_nbody_load_fail(path, ln, "a number is wanted");
                 found = 1;
             }
-            const char *tkeys[3] = { "integrator", "time_unit", "length_unit" };
-            for (int k = 0; k < 3; k++) {
+            const char *tkeys[4] = { "integrator", "time_unit", "length_unit", "gravity" };
+            for (int k = 0; k < 4; k++) {
                 if (strcmp(line, tkeys[k]) != 0) continue;
                 snprintf(clair_nl.text[k], 64, "%s", val);
                 found = 1;
@@ -1085,14 +1591,14 @@ static int64_t clair_nbody_load(const char *path) {
 
 /* body i, number k (0 m, 1-3 x y z, 4-6 vx vy vz, 7 r, 8 color); i = -1: the settings */
 static double clair_nbody_loaded(int64_t i, int64_t k) {
-    if (i < 0) return k >= 0 && k < 11 ? clair_nl.p[k] : 0;
+    if (i < 0) return k >= 0 && k < 13 ? clair_nl.p[k] : 0;
     if ((size_t)i >= clair_nl.n || k < 0 || k > 8) return 0;
     return clair_nl.v[9 * i + k];
 }
 
-/* the name of body i; -1 the integrator, -2 the time unit, -3 the length unit */
+/* the name of body i; -1 the integrator, -2 the time unit, -3 the length unit, -4 the gravity */
 static const char *clair_nbody_loaded_text(int64_t i) {
-    const char *s = i >= 0 ? ((size_t)i < clair_nl.n ? clair_nl.names[i] : "") : i >= -3 ? clair_nl.text[-i - 1] : "";
+    const char *s = i >= 0 ? ((size_t)i < clair_nl.n ? clair_nl.names[i] : "") : i >= -4 ? clair_nl.text[-i - 1] : "";
     char *d = clair_rt_arena_alloc(strlen(s) + 1);
     strcpy(d, s);
     return d;
@@ -1138,6 +1644,11 @@ typedef struct { double cx, cy, scale, W, mid; } ClairNbodyView;
 static double clair_nbody_sx(const ClairNbodyView *v, double x) { return v->W / 2 + (x - v->cx) * v->scale; }
 static double clair_nbody_sy(const ClairNbodyView *v, double y) { return v->mid - (y - v->cy) * v->scale; }
 
+static int clair_dbl_less(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
 static const double *clair_nbody_masses;           /* for qsort: the lightest first */
 
 static int clair_nbody_lighter(const void *a, const void *b) {
@@ -1156,8 +1667,8 @@ static double clair_nbody_show(void) {
     }
     double *x = CLAIR_NB(x), *y = CLAIR_NB(y), *m = CLAIR_NB(m), *r = CLAIR_NB(r);
     double G = clair_nb.G, soft = clair_nb.soft, h = clair_nb.dt > 0 ? clair_nb.dt : 1e-3;
-    double tau = clair_nbody_tau(G, soft);
-    double speed = clair_nb.speed > 0 ? clair_nb.speed : (tau > 0 ? 2 * 3.141592653589793 * tau / 4 : 1);
+    double tau = clair_bh.theta > 0 ? 0 : clair_nbody_tau(G, soft);          /* V0.70: with the tree, too many pairs */
+    double speed = clair_nb.speed > 0 ? clair_nb.speed : clair_bh.theta > 0 ? 60 * h : (tau > 0 ? 2 * 3.141592653589793 * tau / 4 : 1);
     double t = clair_nb.t;
     /* the trails: the last places of each body, a point every 2 pixels (at most 40000 points in all) */
     size_t T = clair_nb.trail > 0 ? (size_t)clair_nb.trail : 0;
@@ -1172,7 +1683,8 @@ static double clair_nbody_show(void) {
     size_t *order = NULL, order_cap = 0;
     int follow = -2;                                       /* -2: the center of mass, -1: nothing, i: the body i */
     int paused = 0, trails = T > 0, slow = 0, fit = 1, quit = 0;
-    double acc = 0, e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 1);
+    double acc = 0, e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2), e_shown = e0;
+    long frame_no = 0;
     float press_x = 0, press_y = 0, last_x = 0, last_y = 0, moved = 0;
     int pressing = 0, press_on_bar = 0;
     while (!quit && clair_gui_frame()) {
@@ -1187,11 +1699,19 @@ static double clair_nbody_show(void) {
         x = CLAIR_NB(x); y = CLAIR_NB(y); m = CLAIR_NB(m); r = CLAIR_NB(r);
         if (fit) {                                         /* everything in the window, around the center of mass */
             double c0 = clair_nbody_sum(6), c1 = clair_nbody_sum(7), far = 0;
+            double *ds = n > 300 ? malloc(n * sizeof(double)) : NULL;
+            size_t nd = 0;
             for (size_t i = 0; i < n; i++) {
                 if (r[i] < 0) continue;
                 double d = hypot(x[i] - c0, y[i] - c1);
                 if (d > far) far = d;
+                if (ds) ds[nd++] = d;
             }
+            if (ds && nd > 0) {                            /* V0.70: many bodies: 95 % of them in the window */
+                qsort(ds, nd, sizeof(double), clair_dbl_less);
+                far = ds[(size_t)(0.95 * (double)(nd - 1))];
+            }
+            free(ds);
             v.scale = far > 0 ? 0.42 * (W < bar_y ? W : bar_y) / far : 1;
             v.cx = c0;
             v.cy = c1;
@@ -1257,7 +1777,7 @@ static double clair_nbody_show(void) {
             double frame = clair_gui.dt > 0.1 ? 0.1 : clair_gui.dt;
             slow = 0;
             if (clair_ias_run(speed * frame, G, soft, clair_nb.flags, clair_nb.epsilon, h, 14000000ull) > 0)
-                e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 1);
+                e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2);
             h = clair_ias.out[0];
             t += clair_ias.out[1];
             slow = clair_ias.out[1] < speed * frame * 0.999;
@@ -1272,7 +1792,7 @@ static double clair_nbody_show(void) {
             while (done < want) {
                 int64_t k = want - done < chunk ? want - done : chunk;
                 if (clair_nbody_step(h, k, G, soft, clair_nb.flags) > 0)
-                    e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 1);   /* a collision changes the energy */
+                    e0 = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2);   /* a collision changes the energy */
                 done += k;
                 t += (double)k * h;
                 uint64_t spent = clair_sdl.GetTicksNS() - start;
@@ -1333,7 +1853,7 @@ static double clair_nbody_show(void) {
             const char *name = clair_nbody_name(i);
             if (!name[0]) continue;
             double sx = clair_nbody_sx(&v, x[i]), sy = clair_nbody_sy(&v, y[i]);
-            double pr = mmax > 0 && m[i] > 0 ? ui * (2.5 + 4 * cbrt(m[i] / mmax)) : 2 * ui;
+            double pr = n > 300 ? 1.2 * ui : mmax > 0 && m[i] > 0 ? ui * (2.5 + 4 * cbrt(m[i] / mmax)) : 2 * ui;
             if (r[i] * v.scale > pr) pr = r[i] * v.scale;
             double fs = 9 * ui, lx = sx + pr + 4 * ui, ly = sy - fs / 2, lw = clair_gui_text_width(name, fs);
             if (lx > W || ly > H || lx + lw < 0 || ly + fs < 0) continue;
@@ -1352,9 +1872,9 @@ static double clair_nbody_show(void) {
             size_t i = order[q];
             if (r[i] < 0) continue;
             double sx = clair_nbody_sx(&v, x[i]), sy = clair_nbody_sy(&v, y[i]);
-            double pr = mmax > 0 && m[i] > 0 ? ui * (2.5 + 4 * cbrt(m[i] / mmax)) : 2 * ui;
+            double pr = n > 300 ? 1.2 * ui : mmax > 0 && m[i] > 0 ? ui * (2.5 + 4 * cbrt(m[i] / mmax)) : 2 * ui;
             if (r[i] * v.scale > pr) pr = r[i] * v.scale;
-            if (sx < -pr || sx > W + pr || sy < -pr || sy > H + pr) continue;
+            if (sx < -pr || sx > W + pr || sy < -pr || sy > bar_y) continue;     /* not over the buttons */
             uint8_t cr, cg, cb;
             clair_nbody_rgb(i, &cr, &cg, &cb);
             if (follow == (int)i) {
@@ -1375,7 +1895,9 @@ static double clair_nbody_show(void) {
         clair_nbody_num(b, sizeof(b), speed / clair_nb.tscale);
         snprintf(line, sizeof(line), "1 s = %s%s%s%s", b, clair_nb.tunit[0] ? " " : "", clair_nb.tunit, slow ? "  (ralenti)" : "");
         clair_gui_text(line, lx, ly + 1.5 * fs, fs);
-        double e = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 1);
+        if (n <= 2000 || frame_no % 30 == 0) e_shown = clair_nbody_energy(G, soft, 0) + clair_nbody_energy(G, soft, 2);
+        frame_no++;
+        double e = e_shown;
         size_t alive = 0;
         for (size_t i = 0; i < n; i++) alive += r[i] >= 0;
         clair_nbody_num(a, sizeof(a), e0 != 0 ? fabs((e - e0) / e0) : fabs(e - e0));

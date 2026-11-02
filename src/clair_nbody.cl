@@ -11,6 +11,8 @@
 // The bodies are in the lists of the simulation: s.x[i], s.y[i], s.vx[i], s.m[i]... (a body
 // absorbed by a collision has a mass of 0 and a radius of -1). In SI units: nbody.simulation(nbody.G()).
 //
+// V0.70: s.gravity = "tree": the tree of Barnes and Hut (N log N), on every core (s.threads: 0 = all);
+// s.add_plummer(...): a cluster of stars in equilibrium.
 // V0.69: s.integrator = "whfast": Wisdom-Holman (as in REBOUND), for planets over millions of years;
 // s.save(path) and nbody.load(path).
 // V0.68: s.integrator = "ias15": the integrator of order 15 with its own time step (as in REBOUND),
@@ -44,9 +46,25 @@ Class Simulation {
     length_scale: float
     integrator: string
     epsilon: float
+    gravity: string
+    theta: float
+    threads: int
 
-    // the C part works on the lists of this simulation
+    // the C part works on the lists of this simulation (V0.70: and with its gravity: the tree or not)
     def bind() -> int {
+        if self.gravity == "tree" {
+            if self.theta <= 0.0 or self.theta >= 1.5 {
+                __nbody_fail("s.theta: between 0 and 1.5 (0.5: the forces to about 1e-3)")
+            }
+            __nbody_param(10, self.theta)
+        } else {
+            if self.gravity != "direct" {
+                __nbody_fail("s.gravity: \"direct\" or \"tree\", not \"" + self.gravity + "\"")
+            }
+            __nbody_param(10, 0.0)
+        }
+        __nbody_param(11, float(self.threads))
+        __nbody_param(12, self.theta)
         return __nbody_use(self.x, self.y, self.z, self.vx, self.vy, self.vz, self.m, self.r)
     }
 
@@ -115,6 +133,25 @@ Class Simulation {
     // the time step (when dt is 0: a five hundredth of the time a pair of bodies takes to fall together;
     // WHFast: a fortieth of the shortest orbit)
     def time_step() -> float {
+        if self.dt <= 0.0 and self.gravity == "tree" {
+            // V0.70: many bodies: a two hundredth of the time to cross the cluster (sqrt(R^3 / G M))
+            self.bind()
+            let M: float = __nbody_sum(12)
+            let cx: float = __nbody_sum(6)
+            let cy: float = __nbody_sum(7)
+            let cz: float = __nbody_sum(8)
+            let s2: float = 0.0
+            for i in range(len(self.m)) {
+                if self.r[i] >= 0.0 {
+                    s2 += self.m[i] * ((self.x[i] - cx) * (self.x[i] - cx) + (self.y[i] - cy) * (self.y[i] - cy) + (self.z[i] - cz) * (self.z[i] - cz))
+                }
+            }
+            if M <= 0.0 or s2 <= 0.0 or self.G <= 0.0 {
+                return 0.001
+            }
+            let R: float = sqrt(s2 / M)
+            self.dt = sqrt(R * R * R / (self.G * M)) / 200.0
+        }
         if self.dt <= 0.0 {
             self.bind()
             let tau: float = __nbody_tau(self.G, self.soft)
@@ -134,6 +171,9 @@ Class Simulation {
         let f: int = 0
         if self.merge {
             f += 1
+        }
+        if self.gravity == "tree" and self.integrator != "leapfrog" and self.integrator != "yoshida" {
+            __nbody_fail("s.gravity = \"tree\" goes with s.integrator = \"leapfrog\" or \"yoshida\" (the forces of the tree are approximate)")
         }
         if self.integrator == "ias15" {
             return f + 4
@@ -302,7 +342,53 @@ Class Simulation {
         __nbody_param(7, float(self.flags()))
         __nbody_param(8, self.t)
         __nbody_param(9, self.epsilon)
-        return __nbody_save(path, self.integrator, self.time_unit, self.length_unit)
+        return __nbody_save(path, self.integrator, self.time_unit, self.length_unit, self.gravity)
+    }
+
+    // V0.70: a cluster of n stars in equilibrium (a Plummer sphere) of this mass and Plummer radius, centered
+    // at x, y, z and moving at vx, vy, vz; color: "" or a color ("blanc", "#ffcc00"); seed: the same seed, the
+    // same cluster.  Gives the number of its first star.
+    def add_plummer(n: int, mass: float, radius: float, seed: int, x: float, y: float, z: float, vx: float, vy: float, vz: float, color: string) -> int {
+        let first: int = len(self.m)
+        __nbody_plummer(n, self.G, mass, radius, seed)
+        for k in range(n) {
+            self.add3("", mass / float(n), x + __nbody_gen(k, 0), y + __nbody_gen(k, 1), z + __nbody_gen(k, 2), vx + __nbody_gen(k, 3), vy + __nbody_gen(k, 4), vz + __nbody_gen(k, 5))
+        }
+        if len(color) > 0 {
+            self.color(first, color)
+            let c: int = self.colors[first]
+            for k in range(n) {
+                self.colors[first + k] = c
+            }
+        }
+        return first
+    }
+
+    // V0.70: the virial ratio 2 K / |W| (1: in equilibrium; the potential energy W by direct sums)
+    def virial() -> float {
+        let w: float = self.potential()
+        if w == 0.0 {
+            return 0.0
+        }
+        return 2.0 * self.kinetic() / abs(w)
+    }
+
+    // V0.70: the radius around the center of mass that holds this fraction of the mass (0.5: half the mass)
+    def lagrange_radius(fraction: float) -> float {
+        self.bind()
+        let cx: float = __nbody_sum(6)
+        let cy: float = __nbody_sum(7)
+        let cz: float = __nbody_sum(8)
+        let total: float = __nbody_sum(12)
+        let d: list[float] = []
+        let w: list[float] = []
+        for i in range(len(self.m)) {
+            if self.r[i] >= 0.0 {
+                d.append(sqrt((self.x[i] - cx) * (self.x[i] - cx) + (self.y[i] - cy) * (self.y[i] - cy) + (self.z[i] - cz) * (self.z[i] - cz)))
+                w.append(self.m[i])
+            }
+        }
+        return __nbody_quantile(d, w, fraction * total)
     }
 
     // V0.68: the IAS15 steps done (0), done again because they were too long (1)
@@ -388,7 +474,7 @@ def G() -> float {
 
 // an empty simulation; g: the constant of gravitation in the units chosen (1.0, or nbody.G() in SI)
 def simulation(g: float) -> Simulation {
-    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9)
+    return Simulation([], [], [], [], [], [], [], [], [], [], g, 0.0, 0.0, 0.0, 2, false, 0.0, 400, "", 1.0, "", 1.0, "leapfrog", 1e-9, "direct", 0.5, 0)
 }
 
 // V0.68: the constant of gravitation in astronomical units, solar masses and years of 365.25 days:
@@ -423,6 +509,9 @@ def load(path: string) -> Simulation {
     s.integrator = __nbody_loaded_text(-1)
     s.time_unit = __nbody_loaded_text(-2)
     s.length_unit = __nbody_loaded_text(-3)
+    s.gravity = __nbody_loaded_text(-4)
+    s.theta = __nbody_loaded(-1, 11)
+    s.threads = int(__nbody_loaded(-1, 12))
     for i in range(n) {
         s.add3(__nbody_loaded_text(i), __nbody_loaded(i, 0), __nbody_loaded(i, 1), __nbody_loaded(i, 2), __nbody_loaded(i, 3), __nbody_loaded(i, 4), __nbody_loaded(i, 5), __nbody_loaded(i, 6))
         s.r[i] = __nbody_loaded(i, 7)

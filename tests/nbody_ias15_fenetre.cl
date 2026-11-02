@@ -1,4 +1,4 @@
-// V0.68 : le systeme solaire dans la fenetre de nbody, avec IAS15, puis WHFast (V0.69) (sans ecran : tests/run_tests.sh)
+// V0.68 : le systeme solaire dans la fenetre de nbody, avec IAS15, puis WHFast (V0.69), puis un amas avec l'arbre (V0.70) (sans ecran : tests/run_tests.sh)
 import nbody
 
 def main() -> int {
@@ -17,5 +17,13 @@ def main() -> int {
     let w0: float = w.energy()
     w.show()
     print("WHFast : t = " + format(w.t, ".3f") + " an, energie gardee : " + str(abs((w.energy() - w0) / w0) < 1e-9))
+    // V0.70 : un amas de 2 000 etoiles avec l'arbre
+    let a: Simulation = nbody.simulation(1.0)
+    a.add_plummer(2000, 1.0, 1.0, 4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "blanc")
+    a.gravity = "tree"
+    a.soft = 0.02
+    a.dt = 0.01
+    a.show()
+    print("amas avec l'arbre : t = " + format(a.t, ".2f") + ", " + str(len(a.m)) + " etoiles")
     return 0
 }
