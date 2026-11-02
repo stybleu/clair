@@ -98,6 +98,190 @@ def fichiers(req: Request) -> Response {
     return web.json(json + "]")
 }
 
+
+// V0.65 : selection tactile du dossier de travail.
+
+def dossier_canonique(chemin: string) -> string {
+    if len(chemin) == 0 or len(chemin) > 1024 or chemin[0:1] != "/" {
+        return ""
+    }
+    let r: RunResult = os.run(["sh", "-c", "cd \"$1\" 2>/dev/null && pwd -P", "sh", chemin])
+    if r.code != 0 {
+        return ""
+    }
+    return strip(r.out)
+}
+
+def dossier_permis(chemin: string) -> bool {
+    if chemin == "" {
+        return false
+    }
+    let racines: list[string] = [os.home(), "/storage/emulated/0", dossier()]
+    for base in racines {
+        let b: string = dossier_canonique(base)
+        if b != "" and (chemin == b or chemin[0:len(b) + 1] == b + "/") {
+            return true
+        }
+    }
+    return false
+}
+
+def dossier_verifie(chemin: string) -> string {
+    let c: string = dossier_canonique(chemin)
+    if dossier_permis(c) {
+        return c
+    }
+    return ""
+}
+
+def entree_dossier(nom: string, chemin: string) -> string {
+    return "{\"nom\":" + web.json_string(nom) + ",\"chemin\":" + web.json_string(chemin) + "}"
+}
+
+@web.route("/api/selection-dossiers")
+def selection_dossiers(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    let demande: string = req.arg("d", "")
+    if demande == "" {
+        let h: string = dossier_verifie(os.home())
+        let actuel: string = dossier_verifie(dossier())
+        let stockage: string = dossier_verifie("/storage/emulated/0")
+        let contenu: string = "["
+        let sep: string = ""
+        if h != "" {
+            contenu = contenu + entree_dossier("Termux", h)
+            sep = ","
+        }
+        if stockage != "" and stockage != h {
+            contenu = contenu + sep + entree_dossier("Stockage Android", stockage)
+            sep = ","
+        }
+        if actuel != "" and actuel != h and actuel != stockage {
+            contenu = contenu + sep + entree_dossier("Projet actuel", actuel)
+        }
+        return web.json("{\"racines\":" + contenu + "]}")
+    }
+
+    let c: string = dossier_verifie(demande)
+    if c == "" {
+        return refus()
+    }
+    let parent: string = dossier_verifie(os.dirname(c))
+    let contenu: string = "["
+    let sep: string = ""
+    let nombre: int = 0
+
+    for nom in os.listdir(c) {
+        if valide(nom) and os.is_dir(os.join(c, nom)) {
+            let enfant: string = dossier_verifie(os.join(c, nom))
+            if enfant != "" {
+                contenu = contenu + sep + entree_dossier(nom, enfant)
+                sep = ","
+                nombre += 1
+                if nombre >= 300 {
+                    break
+                }
+            }
+        }
+    }
+
+    return web.json("{\"chemin\":" + web.json_string(c) + ",\"parent\":" + web.json_string(parent) + ",\"dossiers\":" + contenu + "]}")
+}
+
+@web.route("/api/selection-dossier", "POST")
+def selection_dossier(req: Request) -> Response {
+    if not autorise(req) {
+        return refus()
+    }
+    let c: string = dossier_verifie(req.body)
+    if c == "" {
+        return refus()
+    }
+    web.save("dossier", c)
+    return web.json("{\"ok\":true,\"dossier\":" + web.json_string(c) + "}")
+}
+
+
+// V0.65.1 : creer un document Clair.
+@web.route("/api/nouveau/<path:nom>", "POST")
+def nouveau_document(req: Request, nom: string) -> Response {
+    if not autorise(req) or not chemin_valide(nom) or os.extension(nom) != ".cl" {
+        return refus()
+    }
+
+    let cible: string = os.join(dossier(), nom)
+    let parent: string = dossier_canonique(os.dirname(cible))
+    let racine_projet: string = dossier_canonique(dossier())
+
+    if racine_projet == "" or (parent != racine_projet and parent[0:len(racine_projet) + 1] != racine_projet + "/") {
+        return refus()
+    }
+
+    if os.exists(cible) {
+        return web.json("{\"ok\":false,\"erreur\":\"Ce document existe deja.\"}")
+    }
+
+    // Refuser l'ecrasement d'un fichier deja present.
+    let creation: RunResult = os.run(["sh", "-c", "set -C; umask 077; : > \"$1\"", "sh", cible])
+    if creation.code != 0 {
+        return web.json("{\"ok\":false,\"erreur\":\"Creation refusee ou fichier deja present.\"}")
+    }
+
+    write_file(cible, "def main() -> int {\n    return 0\n}\n")
+    return web.json("{\"ok\":" + oui(os.is_file(cible)) + "}")
+}
+
+// V0.65.2 : enregistrer un CSV sans ecraser l'existant.
+@web.route("/api/enregistrer-csv/<path:nom>", "POST")
+def enregistrer_csv(req: Request, nom: string) -> Response {
+    if not autorise(req) or not chemin_valide(nom) or os.extension(nom) != ".csv" {
+        return refus()
+    }
+
+    if len(req.body) == 0 {
+        return web.error(400, "CSV vide")
+    }
+
+    let selection: string = req.arg("d", "")
+    let base: string = dossier_canonique(dossier())
+
+    if selection != "" {
+        base = dossier_verifie(selection)
+
+        if os.basename(nom) != nom {
+            return refus()
+        }
+    }
+
+    if base == "" {
+        return refus()
+    }
+
+    let cible: string = os.join(base, nom)
+    let parent: string = dossier_canonique(os.dirname(cible))
+
+    if parent != base and (selection != "" or parent[0:len(base) + 1] != base + "/") {
+        return refus()
+    }
+
+    if os.exists(cible) {
+        return web.json("{\"ok\":false,\"erreur\":\"Ce CSV existe deja. Choisis un autre nom.\"}")
+    }
+
+    let creation: RunResult = os.run(["sh", "-c", "set -C; umask 077; : > \"$1\"", "sh", cible])
+
+    if creation.code != 0 {
+        return web.json("{\"ok\":false,\"erreur\":\"Creation refusee.\"}")
+    }
+
+    write_file(cible, req.body)
+    let taille: int = os.size(cible)
+
+    return web.json("{\"ok\":" + oui(taille > 0) + ",\"taille\":" + str(taille) + "}")
+}
+
 // V0.62 : un nouveau dossier
 @web.route("/api/dossier/<path:nom>", "POST")
 def nouveau_dossier(req: Request, nom: string) -> Response {
@@ -583,8 +767,11 @@ def git_recuperer(req: Request) -> Response {
 
 def main() -> int {
     let a: list[string] = os.args()
-    let d: string = os.join(os.home(), "clair_projets")
-    if len(a) > 0 {
+    let d: string = web.load("dossier", "")
+    if d == "" or not os.is_dir(d) {
+        d = os.join(os.home(), "clair_projets")
+    }
+    if len(a) > 0 and a[0] != "" {
         d = a[0]
     }
     if d[0:1] != "/" {

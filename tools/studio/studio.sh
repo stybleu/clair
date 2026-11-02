@@ -6,8 +6,10 @@
 ICI="$(cd "$(dirname "$0")" && pwd)"
 RACINE="$(cd "$ICI/../.." && pwd)"
 CLAIR="$RACINE/build/clair"
-DOSSIER="${1:-$HOME/clair_projets}"
-mkdir -p "$DOSSIER" && DOSSIER="$(cd "$DOSSIER" && pwd)" || exit 1
+DOSSIER="${1:-}"
+if [ -n "$DOSSIER" ]; then
+    mkdir -p "$DOSSIER" && DOSSIER="$(cd "$DOSSIER" && pwd)" || exit 1
+fi
 
 # Clair lui-meme : absent, ou plus ancien qu'un de ses fichiers sources
 a_jour() {

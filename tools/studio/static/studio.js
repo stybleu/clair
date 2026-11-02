@@ -162,9 +162,83 @@
   window.addEventListener("resize", () => { mesurer(); redessiner(); });
   if (window.ResizeObserver) new ResizeObserver(() => codeRedimensionne()).observe(code);   // la console s'ouvre, le clavier aussi
 
+
+  // V0.65.1 : selection et presse-papiers.
+  let copieInterne = "";
+
+  function toutSelectionner() {
+    code.focus();
+    code.setSelectionRange(0, code.value.length);
+    cacherAide();
+  }
+
+  function copierSelection() {
+    const a = code.selectionStart;
+    const z = code.selectionEnd;
+
+    if (a === z) {
+      alert("Selectionne du code ou touche Tout avant de copier.");
+      return;
+    }
+
+    const texte = code.value.slice(a, z);
+    copieInterne = texte;
+
+    const copieClassique = () => {
+      code.focus();
+      code.setSelectionRange(a, z);
+      try {
+        return document.execCommand("copy");
+      } catch (e) {
+        return false;
+      }
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(texte).catch(() => {
+        if (!copieClassique()) {
+          alert("Copie disponible dans Clair Studio, mais pas dans le presse-papiers Android.");
+        }
+      });
+    } else if (!copieClassique()) {
+      alert("Copie disponible dans Clair Studio, mais pas dans le presse-papiers Android.");
+    }
+  }
+
+  async function collerSelection() {
+    const a = code.selectionStart;
+    const z = code.selectionEnd;
+    let texte = null;
+
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        texte = await navigator.clipboard.readText();
+      } catch (e) {
+        // Repli vers le texte copie dans Clair Studio.
+      }
+    }
+
+    if (!texte && copieInterne) {
+      texte = copieInterne;
+    }
+
+    if (!texte) {
+      code.focus();
+      alert("Pour coller depuis Android, maintiens le doigt sur le code et choisis Coller.");
+      return;
+    }
+
+    code.focus();
+    code.setSelectionRange(a, z);
+    inserer(texte);
+  }
+
   for (const b of document.querySelectorAll("#touches button")) {
     b.addEventListener("pointerdown", (e) => e.preventDefault());      // le clavier reste ouvert
     b.addEventListener("click", () => {
+      if (b.dataset.outil === "tout") { toutSelectionner(); return; }
+      if (b.dataset.outil === "copier") { copierSelection(); return; }
+      if (b.dataset.outil === "coller") { collerSelection(); return; }
       if (b.dataset.cmd) { code.focus(); document.execCommand(b.dataset.cmd); modifie(); return; }
       inserer(b.dataset.t);
     });
@@ -505,13 +579,25 @@
     $("b-tester").disabled = tourne;
     $("b-arreter").hidden = !tourne;
     $("f-entree").hidden = !tourne || enTests;
+    $("b-sauver-csv").disabled = tourne;
   }
 
   // compile (le serveur ne recompile pas un programme qui n'a pas change), puis suit le programme
+  // V0.65.2 : conserver la sortie brute.
+  let sortieBrute = "";
+  let csvDetecte = false;
+  let longueurApercuCsv = 0;
+  let apercuCoupe = false;
+
   async function demarrer(chemin, quoi) {
     if (!fichier || enCours) return;
     await enregistrer();
     sortie.textContent = "";
+    sortieBrute = "";
+    csvDetecte = false;
+    longueurApercuCsv = 0;
+    apercuCoupe = false;
+    $("b-sauver-csv").hidden = true;
     enAttente = "";
     fichierLance = fichier;
     lignesErr = new Set();
@@ -566,8 +652,43 @@
       texte = texte.slice(0, coupe);
     }
     if (texte) {
-      if (enTests) texteTests += texte;
-      ecrireSortie(texte);
+      if (enTests) {
+        texteTests += texte;
+        ecrireSortie(texte);
+      } else {
+        sortieBrute += texte;
+
+        if (!csvDetecte &&
+            /^time,[^\\r\\n]+/m.test(
+              sortieBrute.slice(0, 4096)
+            )) {
+          csvDetecte = true;
+          $("b-sauver-csv").hidden = false;
+        }
+
+        if (csvDetecte) {
+          const restant = Math.max(
+            0, 12000 - longueurApercuCsv
+          );
+
+          if (restant) {
+            ecrireSortie(texte.slice(0, restant));
+          }
+
+          longueurApercuCsv += texte.length;
+
+          if (texte.length > restant && !apercuCoupe) {
+            apercuCoupe = true;
+            ecrireSortie(
+              "\\n[Apercu limite : la sortie complete est conservee pour le CSV]\\n",
+              "info"
+            );
+          }
+        } else {
+          longueurApercuCsv += texte.length;
+          ecrireSortie(texte);
+        }
+      }
     }
     if (r.fini) {
       const duree = ((performance.now() - debut) / 1000).toFixed(2);
@@ -576,6 +697,8 @@
       else etat((r.code === 0 ? "Terminé" : r.code >= 128 ? "Arrêté" : "Terminé avec le code " + r.code) + " en " + duree + " s");
       enTests = false;
       boutons(false);
+      $("b-sauver-csv").disabled =
+        !csvDetecte || r.code !== 0;
       if (lignesErr.size) dessiner();
       return;
     }
@@ -624,6 +747,23 @@
   $("b-tester").addEventListener("click", tester);
   $("b-arreter").addEventListener("click", () => { if (enCours) api("/api/arreter/" + enCours, ""); });
   $("b-fermer").addEventListener("click", () => { if (!enCours) $("console").hidden = true; });
+
+  // V0.65.2 : enregistrer directement un CSV.
+  $("b-sauver-csv").addEventListener("click", () => {
+    if (enCours || !csvDetecte || !sortieBrute) return;
+
+    definirModeDossier("csv");
+    $("fenetre-dossiers").hidden = false;
+
+    const racine =
+      ($("chemin").dataset.dossier || "").replace(/\/+$/, "");
+
+    const sous = dossierDe(fichierLance || fichier);
+
+    afficherDossiersChoix(
+      racine + (sous ? "/" + sous : "")
+    );
+  });
 
   // V0.64 : tout ce que le programme a ecrit (sans les figures), dans le presse-papiers
   $("b-copier").addEventListener("click", async () => {
@@ -1520,6 +1660,60 @@
       await api("/api/ecrire/" + enc(complet), nom.endsWith(".cl") ? "def main() -> int {\n    print(\"Bonjour\")\n    return 0\n}\n" : "");
     if (await ouvrir(complet)) fermerTiroir();
   });
+
+  // V0.65.1 : nouveau document dans le dossier actuel.
+  $("b-nouveau-rapide").addEventListener("click", async () => {
+    if (enCours || enTests) {
+      alert("Arrete le programme ou les tests d'abord.");
+      return;
+    }
+
+    const saisie = prompt(
+      "Nom du nouveau document Clair :", "nouveau.cl"
+    );
+    if (saisie === null) return;
+
+    const nom = nomValide(saisie);
+    if (!nom || !nom.endsWith(".cl") ||
+        nom.startsWith("-") || nom.includes("\\")) {
+      alert("Choisis un nom de fichier .cl valide.");
+      return;
+    }
+
+    const parent = fichier ? dossierDe(fichier) : dossierCourant;
+    const complet = joindre(parent, nom);
+    const bouton = $("b-nouveau-rapide");
+    bouton.disabled = true;
+
+    try {
+      await enregistrer();
+      if (!sauve) {
+        throw new Error("Enregistrement precedent inacheve.");
+      }
+
+      const reponse = await api(
+        "/api/nouveau/" + enc(complet), ""
+      );
+      if (!reponse.ok) {
+        throw new Error("Impossible de creer le document.");
+      }
+
+      const resultat = await reponse.json();
+      if (!resultat.ok) {
+        throw new Error(resultat.erreur || "Document non cree.");
+      }
+
+      if (await ouvrir(complet)) {
+        fermerTiroir();
+        code.focus();
+      }
+    } catch (e) {
+      alert(String(e.message || e));
+    } finally {
+      bouton.disabled = false;
+    }
+  });
+
   $("b-nouveau-dossier").addEventListener("click", async () => {
     const nom = (prompt("Nom du nouveau dossier" + (dossierCourant ? " dans " + dossierCourant : "") + " :", "") || "").trim();
     if (!nom) return;
@@ -1527,6 +1721,234 @@
     const r = await (await api("/api/dossier/" + enc(joindre(dossierCourant, nom)), "")).json();
     if (!r.ok) { alert(r.erreur); return; }
     montrerFichiers(joindre(dossierCourant, nom));
+  });
+
+
+  // ---- V0.65 : explorateur et selection du dossier ----
+  let choixDossier = "";
+  let demandeChoix = 0;
+  let modeChoixDossier = "projet";
+
+  function definirModeDossier(mode) {
+    modeChoixDossier = mode;
+    const csv = mode === "csv";
+
+    $("selection-nom-csv").hidden = !csv;
+
+    $("b-utiliser-dossier").textContent =
+      csv ? "Enregistrer ici" : "Utiliser ce dossier";
+
+    $("fenetre-dossiers")
+      .querySelector(".console-tete strong")
+      .textContent =
+        csv ? "Enregistrer CSV sous…" : "Choisir un dossier";
+  }
+
+  function ajouterDossierChoix(nom, chemin, icone) {
+    const li = document.createElement("li");
+    const bouton = document.createElement("button");
+    bouton.type = "button";
+    bouton.textContent = icone + " " + nom;
+    bouton.addEventListener("click", () => afficherDossiersChoix(chemin));
+    li.appendChild(bouton);
+    $("selection-liste").appendChild(li);
+  }
+
+  async function afficherDossiersChoix(chemin = "") {
+    const demande = ++demandeChoix;
+    const liste = $("selection-liste");
+    const titre = $("selection-chemin");
+    const erreur = $("selection-erreur");
+
+    choixDossier = "";
+    $("b-utiliser-dossier").disabled = true;
+    erreur.hidden = true;
+    liste.textContent = "";
+    titre.textContent = "Ouverture des dossiers…";
+
+    try {
+      const url = "/api/selection-dossiers" +
+        (chemin ? "?d=" + encodeURIComponent(chemin) : "");
+
+      const reponse = await api(url);
+      if (!reponse.ok) {
+        throw new Error("Ce dossier n'est pas accessible.");
+      }
+
+      const resultat = await reponse.json();
+
+      if (demande !== demandeChoix ||
+          $("fenetre-dossiers").hidden) return;
+
+      if (resultat.racines) {
+        titre.textContent = "Emplacements accessibles";
+        for (const r of resultat.racines) {
+          ajouterDossierChoix(r.nom, r.chemin, "📁");
+        }
+        if (!resultat.racines.length) {
+          erreur.textContent = "Aucun dossier accessible.";
+          erreur.hidden = false;
+        }
+        return;
+      }
+
+      choixDossier = resultat.chemin;
+      titre.textContent = resultat.chemin;
+      $("b-utiliser-dossier").disabled = false;
+
+      if (resultat.parent) {
+        ajouterDossierChoix(
+          ".. (dossier parent)", resultat.parent, "↩"
+        );
+      } else {
+        ajouterDossierChoix(
+          "Autres emplacements", "", "↩"
+        );
+      }
+
+      for (const d of resultat.dossiers) {
+        ajouterDossierChoix(d.nom, d.chemin, "📂");
+      }
+
+      if (!resultat.dossiers.length) {
+        const li = document.createElement("li");
+        li.className = "discret vide";
+        li.textContent =
+          "Aucun sous-dossier. Vous pouvez sélectionner ce dossier.";
+        liste.appendChild(li);
+      }
+
+    } catch (e) {
+      if (demande !== demandeChoix) return;
+      titre.textContent = "Dossier indisponible";
+      erreur.textContent = String(e.message || e);
+      erreur.hidden = false;
+    }
+  }
+
+  $("b-choisir-dossier").addEventListener("click", () => {
+    if (enCours) {
+      alert("Arrête le programme avant de changer de dossier.");
+      return;
+    }
+
+    fermerTiroir();
+    definirModeDossier("projet");
+    $("fenetre-dossiers").hidden = false;
+    afficherDossiersChoix(
+      $("chemin").dataset.dossier || ""
+    );
+  });
+
+  $("b-fermer-dossiers").addEventListener("click", () => {
+    demandeChoix++;
+    $("fenetre-dossiers").hidden = true;
+  });
+
+  $("b-emplacements").addEventListener(
+    "click", () => afficherDossiersChoix()
+  );
+
+  $("b-utiliser-dossier").addEventListener("click", async () => {
+    if (!choixDossier || enCours) return;
+
+    const bouton = $("b-utiliser-dossier");
+    bouton.disabled = true;
+
+    if (modeChoixDossier === "csv") {
+      try {
+        const nom = $("nom-csv").value.trim();
+
+        if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*\.csv$/.test(nom)
+            || nom.length > 120) {
+          throw new Error(
+            "Nom invalide : utilise un nom se terminant par .csv, sans chemin."
+          );
+        }
+
+        if (!csvDetecte || !sortieBrute) {
+          throw new Error("Aucune sortie CSV disponible.");
+        }
+
+        const url =
+          "/api/enregistrer-csv/" + enc(nom) +
+          "?d=" + encodeURIComponent(choixDossier);
+
+        const reponse = await api(url, sortieBrute);
+
+        if (!reponse.ok) {
+          throw new Error(
+            "Enregistrement refuse (HTTP " +
+            reponse.status + ")."
+          );
+        }
+
+        const resultat = await reponse.json();
+
+        if (!resultat.ok) {
+          throw new Error(
+            resultat.erreur || "Enregistrement impossible."
+          );
+        }
+
+        if (resultat.taille !==
+            new Blob([sortieBrute]).size) {
+          throw new Error(
+            "Le CSV enregistre n'a pas la taille attendue."
+          );
+        }
+
+        demandeChoix++;
+        $("fenetre-dossiers").hidden = true;
+
+        alert(
+          "CSV enregistre : " +
+          choixDossier + "/" + nom
+        );
+
+      } catch (e) {
+        $("selection-erreur").textContent =
+          String(e.message || e);
+        $("selection-erreur").hidden = false;
+
+      } finally {
+        bouton.disabled = false;
+      }
+
+      return;
+    }
+
+    try {
+      await enregistrer();
+      if (!sauve) {
+        throw new Error("Enregistre d'abord le fichier ouvert.");
+      }
+
+      const reponse = await api(
+        "/api/selection-dossier", choixDossier
+      );
+
+      if (!reponse.ok) {
+        throw new Error("Dossier refusé par le serveur.");
+      }
+
+      const r = await reponse.json();
+      if (!r.ok) {
+        throw new Error(r.erreur || "Impossible de choisir le dossier.");
+      }
+
+      try {
+        localStorage.removeItem("clair-studio-fichier");
+      } catch (e) {}
+
+      window.location.reload();
+
+    } catch (e) {
+      $("selection-erreur").textContent =
+        String(e.message || e);
+      $("selection-erreur").hidden = false;
+      bouton.disabled = !choixDossier;
+    }
   });
 
   // ---- V0.62 : les reglages : theme et taille du texte, gardes par le serveur (et par le navigateur, pour le demarrage) ----

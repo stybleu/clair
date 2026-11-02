@@ -22,6 +22,7 @@ try {
 <div id="app">
   <header class="barre">
     <button id="b-fichiers" class="icone" title="Fichiers" aria-label="Fichiers">☰</button>
+    <button id="b-nouveau-rapide" class="icone" title="Nouveau document Clair" aria-label="Nouveau document">＋</button>
     <div class="titre">
       <span id="nom-fichier">…</span>
       <span id="etat-sauve" class="discret"></span>
@@ -52,6 +53,9 @@ try {
   </div>
 
   <nav class="touches" id="touches" aria-label="Touches">
+    <button class="outil-edition" data-outil="tout">Tout</button>
+    <button class="outil-edition" data-outil="copier">Copier</button>
+    <button class="outil-edition" data-outil="coller">Coller</button>
     <button data-t="    ">⇥</button><button data-t="{">{</button><button data-t="}">}</button>
     <button data-t="(">(</button><button data-t=")">)</button><button data-t="[">[</button><button data-t="]">]</button>
     <button data-t=":">:</button><button data-t="&quot;">"</button><button data-t="=">=</button>
@@ -65,6 +69,7 @@ try {
     <div class="console-tete">
       <span id="etat">Prêt</span>
       <span class="boutons">
+        <button id="b-sauver-csv" class="texte-petit" title="Enregistrer le CSV dans le dossier du programme" hidden disabled>CSV ↓</button>
         <button id="b-copier" class="texte-petit" title="Copier tout ce que le programme a écrit">Copier</button>
         <button id="b-fermer" class="icone petit" aria-label="Fermer la console">✕</button>
       </span>
@@ -87,6 +92,10 @@ try {
     <button id="b-nouveau">+ Fichier</button>
     <button id="b-nouveau-dossier">+ Dossier</button>
   </div>
+  <div class="dossier-selection">
+    <button id="b-choisir-dossier">📁 Choisir un dossier de travail…</button>
+    <span id="dossier-actif" class="discret">{{ dossier }}</span>
+  </div>
   <div class="reglages">
     <div class="reglage"><span>Thème</span>
       <div class="segments" id="r-theme"><button data-v="auto">Auto</button><button data-v="clair">Clair</button><button data-v="sombre">Sombre</button></div>
@@ -96,6 +105,24 @@ try {
     </div>
   </div>
 </aside>
+
+<div class="fenetre" id="fenetre-dossiers" hidden role="dialog" aria-modal="true" aria-label="Sélectionner un dossier">
+  <div class="console-tete">
+    <strong>Choisir un dossier</strong>
+    <button id="b-fermer-dossiers" class="icone petit" aria-label="Fermer">✕</button>
+  </div>
+  <div id="selection-chemin" class="selection-chemin"></div>
+  <div id="selection-nom-csv" class="selection-nom-csv" hidden>
+    <label for="nom-csv">Nom du fichier CSV</label>
+    <input id="nom-csv" type="text" value="meteo.csv" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </div>
+  <ul id="selection-liste" class="selection-liste"></ul>
+  <p id="selection-erreur" class="selection-erreur" role="alert" hidden></p>
+  <div class="selection-actions">
+    <button id="b-emplacements">Emplacements</button>
+    <button id="b-utiliser-dossier" class="principal" disabled>Utiliser ce dossier</button>
+  </div>
+</div>
 
 <div class="fenetre" id="fenetre-git" hidden>
   <div class="console-tete"><span>Git</span><button id="b-fermer-git" class="icone petit" aria-label="Fermer">✕</button></div>

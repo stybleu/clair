@@ -45,6 +45,27 @@ S="Cookie: $SESSION"
 $C GET / "$S" | grep -q '<title>Clair Studio</title>' || echec "page de l'editeur"
 $C GET /api/fichiers "$S" | corps | grep -q '"nom":"bonjour.cl"' || echec "bonjour.cl n'est pas dans le dossier"
 
+
+# V0.65.1 : creation sans ecrasement.
+[ "$($C POST /api/nouveau/nouveau_test.cl 'corps=' | code)" = 403 ] || echec "creation sans session"
+$C POST /api/nouveau/nouveau_test.cl 'corps=' "$S" | corps | grep -q '"ok":true' || echec "creation rapide"
+$C GET /api/lire/nouveau_test.cl "$S" | corps | grep -q '^def main() -> int {' || echec "document lisible"
+$C POST /api/nouveau/nouveau_test.cl 'corps=' "$S" | corps | grep -q '"ok":false' || echec "ecrasement refuse"
+[ "$($C POST /api/nouveau/..%2Finterdit.cl 'corps=' "$S" | code)" = 403 ] || echec "chemin interdit"
+
+# V0.65.2 : sauvegarde CSV.
+[ "$($C POST /api/enregistrer-csv/essai.csv 'corps=time,temperature\n2024-01-01,12\n' | code)" = 403 ] || echec "CSV sans session"
+
+$C POST /api/enregistrer-csv/essai.csv 'corps=time,temperature\n2024-01-01,12\n' "$S" | corps | grep -q '"ok":true' || echec "sauvegarde CSV"
+
+[ -f "$ROOT/build/studio_projets/essai.csv" ] || echec "CSV absent"
+
+$C GET /api/lire/essai.csv "$S" | corps | grep -q '^time,temperature' || echec "CSV illisible"
+
+$C POST /api/enregistrer-csv/essai.csv 'corps=remplacement' "$S" | corps | grep -q '"ok":false' || echec "CSV existant ecrase"
+
+[ "$($C POST /api/enregistrer-csv/..%2Fnon.csv 'corps=time,temperature' "$S" | code)" = 403 ] || echec "CSV hors dossier"
+
 # ecrire, lire, lancer
 $C POST /api/ecrire/essai.cl 'corps=def main() -> int {\n    print("un")\n    print(6 * 7)\n    return 0\n}\n' "$S" | corps | grep -q '"ok":true' || echec "ecrire"
 [ "$($C GET /api/lire/essai.cl "$S" | corps | head -n 2 | tail -n 1)" = '    print("un")' ] || echec "lire"
@@ -235,6 +256,34 @@ $C POST /api/supprimer/autre.cl 'corps=' "$S" | corps | grep -q '"ok":true' || e
 [ "$($C GET /api/lire/..%2F..%2Fsrc%2Fmain.c "$S" | code)" = 403 ] || echec "un fichier hors du dossier"
 [ "$($C GET /api/lire/.secret "$S" | code)" = 403 ] || echec "un fichier cache"
 [ "$($C POST /api/ecrire/pirate.cl 'corps=x' "$S" 'Sec-Fetch-Site: cross-site' | code)" = 403 ] || echec "une page d'un autre site"
+
+# V0.65 : choisir et changer de dossier.
+[ "$($C GET /api/selection-dossiers | code)" = 403 ] || echec "selection sans session"
+$C GET /api/selection-dossiers "$S" | corps | grep -q '"racines":' || echec "emplacements"
+$C GET "/api/selection-dossiers?d=$ROOT/build/studio_projets" "$S" | corps | grep -q '"dossiers":' || echec "exploration"
+[ "$($C GET '/api/selection-dossiers?d=%2Fetc' "$S" | code)" = 403 ] || echec "navigation interdite"
+[ "$($C POST /api/selection-dossier 'corps=/etc' "$S" | code)" = 403 ] || echec "selection interdite"
+
+mkdir -p "$ROOT/build/studio_projets/choix_v065"
+$C POST /api/selection-dossier "corps=$ROOT/build/studio_projets/choix_v065" "$S" | corps | grep -q '"ok":true' || echec "changement de dossier"
+$C POST /api/ecrire/essai_selection.cl 'corps=def main() -> int {\n    return 0\n}\n' "$S" | corps | grep -q '"ok":true' || echec "ecriture"
+[ -f "$ROOT/build/studio_projets/choix_v065/essai_selection.cl" ] || echec "fichier absent"
+$C POST /api/selection-dossier "corps=$ROOT/build/studio_projets" "$S" | corps | grep -q '"ok":true' || echec "retour dossier"
+[ "$($C GET /api/lire/essai_selection.cl "$S" | code)" = 404 ] || echec "ancien dossier actif"
+
+# V0.65.3 : enregistrer dans un dossier choisi.
+mkdir -p "$ROOT/build/studio_projets/export_csv"
+
+$C POST "/api/enregistrer-csv/mesures.csv?d=$ROOT/build/studio_projets/export_csv" 'corps=time,pluie\n2024-01-01,1\n' "$S" | corps | grep -q '"ok":true' || echec "CSV dans un dossier choisi"
+
+[ -f "$ROOT/build/studio_projets/export_csv/mesures.csv" ] || echec "CSV destination absente"
+
+$C POST "/api/enregistrer-csv/mesures.csv?d=$ROOT/build/studio_projets/export_csv" 'corps=remplacement' "$S" | corps | grep -q '"ok":false' || echec "CSV destination ecrase"
+
+[ "$( $C GET /api/fichiers "$S" | code )" = 200 ] || echec "projet modifie par le CSV"
+
+[ "$( $C POST '/api/enregistrer-csv/dehors.csv?d=/etc' 'corps=donnees' "$S" | code )" = 403 ] || echec "CSV dossier interdit"
+
 kill $PID 2> /dev/null
 wait $PID 2> /dev/null
 echo "studio : OK"
