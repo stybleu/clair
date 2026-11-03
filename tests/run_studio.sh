@@ -305,4 +305,29 @@ $C POST "/api/enregistrer-csv/mesures.csv?d=$ROOT/build/studio_projets/export_cs
 
 kill $PID 2> /dev/null
 wait $PID 2> /dev/null
+
+# V0.71.6 : au demarrage, le Studio ouvre l'appli Clair Studio (CLAIR_STUDIO_APPLI=1, mis par studio.sh quand
+# elle est installee), sinon le navigateur. am et termux-open-url sont imites : rien ne s'ouvre vraiment.
+mkdir -p ../ouvrir_bin
+for o in am termux-open-url; do
+    printf '#!%s\necho "%s $*" >> "%s"\n' "$(command -v sh)" "$o" "$PWD/ouvert.txt" > "../ouvrir_bin/$o"
+    chmod +x "../ouvrir_bin/$o"
+done
+ouvrir() {
+    rm -f ouvert.txt
+    env PATH="$PWD/../ouvrir_bin:$PATH" GIT_CEILING_DIRECTORIES="$ROOT/build" CLAIR_STUDIO_OUVRIR=1 CLAIR_STUDIO_APPLI="$1" \
+        ../studio_test_bin "$ROOT/build/studio_projets" 0 > ouvrir.out 2> ouvrir.err &
+    P2=$!
+    for _ in $(seq 1 60); do
+        [ -s ouvert.txt ] && break
+        sleep 0.05
+    done
+    sleep 0.2
+    kill $P2 2> /dev/null
+    wait $P2 2> /dev/null
+}
+ouvrir 1
+grep -q "^am start -n clair.studio/.Studio -a android.intent.action.VIEW -d http://127.0.0.1:[0-9]*/?t=$JETON\$" ouvert.txt || echec "ouverture dans l'appli : $(cat ouvert.txt 2> /dev/null)"
+ouvrir 0
+grep -q "^termux-open-url http://127.0.0.1:[0-9]*/?t=$JETON\$" ouvert.txt || echec "ouverture dans le navigateur : $(cat ouvert.txt 2> /dev/null)"
 echo "studio : OK"

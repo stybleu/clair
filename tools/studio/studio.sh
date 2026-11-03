@@ -52,4 +52,13 @@ if [ ! -x "$RACINE/build/studio" ] || [ studio.cl -nt "$RACINE/build/studio" ] |
     echo "Clair Studio : compilation du Studio..."
     "$CLAIR" studio.cl -o "$RACINE/build/studio" || exit 1
 fi
+# V0.71.6 : l'appli Clair Studio (Android), sans les menus du navigateur. Dans Termux, elle est construite
+# (les outils s'installent la premiere fois) et proposee a l'installation quand le telephone n'a pas la
+# version de ces sources. CLAIR_STUDIO_APP=0 : le navigateur, comme avant. Lance par l'appli elle-meme
+# (CLAIR_STUDIO_OUVRIR=0), le Studio ne verifie rien.
+if [ "${CLAIR_STUDIO_OUVRIR:-1}" = 1 ] && [ "${CLAIR_STUDIO_APP:-1}" = 1 ] && command -v termux-open > /dev/null 2>&1; then
+    if sh "$ICI/android/fabriquer.sh" --verifier; then
+        export CLAIR_STUDIO_APPLI=1
+    fi
+fi
 exec "$RACINE/build/studio" "$DOSSIER" "${2:-8090}"

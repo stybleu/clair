@@ -816,8 +816,16 @@ def main() -> int {
     let adresse: string = "http://127.0.0.1:" + str(port) + "/?t=" + jeton
     print("Clair Studio : " + adresse)
     print("dossier : " + d)
-    if os.which("termux-open-url") != "" and os.env("CLAIR_STUDIO_OUVRIR", "1") == "1" {
-        os.start(["sh", "-c", "sleep 1; termux-open-url \"$1\"", "sh", adresse])
+    // V0.71.6 : dans l'appli Clair Studio quand studio.sh l'a trouvee installee (CLAIR_STUDIO_APPLI=1),
+    // sinon dans le navigateur. L'appli garde l'adresse, avec sa cle, pour les fois suivantes.
+    if os.env("CLAIR_STUDIO_OUVRIR", "1") == "1" {
+        if os.env("CLAIR_STUDIO_APPLI", "0") == "1" and os.which("am") != "" {
+            os.start(["sh", "-c", "sleep 1; am start -n clair.studio/.Studio -a android.intent.action.VIEW -d \"$1\" > /dev/null 2>&1 || termux-open-url \"$1\"", "sh", adresse])
+        } else {
+            if os.which("termux-open-url") != "" {
+                os.start(["sh", "-c", "sleep 1; termux-open-url \"$1\"", "sh", adresse])
+            }
+        }
     }
     web.run(port)
     return 0

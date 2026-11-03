@@ -2,6 +2,8 @@
 "use strict";
 (function () {
   const $ = (id) => document.getElementById(id);
+  // V0.71.6 : dans l'appli Clair Studio (Android), le presse-papiers et les barres du telephone passent par elle
+  const android = window.ClairAndroid || null;
   const code = $("code"), couleurs = $("couleurs"), numeros = $("numeros"), sortie = $("sortie");
   let fichier = null;            // le nom du fichier ouvert
   let sauve = true, minuterie = 0;
@@ -443,6 +445,9 @@
 
     const texte = code.value.slice(a, z);
     copieInterne = texte;
+    if (android) {
+      try { if (android.copier(texte)) return; } catch (e) { /* plus bas */ }
+    }
 
     const copieClassique = () => {
       code.focus();
@@ -470,7 +475,9 @@
     const z = code.selectionEnd;
     let texte = null;
 
-    if (navigator.clipboard && navigator.clipboard.readText) {
+    if (android) {
+      try { texte = android.coller() || null; } catch (e) { texte = null; }
+    } else if (navigator.clipboard && navigator.clipboard.readText) {
       try {
         texte = await navigator.clipboard.readText();
       } catch (e) {
@@ -576,7 +583,11 @@
   // ---- le serveur ----
   async function api(chemin, corps) {
     const r = await fetch(chemin, corps === undefined ? {} : { method: "POST", body: corps });
-    if (r.status === 403) { alert("Ouvre l'adresse affichée dans Termux (avec ?t=...)."); throw new Error("403"); }
+    if (r.status === 403) {
+      if (android) android.reconnecter();         // V0.71.6 : l'appli redemande la cle du Studio
+      else alert("Ouvre l'adresse affichée dans Termux (avec ?t=...).");
+      throw new Error("403");
+    }
     return r;
   }
 
@@ -1096,7 +1107,12 @@
       texte = (($("etat").textContent || "") + "\n" + copie.textContent).trim() + "\n";
     }
     let ok = false;
-    try { await navigator.clipboard.writeText(texte); ok = true; } catch (e) { /* plus bas */ }
+    if (android) {
+      try { ok = !!android.copier(texte); } catch (e) { ok = false; }
+    }
+    if (!ok) {
+      try { await navigator.clipboard.writeText(texte); ok = true; } catch (e) { /* plus bas */ }
+    }
     if (!ok) {                     // sans presse-papiers moderne : la vieille methode
       const zone = document.createElement("textarea");
       zone.value = texte;
@@ -2341,6 +2357,9 @@
     r.style.setProperty("--ligne", Math.round(reglages.taille * 1.5) + "px");
     const sombre = reglages.theme === "sombre" || (reglages.theme === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
     document.querySelector('meta[name="theme-color"]').setAttribute("content", sombre ? "#16181d" : "#ffffff");
+    if (android) {
+      try { android.barres(sombre); } catch (e) { /* rien */ }
+    }
     for (const b of document.querySelectorAll("#r-theme button")) b.classList.toggle("actif", b.dataset.v === reglages.theme);
     $("r-taille").textContent = reglages.taille;
     mesurer();

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- les couleurs du Studio (fond, accent) : clair ici, sombre dans values-night -->
+    <color name="fond">#ffffff</color>
+    <color name="accent">#2563eb</color>
+    <color name="icone_fond">#16181d</color>
+
+    <!-- suit le theme du telephone ; la WebView en tire prefers-color-scheme -->
+    <style name="Clair" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/fond</item>
+        <item name="android:statusBarColor">@color/fond</item>
+        <item name="android:navigationBarColor">@color/fond</item>
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+</resources>
