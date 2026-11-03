@@ -75,3 +75,40 @@ installe depuis les telechargements Android.
 
 La detection automatique des nouvelles versions
 installees n'est pas garantie sur Android 16.
+
+
+## Installation Android : téléchargements
+
+La construction de l'application est effectuée
+dans Termux avec :
+
+```sh
+sh ~/clair/tools/studio/android/fabriquer.sh
+```
+
+Le script construit et signe l'APK, puis le copie
+dans le dossier Téléchargements du téléphone.
+
+Il demande ensuite l'ouverture des téléchargements
+avec l'action Android standard :
+
+```sh
+am start -a android.intent.action.VIEW_DOWNLOADS
+```
+
+Cette méthode ne dépend pas du gestionnaire de
+fichiers propre à Samsung.
+
+L'utilisateur sélectionne ensuite
+`clair-studio.apk` et confirme l'installation.
+
+Si Android refuse d'ouvrir les téléchargements,
+le fichier reste accessible depuis le gestionnaire
+de fichiers du téléphone.
+
+Cette procédure a été testée sur Android 16
+avec un appareil Samsung. La compatibilité avec
+les autres fabricants reste à vérifier.
+
+La compilation de Clair et son fonctionnement
+dans Termux ne sont pas modifiés.

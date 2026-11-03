@@ -165,17 +165,19 @@ if [ ! -f "$APK" ] || [ ! -f "$SORTIE/version" ] || [ "$(cat "$SORTIE/version")"
     echo "$VERSION" > "$SORTIE/version"
     rm -rf "$T"
 fi
-[ "$MODE" = "--construire" ] && { dire "appli construite : $APK"; exit 0; }
-[ "$(installee)" = "$VERSION" ] && { dire "appli installee (version $VERSION)."; lancer; exit $?; }
+[ "$MODE" = "--construire" ] && {
+    dire "APK construit : $APK"
+    exit 0
+}
 
-# Installation Android et demarrage de Clair Studio.
-# --verifier ne doit jamais bloquer le lancement du serveur.
+# Ne jamais installer pendant une verification.
 if [ "$MODE" = "--verifier" ]; then
-    dire "installation non confirmee par Android."
+    [ "$(installee)" = "$VERSION" ] && exit 0
     exit 1
 fi
 
-# L'APK est copie dans les telechargements Android.
+echo "===== PREPARATION APK ====="
+
 if [ ! -d "$HOME/storage/downloads" ]; then
     termux-setup-storage || exit 1
 fi
@@ -183,36 +185,34 @@ fi
 DEST="$HOME/storage/downloads/clair-studio.apk"
 
 if [ ! -d "$HOME/storage/downloads" ]; then
-    dire "autorise l'acces au stockage puis relance."
+    dire "Acces aux telechargements indisponible."
     exit 1
 fi
 
-cp -f "$APK" "$DEST" || {
-    dire "echec de copie de l'APK."
-    exit 1
-}
+cp -f "$APK" "$DEST" || exit 1
 
-dire "APK prepare : $DEST"
-echo ""
-echo "===== INSTALLATION ANDROID ====="
-echo "Ouvre Mes fichiers > Telechargements."
-echo "Touche clair-studio.apk, puis Installer."
-echo ""
-printf "Une fois l'installation terminee, reviens ici et appuie sur Entree : "
-IFS= read -r confirmation || exit 1
+dire "APK copie dans Telechargements."
 
-echo ""
-dire "demarrage de Clair Studio..."
+echo "===== OUVERTURE ANDROID ====="
 
-resultat="$(am start -n clair.studio/.Studio 2>&1)"
+# Action officielle Android, independante du fabricant.
+resultat="$(am start -a android.intent.action.VIEW_DOWNLOADS 2>&1)"
 code=$?
 
-printf '%s\n' "$resultat"
+if [ "$code" -ne 0 ] ||
+   printf '%s\n' "$resultat" |
+      grep -Eiq 'Error:|Error type|Exception|Permission Denial|unable to resolve|No Activity found'; then
 
-if [ "$code" -ne 0 ] || printf '%s\n' "$resultat" | grep -Eiq 'Error:|Error type|SecurityException|Permission Denial'; then
-    dire "ECHEC : installation ou ouverture impossible."
-    exit 1
+    echo "Ouverture automatique indisponible."
+    echo "Ouvre le gestionnaire de fichiers."
+    echo "Va dans Telechargements."
+else
+    echo "TELECHARGEMENTS=OUVERTURE_DEMANDEE"
 fi
 
-dire "DEMANDE_DE_DEMARRAGE=OK"
+echo ""
+echo "Fichier : clair-studio.apk"
+echo "Touche ce fichier puis Installer."
+echo ""
+echo "APK_PRET=OUI"
 exit 0
