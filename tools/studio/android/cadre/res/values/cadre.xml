@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ecrit par generer.py (ne pas modifier a la main) : les attributs et les styles d'Android dont
+     l'appli se sert, avec leurs numeros publics. fabriquer.sh en fait le cadre auquel aapt2 lie l'appli. -->
+<resources>
+    <attr name="allowBackup" format="boolean" />
+    <attr name="colorAccent" format="color" />
+    <attr name="configChanges">
+        <flag name="mcc" value="0x00000001" />
+        <flag name="mnc" value="0x00000002" />
+        <flag name="locale" value="0x00000004" />
+        <flag name="touchscreen" value="0x00000008" />
+        <flag name="keyboard" value="0x00000010" />
+        <flag name="keyboardHidden" value="0x00000020" />
+        <flag name="navigation" value="0x00000040" />
+        <flag name="orientation" value="0x00000080" />
+        <flag name="screenLayout" value="0x00000100" />
+        <flag name="uiMode" value="0x00000200" />
+        <flag name="screenSize" value="0x00000400" />
+        <flag name="smallestScreenSize" value="0x00000800" />
+        <flag name="density" value="0x00001000" />
+        <flag name="layoutDirection" value="0x00002000" />
+        <flag name="colorMode" value="0x00004000" />
+        <flag name="grammaticalGender" value="0x00008000" />
+        <flag name="fontWeightAdjustment" value="0x10000000" />
+        <flag name="fontScale" value="0x40000000" />
+    </attr>
+    <attr name="drawable" format="reference" />
+    <attr name="exported" format="boolean" />
+    <attr name="fillColor" format="color" />
+    <attr name="height" format="dimension" />
+    <attr name="icon" format="reference" />
+    <attr name="label" format="reference|string" />
+    <attr name="launchMode">
+        <enum name="standard" value="0" />
+        <enum name="singleTop" value="1" />
+        <enum name="singleTask" value="2" />
+        <enum name="singleInstance" value="3" />
+        <enum name="singleInstancePerTask" value="4" />
+    </attr>
+    <attr name="minSdkVersion" format="string|integer" />
+    <attr name="name" format="string" />
+    <attr name="navigationBarColor" format="color" />
+    <attr name="pathData" format="string" />
+    <attr name="roundIcon" format="reference" />
+    <attr name="statusBarColor" format="color" />
+    <attr name="strokeColor" format="color" />
+    <attr name="strokeLineCap">
+        <enum name="butt" value="0" />
+        <enum name="round" value="1" />
+        <enum name="square" value="2" />
+    </attr>
+    <attr name="strokeWidth" format="float" />
+    <attr name="targetSdkVersion" format="string|integer" />
+    <attr name="theme" format="reference" />
+    <attr name="usesCleartextTraffic" format="boolean" />
+    <attr name="versionCode" format="integer" />
+    <attr name="versionName" format="string" />
+    <attr name="viewportHeight" format="float" />
+    <attr name="viewportWidth" format="float" />
+    <attr name="width" format="dimension" />
+    <attr name="windowActionBar" format="boolean" />
+    <attr name="windowBackground" format="reference|color" />
+    <attr name="windowNoTitle" format="boolean" />
+    <attr name="windowSoftInputMode">
+        <flag name="adjustUnspecified" value="0x00000000" />
+        <flag name="stateUnspecified" value="0x00000000" />
+        <flag name="stateUnchanged" value="0x00000001" />
+        <flag name="stateHidden" value="0x00000002" />
+        <flag name="stateAlwaysHidden" value="0x00000003" />
+        <flag name="stateVisible" value="0x00000004" />
+        <flag name="stateAlwaysVisible" value="0x00000005" />
+        <flag name="adjustResize" value="0x00000010" />
+        <flag name="adjustPan" value="0x00000020" />
+        <flag name="adjustNothing" value="0x00000030" />
+    </attr>
+    <style name="Theme.DeviceDefault.DayNight" parent="" />
+    <public type="attr" name="allowBackup" id="0x01010280" />
+    <public type="attr" name="colorAccent" id="0x01010435" />
+    <public type="attr" name="configChanges" id="0x0101001f" />
+    <public type="attr" name="drawable" id="0x01010199" />
+    <public type="attr" name="exported" id="0x01010010" />
+    <public type="attr" name="fillColor" id="0x01010404" />
+    <public type="attr" name="height" id="0x01010155" />
+    <public type="attr" name="icon" id="0x01010002" />
+    <public type="attr" name="label" id="0x01010001" />
+    <public type="attr" name="launchMode" id="0x0101001d" />
+    <public type="attr" name="minSdkVersion" id="0x0101020c" />
+    <public type="attr" name="name" id="0x01010003" />
+    <public type="attr" name="navigationBarColor" id="0x01010452" />
+    <public type="attr" name="pathData" id="0x01010405" />
+    <public type="attr" name="roundIcon" id="0x0101052c" />
+    <public type="attr" name="statusBarColor" id="0x01010451" />
+    <public type="attr" name="strokeColor" id="0x01010406" />
+    <public type="attr" name="strokeLineCap" id="0x0101040b" />
+    <public type="attr" name="strokeWidth" id="0x01010407" />
+    <public type="attr" name="targetSdkVersion" id="0x01010270" />
+    <public type="attr" name="theme" id="0x01010000" />
+    <public type="attr" name="usesCleartextTraffic" id="0x010104ec" />
+    <public type="attr" name="versionCode" id="0x0101021b" />
+    <public type="attr" name="versionName" id="0x0101021c" />
+    <public type="attr" name="viewportHeight" id="0x01010403" />
+    <public type="attr" name="viewportWidth" id="0x01010402" />
+    <public type="attr" name="width" id="0x01010159" />
+    <public type="attr" name="windowActionBar" id="0x010102cd" />
+    <public type="attr" name="windowBackground" id="0x01010054" />
+    <public type="attr" name="windowNoTitle" id="0x01010056" />
+    <public type="attr" name="windowSoftInputMode" id="0x0101022b" />
+    <public type="style" name="Theme.DeviceDefault.DayNight" id="0x010302e3" />
+</resources>

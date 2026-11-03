@@ -1,4 +1,4 @@
-# Clair Studio en application Android (V0.71.6, V0.71.7) : construit l'APK sur le telephone avec les outils de Termux,
+# Clair Studio en application Android (V0.71.6 a V0.71.8) : construit l'APK sur le telephone avec les outils de Termux,
 # puis le propose a l'installation.
 #   sh ~/clair/tools/studio/android/fabriquer.sh               construit si besoin, propose l'installation
 #   sh ~/clair/tools/studio/android/fabriquer.sh --verifier    (studio.sh) rien si la bonne version est installee,
@@ -8,7 +8,9 @@
 #
 # La premiere fois, les outils sont installes (environ 300 Mo) : Java (openjdk-21), d8 (classes Java -> dex),
 # aapt et aapt2 (les ressources), apksigner, et ecj (pour son android.jar, les classes d'Android).
-# Les ressources sont liees a celles du telephone (/system/framework/framework-res.apk).
+# V0.71.8 : les ressources de l'appli sont liees a un petit cadre d'Android construit ici (cadre/, voir
+# cadre/generer.py) : l'aapt2 de Termux ne sait pas lire /system/framework/framework-res.apk d'Android 16.
+# CLAIR_ANDROID_FRAMEWORK : un android.jar complet (ou un framework-res.apk) a la place du cadre.
 # La cle qui signe l'appli reste sur le telephone (~/.clair_studio.jks) : une mise a jour de l'appli doit etre
 # signee par la meme cle, sinon Android la refuse (il faut alors desinstaller l'ancienne).
 # Le detail de chaque etape est dans ~/clair_android.log.
@@ -74,8 +76,8 @@ if manque; then
         exit 1
     fi
 fi
-FW="${CLAIR_ANDROID_FRAMEWORK:-/system/framework/framework-res.apk}"
-if [ ! -r "$FW" ]; then
+FW="${CLAIR_ANDROID_FRAMEWORK:-}"
+if [ -n "$FW" ] && [ ! -r "$FW" ]; then
     dire "impossible de lire $FW (les ressources d'Android)."
     exit 1
 fi
@@ -105,6 +107,11 @@ if [ ! -f "$APK" ] || [ ! -f "$SORTIE/version" ] || [ "$(cat "$SORTIE/version")"
     fi
     etape "dex" d8 --release --min-api 29 --lib "$JAR" --output "$T/dex" $(find "$T/classes" -name '*.class')
     etape "ressources" aapt2 compile --dir "$ICI/res" -o "$T/res.zip"
+    if [ -z "$FW" ]; then
+        etape "cadre" aapt2 compile --dir "$ICI/cadre/res" -o "$T/cadre.zip"
+        etape "cadre, lien" aapt2 link -x --manifest "$ICI/cadre/AndroidManifest.xml" -o "$T/cadre.apk" "$T/cadre.zip"
+        FW="$T/cadre.apk"
+    fi
     etape "lien" aapt2 link -I "$FW" --manifest "$ICI/AndroidManifest.xml" -o "$T/brut.apk" "$T/res.zip"
     etape "classes.dex" sh -c 'cd "$1" && aapt add "$2" classes.dex' sh "$T/dex" "$T/brut.apk"
     # aapt2 aligne deja ce qu'il range sans compression (resources.arsc) ; zipalign verifie, s'il est la
