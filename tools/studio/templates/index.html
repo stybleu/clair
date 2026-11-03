@@ -37,6 +37,28 @@ try {
     <button id="b-lancer" class="lancer" title="Compiler et lancer" aria-label="Lancer">▶</button>
   </header>
 
+  <!-- V0.71.4 : rechercher et remplacer (Ctrl+F, Ctrl+H, ou la touche 🔍) -->
+  <div class="chercher" id="chercher" hidden>
+    <div class="ch-ligne">
+      <input id="ch-texte" placeholder="Rechercher" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Rechercher">
+      <span id="ch-compte" class="discret" aria-live="polite"></span>
+      <button id="ch-prec" class="icone petit" title="Précédent (Maj+Entrée)" aria-label="Précédent">↑</button>
+      <button id="ch-suiv" class="icone petit" title="Suivant (Entrée)" aria-label="Suivant">↓</button>
+      <button id="ch-fermer" class="icone petit" title="Fermer (Échap)" aria-label="Fermer la recherche">✕</button>
+    </div>
+    <div class="ch-ligne">
+      <button id="ch-casse" class="option" title="Respecter les majuscules" aria-pressed="false">Aa</button>
+      <button id="ch-mot" class="option" title="Mot entier" aria-pressed="false">Mot</button>
+      <button id="ch-regex" class="option" title="Expression régulière ($1, $2… dans le remplacement)" aria-pressed="false">.*</button>
+      <button id="ch-bascule" class="option" title="Remplacer (Ctrl+H)" aria-pressed="false">Remplacer</button>
+    </div>
+    <div class="ch-ligne" id="ch-remplacement" hidden>
+      <input id="ch-par" placeholder="Remplacer par" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-label="Remplacer par">
+      <button id="ch-un" class="texte-petit" title="Remplacer celui-ci, puis aller au suivant (Entrée)">Remplacer</button>
+      <button id="ch-tous" class="texte-petit" title="Remplacer partout">Tout</button>
+    </div>
+  </div>
+
   <main class="editeur" id="editeur">
     <div class="marge" id="marge"><div id="numeros"></div></div>
     <div class="zone">
@@ -56,6 +78,7 @@ try {
     <button class="outil-edition" data-outil="tout">Tout</button>
     <button class="outil-edition" data-outil="copier">Copier</button>
     <button class="outil-edition" data-outil="coller">Coller</button>
+    <button class="outil-edition" data-outil="chercher" title="Rechercher et remplacer" aria-label="Rechercher et remplacer">🔍</button>
     <button data-t="    ">⇥</button><button data-t="{">{</button><button data-t="}">}</button>
     <button data-t="(">(</button><button data-t=")">)</button><button data-t="[">[</button><button data-t="]">]</button>
     <button data-t=":">:</button><button data-t="&quot;">"</button><button data-t="=">=</button>

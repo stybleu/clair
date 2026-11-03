@@ -67,6 +67,21 @@ button:active { filter: brightness(0.9); }
 .couleurs .l.err { background: var(--erreur-fond); }
 .couleurs .l.verif { text-decoration: underline wavy var(--rouge); text-decoration-skip-ink: none; text-underline-offset: 4px; }
 .couleurs .largeur { display: block; height: 0; }
+/* V0.71.4 : rechercher et remplacer */
+.chercher { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--bord);
+            background: var(--fond2); }
+.ch-ligne { display: flex; align-items: center; gap: 4px; }
+.ch-ligne input { flex: 1; min-width: 0; min-height: 34px; padding: 0 8px; font: var(--taille) var(--code); color: var(--texte);
+                  background: var(--fond); border: 1px solid var(--bord); border-radius: 8px; }
+.ch-ligne input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: -1px; }
+.ch-ligne input.invalide { border-color: var(--rouge); outline-color: var(--rouge); }
+#ch-compte { min-width: 56px; text-align: center; white-space: nowrap; }
+.chercher .petit { min-height: 34px; width: 34px; }
+.chercher .option { min-height: 30px; padding: 0 10px; font-family: var(--code); font-size: 13px; }
+.chercher .option[aria-pressed="true"] { color: var(--accent); border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 18%, var(--fond2)); }
+.couleurs mark.trouve { color: inherit; background: color-mix(in srgb, #f59e0b 32%, transparent); border-radius: 2px; }
+.couleurs mark.trouve.actuel { color: #1a1a1a; background: #fbbf24; box-shadow: 0 0 0 1px #d97706; }   /* lisible dans les deux themes */
 /* V0.71.3 : le texte selectionne, surligne partout ou il revient (comme VS Code) */
 .couleurs mark.meme { color: inherit; background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 2px;
          box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }

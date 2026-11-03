@@ -82,6 +82,7 @@
       lignes = texteDessine.split("\n");
       plusLongue = 0;
       for (const l of lignes) if (l.length > plusLongue) plusLongue = l.length;
+      if (ch.ouvert) chercherMaj();                 // V0.71.4 : le texte a change, les endroits trouves aussi
     }
     const total = lignes.length;
     const haut = code.scrollTop, vue = code.clientHeight || 800;
@@ -93,7 +94,10 @@
     for (let k = premier; k < dernier; k++) {
       const n = k + 1;
       const cls = lignesErr.has(n) ? "err" : lignesVerif.has(n) ? "verif" : "";
-      const h = surligne ? marquer(couleur(lignes[k]), lignes[k]) : couleur(lignes[k]);
+      let h = couleur(lignes[k]);
+      const ids = ch.ouvert ? ch.parLigne.get(k) : null;
+      if (ids) h = marquerZones(h, ids.map((i) => [ch.trouves[i].a, ch.trouves[i].b, i === ch.actuel ? "trouve actuel" : "trouve"]));
+      else if (surligne && !(ch.ouvert && ch.re)) h = marquer(h, lignes[k]);
       html += '<span class="l' + (cls ? " " + cls : "") + '">' + (h || " ") + "</span>";
       const g = lignesGit.get(n);
       nums += '<span class="nl' + (cls ? " " + cls : "") + (g ? " g" + g : "") + '">' + n + "</span>";
@@ -126,28 +130,32 @@
     redessiner();
   }
 
-  // la ligne coloriee (html) avec <mark class="meme"> autour de chaque endroit trouve dans le texte de la ligne ;
-  // une marque qui traverse une couleur est fermee avant la balise et rouverte apres
+  // la ligne coloriee (html) avec <mark class="meme"> autour de chaque endroit trouve dans le texte de la ligne
   function marquer(html, ligne) {
     const re = surligne.re, zones = [];
     re.lastIndex = 0;
-    for (let m; (m = re.exec(ligne)); ) zones.push([m.index, m.index + m[0].length]);
-    if (!zones.length) return html;
-    const OUVRE = '<mark class="meme">';
-    let out = "", i = 0, pos = 0, z = 0, ouvert = false;
+    for (let m; (m = re.exec(ligne)); ) zones.push([m.index, m.index + m[0].length, "meme"]);
+    return zones.length ? marquerZones(html, zones) : html;
+  }
+
+  // zones : [debut, fin, classe] dans le texte de la ligne, dans l'ordre. Les balises ne comptent pas, &amp; &lt;
+  // &gt; comptent pour un caractere ; une marque qui traverse une couleur est fermee avant la balise et rouverte
+  // au caractere suivant (V0.71.4 : aussi pour rechercher)
+  function marquerZones(html, zones) {
+    let out = "", i = 0, pos = 0, z = 0, ouvert = null;
     while (i < html.length) {
-      if (html[i] === "<") {                       // une balise : pas un caractere du texte
+      if (html[i] === "<") {
         const j = html.indexOf(">", i) + 1;
-        if (ouvert) { out += "</mark>"; ouvert = false; }
+        if (ouvert) { out += "</mark>"; ouvert = null; }
         out += html.slice(i, j);
         i = j;
         continue;
       }
       while (z < zones.length && pos >= zones[z][1]) z++;
-      const dans = z < zones.length && pos >= zones[z][0];
-      if (dans && !ouvert) { out += OUVRE; ouvert = true; }
-      if (!dans && ouvert) { out += "</mark>"; ouvert = false; }
-      const j = html[i] === "&" ? html.indexOf(";", i) + 1 : i + 1;   // &amp; &lt; &gt; : un caractere
+      const cls = z < zones.length && pos >= zones[z][0] ? zones[z][2] : null;
+      if (ouvert && ouvert !== cls) { out += "</mark>"; ouvert = null; }
+      if (cls && !ouvert) { out += '<mark class="' + cls + '">'; ouvert = cls; }
+      const j = html[i] === "&" ? html.indexOf(";", i) + 1 : i + 1;
       out += html.slice(i, j);
       i = j;
       pos++;
@@ -155,8 +163,205 @@
     if (ouvert) out += "</mark>";
     return out;
   }
+
   document.addEventListener("selectionchange", () => { if (document.activeElement === code) majSurligne(); });
   for (const ev of ["select", "keyup", "mouseup", "touchend"]) code.addEventListener(ev, majSurligne);
+
+  // ---- V0.71.4 : rechercher et remplacer, comme VS Code ----
+  // Les endroits trouves sont cherches ligne par ligne (une recherche ne passe pas d'une ligne a l'autre), et
+  // surlignes dans les lignes visibles ; celui ou l'on est, plus fort. Remplacer passe par l'annulation du
+  // navigateur : ↶ revient en arriere (Tout : en une fois).
+  const ch = { ouvert: false, re: null, trouves: [], parLigne: new Map(), actuel: -1, erreur: "", depart: 0, MAX: 20000,
+               message: "" };                       // message : « 7 remplacés », jusqu'a la prochaine recherche
+  const option = (id) => $(id).getAttribute("aria-pressed") === "true";
+
+  function chercherRegex() {
+    const t = $("ch-texte").value;
+    ch.erreur = "";
+    if (!t) return null;
+    let src = option("ch-regex") ? t : t.replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&");
+    if (option("ch-mot")) src = "(?<![\\p{L}\\p{N}_])(?:" + src + ")(?![\\p{L}\\p{N}_])";
+    try {
+      return new RegExp(src, "gu" + (option("ch-casse") ? "" : "i"));
+    } catch (e) {
+      ch.erreur = "invalide";
+      return null;
+    }
+  }
+
+  // tous les endroits trouves ; depuis : le premier a partir de cette position du texte devient l'actuel
+  function chercherMaj(depuis) {
+    ch.re = chercherRegex();
+    ch.trouves = [];
+    ch.parLigne = new Map();
+    if (ch.re) {
+      const v = code.value;
+      let debut = 0;
+      for (const [k, l] of v.split("\n").entries()) {
+        ch.re.lastIndex = 0;
+        for (let m; ch.trouves.length < ch.MAX && (m = ch.re.exec(l)); ) {
+          if (!m[0].length) { ch.re.lastIndex++; continue; }      // un motif qui peut etre vide (a*) : rien a montrer
+          if (!ch.parLigne.has(k)) ch.parLigne.set(k, []);
+          ch.parLigne.get(k).push(ch.trouves.length);
+          ch.trouves.push({ ligne: k, a: m.index, b: m.index + m[0].length, debut: debut + m.index, m });
+        }
+        debut += l.length + 1;
+      }
+    }
+    if (depuis !== undefined) {
+      ch.actuel = ch.trouves.findIndex((t) => t.debut >= depuis);
+      if (ch.actuel < 0) ch.actuel = ch.trouves.length ? 0 : -1;
+    } else if (ch.actuel >= ch.trouves.length || (ch.actuel < 0 && ch.trouves.length)) ch.actuel = ch.trouves.length ? 0 : -1;
+    compteRecherche();
+    redessiner();
+  }
+
+  function compteRecherche() {
+    const n = ch.trouves.length;
+    $("ch-texte").classList.toggle("invalide", !!ch.erreur);
+    if (ch.message && code.value !== ch.messageTexte) ch.message = "";   // le texte a change depuis (↶ par exemple)
+    $("ch-compte").textContent = ch.erreur ? "invalide" : ch.message ? ch.message : !$("ch-texte").value ? "" : !n ? "aucun"
+      : (ch.actuel + 1) + " / " + n + (n >= ch.MAX ? "+" : "");
+  }
+
+  function largeurCaractere() {
+    const c = largeurCaractere.c || (largeurCaractere.c = document.createElement("canvas").getContext("2d"));
+    c.font = getComputedStyle(code).font;
+    return c.measureText("0000000000").width / 10 || 8;
+  }
+
+  // l'endroit actuel, dans la vue (en hauteur, et en largeur pour une longue ligne)
+  function montrerActuel() {
+    const t = ch.trouves[ch.actuel];
+    if (!t) return;
+    const y = 8 + t.ligne * hauteur;
+    if (y < code.scrollTop || y + hauteur > code.scrollTop + code.clientHeight) code.scrollTop = Math.max(0, y - code.clientHeight / 3);
+    const cw = largeurCaractere(), x = 10 + t.a * cw, x2 = 10 + t.b * cw;
+    if (x < code.scrollLeft + 10 || x2 > code.scrollLeft + code.clientWidth - 10) code.scrollLeft = Math.max(0, x - code.clientWidth / 3);
+    suivreDefilement();
+    compteRecherche();
+    redessiner();
+  }
+
+  function allerRecherche(sens) {
+    ch.message = "";
+    const n = ch.trouves.length;
+    if (!n) return;
+    ch.actuel = ((ch.actuel < 0 ? (sens > 0 ? -1 : 0) : ch.actuel) + sens + n) % n;
+    montrerActuel();
+  }
+
+  function ouvrirRecherche(remplacer) {
+    const a = code.selectionStart, b = code.selectionEnd, sel = code.value.slice(a, b);
+    if (sel && !sel.includes("\n") && sel.length <= 200) $("ch-texte").value = sel;
+    $("chercher").hidden = false;
+    ch.ouvert = true;
+    ch.message = "";
+    ch.depart = Math.min(a, b);
+    montrerRemplacer(remplacer || !$("ch-remplacement").hidden);
+    chercherMaj(ch.depart);
+    const champ = remplacer && $("ch-texte").value ? $("ch-par") : $("ch-texte");
+    champ.focus();
+    champ.select();
+    if (ch.actuel >= 0) montrerActuel();
+  }
+
+  function fermerRecherche() {
+    const t = ch.trouves[ch.actuel];
+    $("chercher").hidden = true;
+    ch.ouvert = false;
+    ch.re = null;
+    ch.trouves = [];
+    ch.parLigne = new Map();
+    code.focus();
+    if (t) code.setSelectionRange(t.debut, t.debut + t.b - t.a);   // l'editeur reprend la ou l'on etait
+    redessiner();
+  }
+
+  function montrerRemplacer(oui) {
+    $("ch-remplacement").hidden = !oui;
+    $("ch-bascule").setAttribute("aria-pressed", oui ? "true" : "false");
+  }
+
+  // le texte de remplacement d'un endroit : avec .* , $& (tout), $1 a $99 (les groupes), $$ (un $)
+  function remplacement(t) {
+    const par = $("ch-par").value;
+    if (!option("ch-regex")) return par;
+    return par.replace(/\$(\$|&|\d{1,2})/g, (x, k) => k === "$" ? "$" : k === "&" ? t.m[0]
+      : +k > 0 && +k < t.m.length ? (t.m[+k] === undefined ? "" : t.m[+k]) : x);
+  }
+
+  // remplace le texte de debut a fin par nouveau, en passant par l'annulation du navigateur
+  function ecrireA(debut, fin, nouveau) {
+    const retour = document.activeElement, haut = code.scrollTop, gauche = code.scrollLeft;
+    code.focus();
+    code.setSelectionRange(debut, fin);
+    const ok = nouveau ? document.execCommand("insertText", false, nouveau) : document.execCommand("delete");
+    if (!ok) code.setRangeText(nouveau, debut, fin, "end");
+    modifie();
+    code.scrollTop = haut;
+    code.scrollLeft = gauche;
+    if (retour && retour !== code && retour.focus) retour.focus();
+  }
+
+  function remplacerUn() {
+    ch.message = "";
+    const t = ch.trouves[ch.actuel];
+    if (!t) return;
+    const nouveau = remplacement(t);
+    ecrireA(t.debut, t.debut + t.b - t.a, nouveau);
+    chercherMaj(t.debut + nouveau.length);           // puis le suivant
+    montrerActuel();
+  }
+
+  function remplacerTout() {
+    const n = ch.trouves.length;
+    if (!n) return;
+    const v = code.value;
+    let out = "", pos = 0;
+    for (const t of ch.trouves) {
+      out += v.slice(pos, t.debut) + remplacement(t);
+      pos = t.debut + t.b - t.a;
+    }
+    ecrireA(0, v.length, out + v.slice(pos));
+    ch.message = n + " remplacé" + (n > 1 ? "s" : "");
+    ch.messageTexte = code.value;
+    chercherMaj(0);
+  }
+
+  $("ch-texte").addEventListener("input", () => { ch.message = ""; chercherMaj(ch.depart); montrerActuel(); });
+  $("ch-texte").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); allerRecherche(e.shiftKey ? -1 : 1); }
+    if (e.key === "Escape") { e.preventDefault(); fermerRecherche(); }
+  });
+  $("ch-par").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); remplacerUn(); }
+    if (e.key === "Escape") { e.preventDefault(); fermerRecherche(); }
+  });
+  for (const id of ["ch-casse", "ch-mot", "ch-regex"]) {
+    $(id).addEventListener("click", () => {
+      $(id).setAttribute("aria-pressed", option(id) ? "false" : "true");
+      ch.message = "";
+      chercherMaj(ch.depart);
+      montrerActuel();
+    });
+  }
+  $("ch-bascule").addEventListener("click", () => {
+    montrerRemplacer($("ch-remplacement").hidden);
+    if (!$("ch-remplacement").hidden) $("ch-par").focus();
+  });
+  for (const b of document.querySelectorAll("#chercher button")) b.addEventListener("pointerdown", (e) => e.preventDefault());
+  $("ch-suiv").addEventListener("click", () => allerRecherche(1));
+  $("ch-prec").addEventListener("click", () => allerRecherche(-1));
+  $("ch-fermer").addEventListener("click", fermerRecherche);
+  $("ch-un").addEventListener("click", remplacerUn);
+  $("ch-tous").addEventListener("click", remplacerTout);
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "h") && document.activeElement !== code) {
+      e.preventDefault();
+      ouvrirRecherche(e.key === "h");
+    }
+  });
 
   function suivreDefilement() {
     couleurs.scrollTop = code.scrollTop;
@@ -208,6 +413,7 @@
     }
     if (e.key === "Escape" && !$("aide").hidden) { aideFermee = true; cacherAide(); }
     if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); enregistrer(); }
+    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "h")) { e.preventDefault(); ouvrirRecherche(e.key === "h"); }
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); lancer(); }
   });
   code.addEventListener("input", modifie);
@@ -293,6 +499,7 @@
       if (b.dataset.outil === "tout") { toutSelectionner(); return; }
       if (b.dataset.outil === "copier") { copierSelection(); return; }
       if (b.dataset.outil === "coller") { collerSelection(); return; }
+      if (b.dataset.outil === "chercher") { ouvrirRecherche(false); return; }
       if (b.dataset.cmd) { code.focus(); document.execCommand(b.dataset.cmd); modifie(); return; }
       inserer(b.dataset.t);
     });
@@ -319,10 +526,11 @@
     const largeur = document.documentElement.clientWidth;
     if (Math.abs(largeur - largeurVue) > 1) { largeurVue = largeur; hauteurPleine = 0; }   // l'ecran a tourne
     hauteurPleine = Math.max(hauteurPleine, visible);
-    const clavier = (champ === code || champ === $("entree")) && visible < hauteurPleine * 0.8;
+    const dansCode = champ === code || !!(champ && champ.closest && champ.closest("#chercher"));   // V0.71.4
+    const clavier = (dansCode || champ === $("entree")) && visible < hauteurPleine * 0.8;
     app.classList.toggle("clavier", clavier);
-    app.classList.toggle("dans-code", clavier && champ === code);
-    app.classList.toggle("dans-entree", clavier && champ !== code);
+    app.classList.toggle("dans-code", clavier && dansCode);
+    app.classList.toggle("dans-entree", clavier && !dansCode);
     if (clavier && champ === code && visible < hauteurAvant - 1) requestAnimationFrame(montrerCurseur);
     hauteurAvant = visible;
   }
