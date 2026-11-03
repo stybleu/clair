@@ -99,7 +99,7 @@ button:active { filter: brightness(0.9); }
 #suggestions { display: flex; gap: 4px; padding: 4px; overflow-x: auto; scrollbar-width: none; }
 .sug { flex: none; min-height: 34px; padding: 0 10px; font: var(--taille) var(--code); display: flex; align-items: center; gap: 6px; }
 .sug span { color: var(--discret); font-size: 11px; }
-.sug.f { color: var(--fonc); } .sug.k { color: var(--mot); } .sug.t, .sug.c { color: var(--type); }
+.sug.f { color: var(--fonc); } .sug.k { color: var(--mot); } .sug.t, .sug.c { color: var(--type); } .sug.m { color: var(--accent); }
 .touches { display: flex; gap: 4px; padding: 4px; overflow-x: auto; border-top: 1px solid var(--bord); background: var(--fond2);
            scrollbar-width: none; flex: none; }
 .touches button { min-width: 38px; min-height: 38px; padding: 0 6px; font-family: var(--code); flex: none; }

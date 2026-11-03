@@ -1167,6 +1167,20 @@
   const MATH = ["sqrt", "exp", "exp2", "expm1", "log", "log10", "log2", "log1p", "sin", "cos", "tan", "asin", "acos", "atan",
     "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "floor", "ceil", "trunc", "fabs", "cbrt", "erf", "erfc", "gamma",
     "lgamma", "degrees", "radians"];
+  // V0.71.5 : les modules de Clair, proposes apres import et from (puis les fichiers .cl du dossier)
+  const MODULES_CLAIR = [["math", "sqrt, sin, pi…"], ["phys", "constantes physiques"], ["astro", "constantes du ciel"],
+    ["os", "fichiers, programmes"], ["web", "site web"], ["plot", "graphiques"], ["gui", "fenêtre, dessin"],
+    ["nbody", "gravité, N corps"]];
+  // leurs constantes (dans le compilateur, src/modules.c) : nom et unite
+  const PHYS = [["c", "m/s"], ["h", "J*s"], ["hbar", "J*s"], ["e", "C"], ["N_A", "1/mol"], ["k_B", "J/K"], ["R", "J/(mol*K)"],
+    ["F", "C/mol"], ["sigma", "W/(m^2*K^4)"], ["b_wien", "m*K"], ["g0", "m/s^2"], ["atm", "Pa"], ["eV", "J"],
+    ["G", "m^3/(kg*s^2)"], ["m_e", "kg"], ["m_p", "kg"], ["m_n", "kg"], ["m_u", "kg"], ["eps0", "F/m"], ["mu0", "N/A^2"],
+    ["alpha", "1"], ["R_inf", "1/m"], ["a0", "m"], ["l_P", "m"], ["m_P", "kg"], ["t_P", "s"], ["T_P", "K"]];
+  const ASTRO = [["UA", "m"], ["AU", "m"], ["pc", "m"], ["al", "m"], ["ly", "m"], ["jour", "s"], ["an", "s"],
+    ["GM_soleil", "m^3/s^2"], ["GM_mercure", "m^3/s^2"], ["GM_venus", "m^3/s^2"], ["GM_terre", "m^3/s^2"],
+    ["GM_lune", "m^3/s^2"], ["GM_mars", "m^3/s^2"], ["GM_jupiter", "m^3/s^2"], ["GM_saturne", "m^3/s^2"],
+    ["GM_uranus", "m^3/s^2"], ["GM_neptune", "m^3/s^2"], ["GM_pluton", "m^3/s^2"], ["R_soleil", "m"], ["L_soleil", "W"],
+    ["R_terre", "m"], ["R_terre_polaire", "m"], ["R_jupiter", "m"], ["R_jupiter_polaire", "m"]];
 
   const sansChaines = (l) => l.replace(/"(?:[^"\\]|\\.)*"/g, '""');
   function accolades(l) {
@@ -1221,6 +1235,7 @@
       if (!modules.has("math")) {
         const a = analyser("", true);
         for (const f of MATH) a.fonctions.set(f, { nom: f, params: ["x"], ret: "float", doc: "", sorte: "f" });
+        for (const f of ["fmod", "copysign"]) a.fonctions.set(f, { nom: f, params: ["x", "y"], ret: "float", doc: "", sorte: "f" });
         a.fonctions.set("pow", { nom: "pow", params: ["x", "y"], ret: "float", doc: "", sorte: "f" });
         a.fonctions.set("atan2", { nom: "atan2", params: ["y", "x"], ret: "float", doc: "", sorte: "f" });
         a.fonctions.set("hypot", { nom: "hypot", params: ["x", "y"], ret: "float", doc: "", sorte: "f" });
@@ -1230,6 +1245,14 @@
         modules.set("math", { analyse: a, fixe: true });
       }
       return modules.get("math").analyse;
+    }
+    if (nom === "phys" || nom === "astro") {        // V0.71.5 : des constantes avec leur unite
+      if (!modules.has(nom)) {
+        const a = analyser("", true);
+        for (const [c, u] of nom === "phys" ? PHYS : ASTRO) a.constantes.set(c, "float[" + u + "]");
+        modules.set(nom, { analyse: a, fixe: true });
+      }
+      return modules.get(nom).analyse;
     }
     const m = modules.get(nom);
     if (!m || (!m.fixe && !m.enCours && performance.now() - m.quand > 5000)) chargerModule(nom);
@@ -1249,6 +1272,22 @@
     m.enCours = false;
     m.quand = performance.now();
     planifierAide();
+  }
+
+  // V0.71.5 : les fichiers .cl du dossier du fichier ouvert, qu'on peut importer (lus au plus toutes les 5 s)
+  let modulesLocaux = { dossier: null, noms: [], quand: 0, enCours: false };
+  function modulesDuDossier() {
+    const d = dossierDe(fichier);
+    if (!modulesLocaux.enCours && (modulesLocaux.dossier !== d || performance.now() - modulesLocaux.quand > 5000)) {
+      modulesLocaux.enCours = true;
+      listerFichiers(d).then((liste) => {
+        modulesLocaux = { dossier: d, quand: performance.now(), enCours: false,
+          noms: (liste || []).filter((f) => !f.dossier && /^[A-Za-z_]\w*\.cl$/.test(f.nom) && joindre(d, f.nom) !== fichier)
+            .map((f) => f.nom.slice(0, -3)) };
+        planifierAide();
+      }, () => { modulesLocaux.enCours = false; });
+    }
+    return modulesLocaux.dossier === d ? modulesLocaux.noms : [];
   }
 
   function trouverClasse(type, a) {
@@ -1340,7 +1379,12 @@
     const ligne = texte.slice(texte.lastIndexOf("\n", pos - 1) + 1, pos);
     const vue = sansChaines(ligne);
     if (/"/.test(vue.replace(/""/g, "")) || /\/\//.test(vue)) return null;   // dans un texte ou un commentaire
-    let m = /([A-Za-z_]\w*)\.([A-Za-z_]\w*)?$/.exec(vue);
+    // V0.71.5 : import nb… (les modules), from nbody import Sim… (ce que le module contient)
+    let m = /^\s*(?:import|from)\s+([A-Za-z_]\w*)?$/.exec(vue);
+    if (m) return { importer: true, prefixe: m[1] || "", debut: pos - (m[1] || "").length, vue, pos };
+    m = /^\s*from\s+([A-Za-z_]\w*)\s+import\s+(?:[A-Za-z_]\w*(?:\s+as\s+[A-Za-z_]\w*)?\s*,\s*)*([A-Za-z_]\w*)?$/.exec(vue);
+    if (m) return { depuis: m[1], prefixe: m[2] || "", debut: pos - (m[2] || "").length, vue, pos };
+    m = /([A-Za-z_]\w*)\.([A-Za-z_]\w*)?$/.exec(vue);
     if (m) return { objet: m[1], prefixe: m[2] || "", debut: pos - (m[2] || "").length, vue, pos };
     m = /(?:^|[^\w.])([A-Za-z_]\w*)$/.exec(vue);
     const prefixe = m ? m[1] : "";
@@ -1354,7 +1398,17 @@
     const vars = variables(texte, ctx.pos, a);
     const liste = [];
     const ajouter = (nom, sorte, detail, info) => liste.push({ nom, sorte, detail, info });
-    if (ctx.objet) {
+    if (ctx.importer) {
+      for (const [n, d] of MODULES_CLAIR) ajouter(n, "m", d, null);
+      for (const n of modulesDuDossier()) ajouter(n, "m", n + ".cl", null);
+    } else if (ctx.depuis) {
+      const am = module(ctx.depuis);
+      if (am) {
+        for (const f of am.fonctions.values()) ajouter(f.nom, "f", "", f);
+        for (const c of am.classes.values()) ajouter(c.nom, "c", "", fonctionsClasse(c));
+        for (const [n, t] of am.constantes) ajouter(n, "v", t, null);
+      }
+    } else if (ctx.objet) {
       const mod = a.imports.get(ctx.objet);
       if (mod) {
         const am = module(mod);
@@ -1400,7 +1454,9 @@
       else continue;
       vus.add(c.nom);
     }
-    return debuts.concat(dedans).slice(0, 40);
+    // V0.71.5 : parmi ceux qui commencent pareil, d'abord ceux qui ont aussi les memes majuscules (Sim -> Simulation)
+    const exacts = debuts.filter((c) => c.nom.startsWith(ctx.prefixe)), autres = debuts.filter((c) => !c.nom.startsWith(ctx.prefixe));
+    return exacts.concat(autres, dedans).slice(0, 40);
   }
 
   // la fonction dont la parenthese est encore ouverte avant le curseur, et quel argument on ecrit
@@ -1492,7 +1548,7 @@
     if (!ctx) return;
     code.focus();
     code.setSelectionRange(ctx.debut, ctx.pos);
-    const fonction = (p.sorte === "f" || p.sorte === "c") && code.value[ctx.pos] !== "(";
+    const fonction = !ctx.depuis && (p.sorte === "f" || p.sorte === "c") && code.value[ctx.pos] !== "(";   // from x import f : sans ()
     inserer(fonction ? p.nom + "()" : p.nom);
     if (fonction && p.info && p.info.params.length) {
       const q = code.selectionStart - 1;
