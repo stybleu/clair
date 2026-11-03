@@ -1,0 +1,62 @@
+date : 2026-11-03T13:07:54Z
+titre : mise a jour V0.71.6 (appli)
+clair : b710993 feat(studio): Clair Studio en application Android : le Studio 
+processeur : aarch64, coeurs : 4
+android : 16
+clang : clang version 21.1.8
+sdl3 : libSDL3.so
+--- resultat
+V0.71.6 APPLIQUEE, COMPILATION OK
+tests reussis : 279
+tools/studio/studio.cl : OK -> jeton et session, fichiers, c
+ TOUS LES TESTS SONT OK
+ENVOYE SUR GITHUB : b710993 feat(studio): Clair Studio en application Android : 
+Clair Studio : installation des outils Android (une seule fois, quelques minutes)...
+Clair Studio : construction de l'appli...
+Clair Studio : echec : d8 --release --min-api 29 --lib /data/data/com.termux/files/usr/share/java/android.jar --output /
+Error in ~/clair/build/studio-android/travail/classes/clair/studio/Studio$1$1.class:
+java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null
+Compilation failed with an internal error.
+Exception in thread "main" java.lang.RuntimeException: com.android.tools.r8.CompilationFailedException: Compilation failed to complete, origin: ~/clair/build/studio-android/travail/classes/clair/studio/Studio$1$1.class
+Caused by: com.android.tools.r8.CompilationFailedException: Compilation failed to complete, origin: ~/clair/build/studio-android/travail/classes/clair/studio/Studio$1$1.class
+Caused by: java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null
+--- erreurs
+--- compilation
+--- tests
+279
+nbody_relativite.cl : OK -> relativite generale : Mercure tourne de 42.98 secondes d arc par siecle (Einstein), systeme solaire cent ans comme REBOUNDx a 1 km, quantite de mouvement gardee, s.c sauve et relu
+gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre, calcul dans un fil a part (avec MERCURIUS)
+gui_abi.c : OK -> les declarations de SDL3 du module gui sont celles des en-tetes de SDL3
+tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot, sous-dossiers, reglages, ouverture dans l appli Android ou le navigateur
+ TOUS LES TESTS SONT OK
+==================================================
+--- vitesse
+--- appli android
+installee : cmd: Failure calling service package: Failed transaction (2147483646)
+java : openjdk version "21.0.11" 2026-04-21
+aapt2 : Android Asset Packaging Tool (aapt) 2.19
+		at com.android.tools.r8.internal.pj.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:24)
+		at com.android.tools.r8.internal.pj.b(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:2)
+		at com.android.tools.r8.D8.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:22)
+		at com.android.tools.r8.D8.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:17)
+		at com.android.tools.r8.internal.pj.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:85)
+		at com.android.tools.r8.D8.main(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:4)
+	Caused by: java.util.concurrent.ExecutionException: com.android.tools.r8.internal.rj: java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null
+		at java.base/java.util.concurrent.ForkJoinTask.reportExecutionException(ForkJoinTask.java:581)
+		at java.base/java.util.concurrent.ForkJoinTask.get(ForkJoinTask.java:993)
+		at com.android.tools.r8.utils.C.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:56)
+		at com.android.tools.r8.dex.b.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:88)
+		... 10 more
+	Caused by: com.android.tools.r8.internal.rj: java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null
+		at com.android.tools.r8.internal.rj.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:6)
+		at com.android.tools.r8.internal.pj.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:104)
+		at com.android.tools.r8.internal.pj.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:100)
+		at com.android.tools.r8.graph.x2.b(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:2)
+		at com.android.tools.r8.dex.a.a(R8_3.3.20-dev+aosp5_a629c2c3592f558d09a1aa063f8fa13e35ca354216d318a506759ca7374873e0:26)
+		at java.base/java.util.concurrent.ForkJoinTask$AdaptedCallable.exec(ForkJoinTask.java:1456)
+		at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:387)
+		at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1312)
+		at java.base/java.util.concurrent.ForkJoinPool.scan(ForkJoinPool.java:1843)
+		at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:1808)
+		at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:188)
+	Caused by: [CIRCULAR REFERENCE: java.lang.NullPointerException: Cannot invoke "String.length()" because "<parameter1>" is null]
