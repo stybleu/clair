@@ -1,4 +1,4 @@
-# Clair Studio en application Android (V0.71.6) : construit l'APK sur le telephone avec les outils de Termux,
+# Clair Studio en application Android (V0.71.6, V0.71.7) : construit l'APK sur le telephone avec les outils de Termux,
 # puis le propose a l'installation.
 #   sh ~/clair/tools/studio/android/fabriquer.sh               construit si besoin, propose l'installation
 #   sh ~/clair/tools/studio/android/fabriquer.sh --verifier    (studio.sh) rien si la bonne version est installee,
@@ -25,12 +25,13 @@ VERSION="$(sed -n 's/.*android:versionCode="\([0-9]*\)".*/\1/p' "$ICI/AndroidMan
 
 dire() { echo "Clair Studio : $*"; }
 
-# la version de l'appli installee sur le telephone (vide : pas installee)
+# la version de l'appli installee sur le telephone (vide : pas installee). V0.71.7 : l'appli la donne elle-meme
+# (son recepteur Version) ; pm est refuse a Termux sur Android 16. -f 32 : meme une appli jamais ouverte repond.
 installee() {
-    pm list packages --show-versioncode "$PAQUET" 2> /dev/null | sed -n "s/^package:$PAQUET versionCode:\([0-9]*\).*/\1/p" | head -n 1
+    am broadcast -n "$PAQUET/.Version" -f 32 2> /dev/null | sed -n "s/.*data=\"$PAQUET \([0-9]*\)\".*/\1/p" | head -n 1
 }
 
-if [ -z "${PREFIX:-}" ] || ! command -v pm > /dev/null 2>&1; then
+if [ -z "${PREFIX:-}" ] || ! command -v am > /dev/null 2>&1; then
     dire "l'appli Android se construit dans Termux."
     exit 1
 fi
@@ -95,6 +96,13 @@ if [ ! -f "$APK" ] || [ ! -f "$SORTIE/version" ] || [ "$(cat "$SORTIE/version")"
         exit 1
     }
     etape "java" javac -source 8 -target 8 -bootclasspath "$JAR" -Xlint:-options -encoding UTF-8 -d "$T/classes" $(find "$ICI/java" -name '*.java')
+    # V0.71.7 : le d8 de Termux (R8 3.3) plante sur l'attribut MethodParameters que Java 21 met aux classes
+    # anonymes et internes : l'appli n'en a pas, on le verifie avant d8 pour le dire clairement
+    if command -v javap > /dev/null 2>&1 && javap -v $(find "$T/classes" -name '*.class') 2> /dev/null | grep -q MethodParameters; then
+        dire "echec : une classe anonyme ou interne dans java/ (le d8 de Termux ne la lit pas) :"
+        for f in $(find "$T/classes" -name '*.class'); do javap -v "$f" 2> /dev/null | grep -q MethodParameters && echo "  $(basename "$f")"; done
+        exit 1
+    fi
     etape "dex" d8 --release --min-api 29 --lib "$JAR" --output "$T/dex" $(find "$T/classes" -name '*.class')
     etape "ressources" aapt2 compile --dir "$ICI/res" -o "$T/res.zip"
     etape "lien" aapt2 link -I "$FW" --manifest "$ICI/AndroidManifest.xml" -o "$T/brut.apk" "$T/res.zip"

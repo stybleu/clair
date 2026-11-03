@@ -4,8 +4,8 @@
      studio.sh la reconstruit et la propose a l'installation quand le telephone a une version plus ancienne. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="clair.studio"
-    android:versionCode="1"
-    android:versionName="0.71.6">
+    android:versionCode="2"
+    android:versionName="0.71.7">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
 
@@ -37,5 +37,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- V0.71.7 : Termux demande la version installee (am broadcast), pm lui est refuse sur Android 16 -->
+        <receiver
+            android:name=".Version"
+            android:exported="true" />
     </application>
 </manifest>

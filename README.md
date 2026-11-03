@@ -127,6 +127,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
+- [Clair V0.71.7](docs/README_V0.71.7.md) : l'appli Clair Studio se construit sur le téléphone (le `d8` de Termux plantait sur un attribut que Java 21 ajoute aux classes anonymes ; `pm` est refusé sur Android 16, l'appli donne elle-même sa version)
 - [Clair V0.71.6](docs/README_V0.71.6.md) : Clair Studio en application Android, avec son icône : le Studio sans le navigateur (le menu de sélection ne garde que Couper, Copier, Coller, Tout sélectionner), construite et installée par `studio.sh`
 - [Clair V0.71.5](docs/README_V0.71.5.md) : l'autocomplétion de Clair Studio propose les modules après `import` (ceux de Clair et les fichiers du dossier), ce qu'ils contiennent après `from … import`, et les constantes de `phys` et `astro`
 - [Clair V0.71.4](docs/README_V0.71.4.md) : Clair Studio recherche et remplace, comme VS Code (🔍, Ctrl+F, Ctrl+H ; majuscules, mot entier, expressions régulières avec $1 ; Tout se défait en une fois)

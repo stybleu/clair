@@ -34,7 +34,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /*
- * Clair Studio en application (V0.71.6).
+ * Clair Studio en application (V0.71.6, V0.71.7).
  *
  * Le Studio reste le meme : un petit serveur web ecrit en Clair, lance dans Termux (tools/studio/studio.sh).
  * L'appli l'affiche dans une WebView, sans ce que Chrome ajoute : barre d'adresse, tirer pour recharger,
@@ -46,6 +46,10 @@ import java.net.URL;
  *  - touchee depuis son icone, l'appli demande a Termux (permission RUN_COMMAND, une fois) de lancer le
  *    Studio s'il ne tourne pas, puis de lire sa cle (tools/studio/data/jeton).
  * L'adresse est gardee pour les fois suivantes.
+ *
+ * V0.71.7 : aucune classe anonyme ni interne (non statique). Java 21 leur ajoute un attribut MethodParameters
+ * sans noms, que le d8 de Termux (R8 3.3) ne sait pas lire. Les classes du bas sont statiques, et les suites
+ * d'une sonde passent par des numeros d'etape.
  */
 public class Studio extends Activity {
     static final String TERMUX = "com.termux";
@@ -57,6 +61,16 @@ public class Studio extends Activity {
     static final int FLAG_MUTABLE = 0x02000000;            // PendingIntent.FLAG_MUTABLE (Android 12)
     static final int REESSAYER = 1, REGLAGES = 2;          // les boutons des pages d'attente
 
+    // ce qu'il faut faire quand une sonde revient
+    static final int E_CONNECTER = 1, E_ATTENTE = 2;
+    // ce qu'il faut faire quand une attente finit
+    static final int S_AVANT_LANCER = 1, S_APRES_LANCER = 2;
+    // ce qui demande Termux (et peut attendre la permission)
+    static final int A_LANCER = 1, A_JETON = 2;
+    // les taches remises a plus tard sur le fil de l'interface
+    static final int T_DEMARRER = 1, T_RECONNECTER = 2, T_REGLAGES = 3, T_BARRES_CLAIRES = 4, T_BARRES_SOMBRES = 5,
+            T_SONDER_ENCORE = 6, T_DELAI_JETON = 7;
+
     Vue vue;
     SharedPreferences prefs;
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -65,7 +79,12 @@ public class Studio extends Activity {
     boolean occupe = false;       // une tentative est en cours
     boolean parti = false;        // l'appli a ete quittee (Termux, l'accueil...) depuis la derniere erreur
     boolean attendJeton = false;
-    Runnable apresPermission;
+    int apresPermission = 0;
+    boolean dejaLance = false;    // connecter : le Studio a deja ete lance (ou attendu)
+    boolean cleLue = false;       // connecter : la cle vient d'etre lue dans Termux
+    String attCible;              // l'attente en cours : l'adresse sondee, le debut, la fin, la suite
+    long attDebut, attFin;
+    int attSuite;
 
     @Override
     protected void onCreate(Bundle etat) {
@@ -84,8 +103,8 @@ public class Studio extends Activity {
         s.setDisabledActionModeMenuItems(WebSettings.MENU_ITEM_SHARE | WebSettings.MENU_ITEM_WEB_SEARCH
                 | WebSettings.MENU_ITEM_PROCESS_TEXT);
         vue.setTextClassifier(TextClassifier.NO_OP);       // ni Appeler, ni Itineraire sur un texte choisi
-        vue.addJavascriptInterface(new Pont(), "ClairAndroid");
-        vue.setWebViewClient(new Client());
+        vue.addJavascriptInterface(new Pont(this), "ClairAndroid");
+        vue.setWebViewClient(new Client(this));
         vue.setWebChromeClient(new WebChromeClient());    // alert, confirm et prompt du Studio
         CookieManager.getInstance().setAcceptCookie(true);
         if (!ouvrirAdresse(getIntent())) demarrer();
@@ -174,10 +193,6 @@ public class Studio extends Activity {
 
     // ---- trouver le Studio, le lancer si besoin ----
 
-    interface Suite {
-        void apres(int code);
-    }
-
     // le code HTTP de l'adresse (sans suivre de redirection), -1 sans serveur
     static int code(String cible) {
         HttpURLConnection c = null;
@@ -195,42 +210,15 @@ public class Studio extends Activity {
         }
     }
 
-    void sonder(final String cible, final Suite suite) {
-        final int n = essai;
-        new Thread() {
-            @Override
-            public void run() {
-                final int c = code(cible);
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (n == essai) suite.apres(c);
-                    }
-                });
-            }
-        }.start();
+    // sonde l'adresse sur un autre fil ; la reponse revient a retour(), avec l'etape
+    void sonder(String cible, int etape) {
+        new Sonde(this, cible, essai, etape).start();
     }
 
-    // sonde toutes les 0,7 s jusqu'a ce que le serveur reponde, ou jusqu'a fin (-1)
-    void attendre(final String cible, final long debut, final long fin, final Suite suite) {
-        sonder(cible, new Suite() {
-            @Override
-            public void apres(int c) {
-                long t = System.currentTimeMillis();
-                if (c > 0 || t > fin) {
-                    suite.apres(c);
-                    return;
-                }
-                compteur((t - debut) / 1000);
-                final int n = essai;
-                ui.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (n == essai) attendre(cible, debut, fin, suite);
-                    }
-                }, 700);
-            }
-        });
+    void retour(int n, int etape, int c) {
+        if (n != essai) return;              // une tentative plus recente a pris la main
+        if (etape == E_CONNECTER) apresConnexion(c);
+        else if (etape == E_ATTENTE) apresAttente(c);
     }
 
     void demarrer() {
@@ -242,33 +230,69 @@ public class Studio extends Activity {
     }
 
     // lance : le Studio a deja ete lance par l'appli ; cle : la cle vient d'etre lue dans Termux
-    void connecter(final boolean lance, final boolean cle) {
-        final String a = adresse();
-        sonder(a != null ? a : base(), new Suite() {
-            @Override
-            public void apres(int c) {
-                if (c >= 200 && c < 400 && a != null) {
-                    charger(a);
-                } else if (c > 0) {
-                    // le Studio tourne, mais l'appli n'a pas (ou plus) sa cle
-                    if (cle) erreur("La clé du Studio ne marche pas",
-                            "Lance le Studio depuis Termux : <code>sh ~/clair/tools/studio/studio.sh</code>. Il ouvrira l'appli avec la bonne adresse.", REESSAYER);
-                    else jeton();
-                } else if (!lance) {
-                    // studio.sh le demarre peut-etre deja : quelques secondes avant de le lancer nous-memes
-                    long t = System.currentTimeMillis();
-                    attendre(base(), t, t + 4000, new Suite() {
-                        @Override
-                        public void apres(int c2) {
-                            if (c2 > 0) connecter(true, cle);
-                            else lancer();
-                        }
-                    });
-                } else {
-                    erreur("Le Studio ne répond pas", "Regarde la session « Clair Studio » dans Termux.", REESSAYER);
-                }
+    void connecter(boolean lance, boolean cle) {
+        dejaLance = lance;
+        cleLue = cle;
+        String a = adresse();
+        sonder(a != null ? a : base(), E_CONNECTER);
+    }
+
+    void apresConnexion(int c) {
+        String a = adresse();
+        if (c >= 200 && c < 400 && a != null) {
+            charger(a);
+        } else if (c > 0) {
+            // le Studio tourne, mais l'appli n'a pas (ou plus) sa cle
+            if (cleLue) erreur("La clé du Studio ne marche pas",
+                    "Lance le Studio depuis Termux : <code>sh ~/clair/tools/studio/studio.sh</code>. Il ouvrira l'appli avec la bonne adresse.", REESSAYER);
+            else avecTermux(A_JETON);
+        } else if (!dejaLance) {
+            // studio.sh le demarre peut-etre deja : quelques secondes avant de le lancer nous-memes
+            attendre(base(), 4000, S_AVANT_LANCER);
+        } else {
+            erreur("Le Studio ne répond pas", "Regarde la session « Clair Studio » dans Termux.", REESSAYER);
+        }
+    }
+
+    // sonde toutes les 0,7 s jusqu'a ce que le serveur reponde, ou pendant duree ms
+    void attendre(String cible, long duree, int suite) {
+        attCible = cible;
+        attDebut = System.currentTimeMillis();
+        attFin = attDebut + duree;
+        attSuite = suite;
+        sonder(cible, E_ATTENTE);
+    }
+
+    void apresAttente(int c) {
+        long t = System.currentTimeMillis();
+        if (c > 0 || t > attFin) {
+            if (attSuite == S_AVANT_LANCER) {
+                if (c > 0) connecter(true, cleLue);
+                else avecTermux(A_LANCER);
+            } else {
+                if (c > 0) connecter(true, false);
+                else erreur("Termux n'a pas démarré le Studio",
+                        "Regarde la session « Clair Studio » dans Termux, ou lance le Studio toi-même : <code>sh ~/clair/tools/studio/studio.sh</code>", REESSAYER);
             }
-        });
+            return;
+        }
+        compteur((t - attDebut) / 1000);
+        ui.postDelayed(new Tache(this, T_SONDER_ENCORE, essai), 700);
+    }
+
+    void tache(int quoi, int n) {
+        if (quoi == T_DEMARRER) demarrer();
+        else if (quoi == T_RECONNECTER) {
+            if (!occupe) demarrer();
+        } else if (quoi == T_REGLAGES) ouvrirReglages();
+        else if (quoi == T_BARRES_CLAIRES) barres(false);
+        else if (quoi == T_BARRES_SOMBRES) barres(true);
+        else if (quoi == T_SONDER_ENCORE) {
+            if (n == essai) sonder(attCible, E_ATTENTE);
+        } else if (quoi == T_DELAI_JETON) {
+            if (n == essai && attendJeton) erreur("Termux n'a pas répondu",
+                    "Dans Termux, <code>~/.termux/termux.properties</code> doit contenir <code>allow-external-apps = true</code>. Sinon, lance le Studio depuis Termux : <code>sh ~/clair/tools/studio/studio.sh</code>", REESSAYER);
+        }
     }
 
     Intent commande(String script, boolean fond, String nom) {
@@ -296,50 +320,56 @@ public class Studio extends Activity {
         }
     }
 
+    void avecTermux(int action) {
+        try {
+            getPackageManager().getPackageInfo(TERMUX, 0);
+        } catch (PackageManager.NameNotFoundException e) {
+            erreur("Termux n'est pas installé", "Clair Studio se lance dans Termux, où Clair est installé.", 0);
+            return;
+        }
+        if (checkSelfPermission(PERMISSION) == PackageManager.PERMISSION_GRANTED) {
+            faire(action);
+            return;
+        }
+        apresPermission = action;
+        page("Clair Studio", "Autorise Clair Studio à lancer le Studio dans Termux.", 0);
+        requestPermissions(new String[] { PERMISSION }, DEMANDE_PERMISSION);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int demande, String[] p, int[] g) {
+        if (demande != DEMANDE_PERMISSION) return;
+        int a = apresPermission;
+        apresPermission = 0;
+        if (g.length > 0 && g[0] == PackageManager.PERMISSION_GRANTED && a != 0) faire(a);
+        else erreur("Sans autorisation",
+                "Clair Studio ne peut pas lancer le Studio lui-même. Lance-le depuis Termux : <code>sh ~/clair/tools/studio/studio.sh</code>. Il s'ouvrira ici.", REESSAYER | REGLAGES);
+    }
+
+    void faire(int action) {
+        if (action == A_LANCER) lancer();
+        else if (action == A_JETON) jeton();
+    }
+
     // le Studio, dans une nouvelle session de Termux (Termux reste derriere l'appli)
     void lancer() {
-        avecTermux(new Runnable() {
-            @Override
-            public void run() {
-                Intent i = commande("CLAIR_STUDIO_OUVRIR=0 exec sh \"$HOME/clair/tools/studio/studio.sh\" \"\" " + port(), false, "Clair Studio");
-                i.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "2");
-                i.putExtra("com.termux.RUN_COMMAND_SHELL_NAME", "Clair Studio");
-                i.putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", resultat(RESULTAT_LANCEMENT));
-                if (!envoyer(i)) return;
-                page("Clair Studio", "Démarrage du Studio dans Termux… <span id=\"n\"></span>", 0);
-                long t = System.currentTimeMillis();
-                attendre(base(), t, t + 240000, new Suite() {
-                    @Override
-                    public void apres(int c) {
-                        if (c > 0) connecter(true, false);
-                        else erreur("Termux n'a pas démarré le Studio",
-                                "Regarde la session « Clair Studio » dans Termux, ou lance le Studio toi-même : <code>sh ~/clair/tools/studio/studio.sh</code>", REESSAYER);
-                    }
-                });
-            }
-        });
+        Intent i = commande("CLAIR_STUDIO_OUVRIR=0 exec sh \"$HOME/clair/tools/studio/studio.sh\" \"\" " + port(), false, "Clair Studio");
+        i.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "2");
+        i.putExtra("com.termux.RUN_COMMAND_SHELL_NAME", "Clair Studio");
+        i.putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", resultat(RESULTAT_LANCEMENT));
+        if (!envoyer(i)) return;
+        page("Clair Studio", "Démarrage du Studio dans Termux… <span id=\"n\"></span>", 0);
+        attendre(base(), 240000, S_APRES_LANCER);
     }
 
     // la cle du Studio, lue dans Termux
     void jeton() {
-        avecTermux(new Runnable() {
-            @Override
-            public void run() {
-                Intent i = commande("cat \"$HOME/clair/tools/studio/data/jeton\"", true, "Clair Studio : la clé");
-                i.putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", resultat(RESULTAT_JETON));
-                if (!envoyer(i)) return;
-                attendJeton = true;
-                page("Clair Studio", "Lecture de la clé du Studio…", 0);
-                final int n = essai;
-                ui.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (n == essai && attendJeton) erreur("Termux n'a pas répondu",
-                                "Dans Termux, <code>~/.termux/termux.properties</code> doit contenir <code>allow-external-apps = true</code>. Sinon, lance le Studio depuis Termux : <code>sh ~/clair/tools/studio/studio.sh</code>", REESSAYER);
-                    }
-                }, 20000);
-            }
-        });
+        Intent i = commande("cat \"$HOME/clair/tools/studio/data/jeton\"", true, "Clair Studio : la clé");
+        i.putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", resultat(RESULTAT_JETON));
+        if (!envoyer(i)) return;
+        attendJeton = true;
+        page("Clair Studio", "Lecture de la clé du Studio…", 0);
+        ui.postDelayed(new Tache(this, T_DELAI_JETON, essai), 20000);
     }
 
     @Override
@@ -369,30 +399,12 @@ public class Studio extends Activity {
         }
     }
 
-    void avecTermux(Runnable r) {
+    void ouvrirReglages() {
         try {
-            getPackageManager().getPackageInfo(TERMUX, 0);
-        } catch (PackageManager.NameNotFoundException e) {
-            erreur("Termux n'est pas installé", "Clair Studio se lance dans Termux, où Clair est installé.", 0);
-            return;
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
+        } catch (RuntimeException e) {
+            // pas de page de reglages
         }
-        if (checkSelfPermission(PERMISSION) == PackageManager.PERMISSION_GRANTED) {
-            r.run();
-            return;
-        }
-        apresPermission = r;
-        page("Clair Studio", "Autorise Clair Studio à lancer le Studio dans Termux.", 0);
-        requestPermissions(new String[] { PERMISSION }, DEMANDE_PERMISSION);
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int demande, String[] p, int[] g) {
-        if (demande != DEMANDE_PERMISSION) return;
-        Runnable r = apresPermission;
-        apresPermission = null;
-        if (g.length > 0 && g[0] == PackageManager.PERMISSION_GRANTED && r != null) r.run();
-        else erreur("Sans autorisation",
-                "Clair Studio ne peut pas lancer le Studio lui-même. Lance-le depuis Termux : <code>sh ~/clair/tools/studio/studio.sh</code>. Il s'ouvrira ici.", REESSAYER | REGLAGES);
     }
 
     // ---- les pages d'attente ----
@@ -463,37 +475,106 @@ public class Studio extends Activity {
         return true;
     }
 
-    final class Client extends WebViewClient {
+    void pageEnPanne(WebResourceRequest r) {
+        if (r.isForMainFrame() && local(r.getUrl()) && !attente)
+            erreur("Le Studio ne répond plus", "Il a peut-être été arrêté dans Termux.", REESSAYER);
+    }
+
+    // ---- les classes d'aide : toutes statiques (voir plus haut, V0.71.7) ----
+
+    // une sonde, sur son propre fil (pas de reseau sur le fil de l'interface)
+    static final class Sonde extends Thread {
+        final Studio s;
+        final String cible;
+        final int n, etape;
+
+        Sonde(Studio s, String cible, int n, int etape) {
+            this.s = s;
+            this.cible = cible;
+            this.n = n;
+            this.etape = etape;
+        }
+
+        @Override
+        public void run() {
+            s.ui.post(new Retour(s, n, etape, code(cible)));
+        }
+    }
+
+    static final class Retour implements Runnable {
+        final Studio s;
+        final int n, etape, c;
+
+        Retour(Studio s, int n, int etape, int c) {
+            this.s = s;
+            this.n = n;
+            this.etape = etape;
+            this.c = c;
+        }
+
+        @Override
+        public void run() {
+            s.retour(n, etape, c);
+        }
+    }
+
+    static final class Tache implements Runnable {
+        final Studio s;
+        final int quoi, n;
+
+        Tache(Studio s, int quoi, int n) {
+            this.s = s;
+            this.quoi = quoi;
+            this.n = n;
+        }
+
+        @Override
+        public void run() {
+            s.tache(quoi, n);
+        }
+    }
+
+    static final class Client extends WebViewClient {
+        final Studio s;
+
+        Client(Studio s) {
+            this.s = s;
+        }
+
         @Override
         public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
-            return dehors(r.getUrl());
+            return s.dehors(r.getUrl());
         }
 
         @Override
         @SuppressWarnings("deprecation")
         public boolean shouldOverrideUrlLoading(WebView v, String url) {
-            return dehors(Uri.parse(url));
+            return s.dehors(Uri.parse(url));
         }
 
         @Override
         public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-            if (r.isForMainFrame() && local(r.getUrl()) && !attente)
-                erreur("Le Studio ne répond plus", "Il a peut-être été arrêté dans Termux.", REESSAYER);
+            s.pageEnPanne(r);
         }
 
         @Override
         public boolean onRenderProcessGone(WebView v, RenderProcessGoneDetail d) {
-            recreate();          // le moteur de la page s'est arrete : l'appli repart, sans s'arreter elle-meme
+            s.recreate();        // le moteur de la page s'est arrete : l'appli repart, sans s'arreter elle-meme
             return true;
         }
     }
 
-    // ---- ce que la page du Studio peut demander a Android (window.ClairAndroid) ----
+    // ce que la page du Studio peut demander a Android (window.ClairAndroid)
+    static final class Pont {
+        final Studio s;
 
-    final class Pont {
+        Pont(Studio s) {
+            this.s = s;
+        }
+
         @JavascriptInterface
         public boolean copier(String texte) {
-            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipboardManager cm = (ClipboardManager) s.getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm == null) return false;
             cm.setPrimaryClip(ClipData.newPlainText("Clair", texte == null ? "" : texte));
             return true;
@@ -501,61 +582,37 @@ public class Studio extends Activity {
 
         @JavascriptInterface
         public String coller() {
-            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipboardManager cm = (ClipboardManager) s.getSystemService(Context.CLIPBOARD_SERVICE);
             ClipData c = cm == null ? null : cm.getPrimaryClip();
             if (c == null || c.getItemCount() == 0) return "";
-            CharSequence t = c.getItemAt(0).coerceToText(Studio.this);
+            CharSequence t = c.getItemAt(0).coerceToText(s);
             return t == null ? "" : t.toString();
         }
 
         @JavascriptInterface
-        public void barres(final boolean sombre) {
-            ui.post(new Runnable() {
-                @Override
-                public void run() {
-                    Studio.this.barres(sombre);
-                }
-            });
+        public void barres(boolean sombre) {
+            s.ui.post(new Tache(s, sombre ? T_BARRES_SOMBRES : T_BARRES_CLAIRES, 0));
         }
 
         // la page a recu 403 : la session ou la cle ne vaut plus, on la redemande
         @JavascriptInterface
         public void reconnecter() {
-            ui.post(new Runnable() {
-                @Override
-                public void run() {
-                    if (!occupe) demarrer();
-                }
-            });
+            s.ui.post(new Tache(s, T_RECONNECTER, 0));
         }
 
         @JavascriptInterface
         public void reessayer() {
-            ui.post(new Runnable() {
-                @Override
-                public void run() {
-                    demarrer();
-                }
-            });
+            s.ui.post(new Tache(s, T_DEMARRER, 0));
         }
 
         @JavascriptInterface
         public void reglages() {
-            ui.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
-                    } catch (RuntimeException e) {
-                        // pas de page de reglages
-                    }
-                }
-            });
+            s.ui.post(new Tache(s, T_REGLAGES, 0));
         }
 
         @JavascriptInterface
         public int version() {
-            return 1;
+            return 2;
         }
     }
 
