@@ -30,7 +30,42 @@ dire() { echo "Clair Studio : $*"; }
 # la version de l'appli installee sur le telephone (vide : pas installee). V0.71.7 : l'appli la donne elle-meme
 # (son recepteur Version) ; pm est refuse a Termux sur Android 16. -f 32 : meme une appli jamais ouverte repond.
 installee() {
-    am broadcast -n "$PAQUET/.Version" -f 32 2> /dev/null | sed -n "s/.*data=\"$PAQUET \([0-9]*\)\".*/\1/p" | head -n 1
+    # Detection non bloquante : Android peut refuser
+    # les commandes de gestion des paquets a Termux.
+    v="$(cmd package list packages --show-versioncode "$PAQUET" 2>/dev/null || true)"
+    n="$(printf '%s\n' "$v" | sed -n "s/^package:$PAQUET versionCode:\([0-9][0-9]*\).*$/\1/p" | head -n 1)"
+
+    if [ -n "$n" ]; then
+        printf '%s\n' "$n"
+        return 0
+    fi
+
+    am broadcast -n "$PAQUET/.Version" -f 32 2>/dev/null |
+        sed -n "s/.*data=\"$PAQUET \([0-9]*\)\".*/\1/p" |
+        head -n 1
+}
+
+
+# Lance l'application apres son installation.
+# Ne pas lancer pendant --verifier (utilise par studio.sh).
+lancer() {
+    [ "$MODE" = "--verifier" ] && return 0
+
+    dire "demarrage automatique de Clair Studio..."
+
+    resultat="$(am start -n "$PAQUET/.Studio" 2>&1)"
+    code=$?
+
+    printf '%s\n' "$resultat" >> "$LOG"
+
+    if [ "$code" -ne 0 ] || printf '%s\n' "$resultat" | grep -Eiq 'Error:|SecurityException|Permission Denial'; then
+        dire "ECHEC DU DEMARRAGE"
+        printf '%s\n' "$resultat"
+        return 1
+    fi
+
+    dire "demande de lancement envoyee."
+    return 0
 }
 
 if [ -z "${PREFIX:-}" ] || ! command -v am > /dev/null 2>&1; then
@@ -131,20 +166,53 @@ if [ ! -f "$APK" ] || [ ! -f "$SORTIE/version" ] || [ "$(cat "$SORTIE/version")"
     rm -rf "$T"
 fi
 [ "$MODE" = "--construire" ] && { dire "appli construite : $APK"; exit 0; }
-[ "$(installee)" = "$VERSION" ] && { dire "appli installee (version $VERSION)."; exit 0; }
+[ "$(installee)" = "$VERSION" ] && { dire "appli installee (version $VERSION)."; lancer; exit $?; }
 
-# l'installation : Android la fait confirmer
-dire "touche « Installer » sur l'ecran d'Android, puis reviens ici."
-termux-open --content-type application/vnd.android.package-archive "$APK" > /dev/null 2>&1
-n=0
-while [ "$n" -lt 90 ]; do
-    sleep 2
-    [ "$(installee)" = "$VERSION" ] && { dire "appli installee (version $VERSION)."; exit 0; }
-    n=$((n + 1))
-done
-if [ -n "$(installee)" ]; then
-    dire "la mise a jour de l'appli n'est pas faite. Si Android la refuse, desinstalle l'ancienne appli Clair Studio, puis : sh $ICI/fabriquer.sh"
-else
-    dire "appli pas installee. Pour la proposer de nouveau : sh $ICI/fabriquer.sh"
+# Installation Android et demarrage de Clair Studio.
+# --verifier ne doit jamais bloquer le lancement du serveur.
+if [ "$MODE" = "--verifier" ]; then
+    dire "installation non confirmee par Android."
+    exit 1
 fi
-exit 1
+
+# L'APK est copie dans les telechargements Android.
+if [ ! -d "$HOME/storage/downloads" ]; then
+    termux-setup-storage || exit 1
+fi
+
+DEST="$HOME/storage/downloads/clair-studio.apk"
+
+if [ ! -d "$HOME/storage/downloads" ]; then
+    dire "autorise l'acces au stockage puis relance."
+    exit 1
+fi
+
+cp -f "$APK" "$DEST" || {
+    dire "echec de copie de l'APK."
+    exit 1
+}
+
+dire "APK prepare : $DEST"
+echo ""
+echo "===== INSTALLATION ANDROID ====="
+echo "Ouvre Mes fichiers > Telechargements."
+echo "Touche clair-studio.apk, puis Installer."
+echo ""
+printf "Une fois l'installation terminee, reviens ici et appuie sur Entree : "
+IFS= read -r confirmation || exit 1
+
+echo ""
+dire "demarrage de Clair Studio..."
+
+resultat="$(am start -n clair.studio/.Studio 2>&1)"
+code=$?
+
+printf '%s\n' "$resultat"
+
+if [ "$code" -ne 0 ] || printf '%s\n' "$resultat" | grep -Eiq 'Error:|Error type|SecurityException|Permission Denial'; then
+    dire "ECHEC : installation ou ouverture impossible."
+    exit 1
+fi
+
+dire "DEMANDE_DE_DEMARRAGE=OK"
+exit 0

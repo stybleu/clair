@@ -53,3 +53,25 @@ Toute la construction passe ensuite par `fabriquer.sh` :
 - `aapt2 dump badging` lit `clair.studio` en version 2 ;
 - `apksigner verify` accepte la signature ;
 - `zipalign -c` vérifie l'alignement.
+
+
+## Android 16 : ouverture de Clair Studio
+
+Sur certains appareils Android 16, Termux ne peut
+pas obtenir la version de l'application installee
+par les commandes `cmd package` ou `am broadcast`.
+
+`studio.sh` privilegie donc l'ouverture de
+l'application Android sans bloquer sur cette
+verification.
+
+Si l'application est absente, le navigateur reste
+une solution de repli.
+
+La construction, l'installation et le demarrage
+sont geres par `fabriquer.sh`. En cas de refus
+d'installation automatique, l'APK peut etre
+installe depuis les telechargements Android.
+
+La detection automatique des nouvelles versions
+installees n'est pas garantie sur Android 16.

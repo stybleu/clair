@@ -56,9 +56,12 @@ fi
 # (les outils s'installent la premiere fois) et proposee a l'installation quand le telephone n'a pas la
 # version de ces sources. CLAIR_STUDIO_APP=0 : le navigateur, comme avant. Lance par l'appli elle-meme
 # (CLAIR_STUDIO_OUVRIR=0), le Studio ne verifie rien.
-if [ "${CLAIR_STUDIO_OUVRIR:-1}" = 1 ] && [ "${CLAIR_STUDIO_APP:-1}" = 1 ] && command -v termux-open > /dev/null 2>&1; then
-    if sh "$ICI/android/fabriquer.sh" --verifier; then
-        export CLAIR_STUDIO_APPLI=1
-    fi
+# Android : ouvrir l'application sans dependre
+# de la detection de version par le systeme.
+if [ "${CLAIR_STUDIO_OUVRIR:-1}" = 1 ] &&
+   [ "${CLAIR_STUDIO_APP:-1}" = 1 ] &&
+   command -v am >/dev/null 2>&1; then
+    export CLAIR_STUDIO_APPLI=1
 fi
+
 exec "$RACINE/build/studio" "$DOSSIER" "${2:-8090}"
