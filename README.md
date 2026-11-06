@@ -204,12 +204,3 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 Clair dispose de diagnostics enrichis.
 
 [Diagnostics V1.9](docs/DIAGNOSTICS_V1.9.md)
-
-## Laboratoire Android : compilation C native (TinyCC V5.5)
-
-Preuve de concept validée sur Android ARM64 :
-compilation et exécution C à la demande dans une APK,
-sans Termux à l'exécution. Ce laboratoire est séparé
-de Clair Studio et ne contient pas LLVM.
-
-[Documentation technique du laboratoire](docs/LABO_ANDROID_TINYCC_V5.5.md).
