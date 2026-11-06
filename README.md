@@ -213,12 +213,3 @@ sans Termux à l'exécution. Ce laboratoire est séparé
 de Clair Studio et ne contient pas LLVM.
 
 [Documentation technique du laboratoire](docs/LABO_ANDROID_TINYCC_V5.5.md).
-
-## Laboratoire Android Clair V6.3
-
-Première validation de la compilation et de
-l'exécution de programmes `.cl` directement
-dans une APK Android ARM64, avec le frontend
-officiel Clair et le backend expérimental TinyCC.
-
-[Documentation du laboratoire V6.3](docs/LABO_ANDROID_CLAIR_V6.3.md).
