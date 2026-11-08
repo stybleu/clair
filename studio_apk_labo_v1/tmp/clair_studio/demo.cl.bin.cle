@@ -1,0 +1,84 @@
+|1793731476|2049112
+classes_v3.cl|208
+Class Compteur {
+    valeur: int
+
+    def doubler() -> int {
+        return self.valeur * 2
+    }
+}
+
+def main() -> int {
+    let compteur: Compteur = Compteur(21)
+    print(compteur.doubler())
+    return 0
+}
+classes_v4.cl|294
+Class Moteur {
+    puissance: int
+
+    def doubler() -> int {
+        return self.puissance * 2
+    }
+}
+
+Class Machine {
+    moteur: Moteur
+}
+
+def main() -> int {
+    let moteur: Moteur = Moteur(21)
+    let machine: Machine = Machine(moteur)
+
+    print(machine.moteur.doubler())
+    return 0
+}
+demo.cl|211
+
+Class Compteur {
+    valeur: int
+
+    def doubler() -> int {
+        return self.valeur * 2
+    }
+}
+
+def main() -> int {
+    let compteur: Compteur = Compteur(21)
+
+    print(compteur.doubler())
+
+    return 0
+}
+portee_invalide_v2.cl|197
+def premiere() -> int {
+    let variable_locale: int = 42
+    return variable_locale
+}
+
+def seconde() -> int {
+    print(variable_locale)
+    return 0
+}
+
+def main() -> int {
+    return seconde()
+}
+portees_v2.cl|326
+def calculer(nombre: int) -> int {
+    let resultat: int = nombre + 1
+
+    if true {
+        let temporaire: int = resultat
+        resultat = temporaire
+    }
+
+    // Le commentaire ne declare aucune variable.
+    return resultat
+}
+
+def main() -> int {
+    let resultat: int = calculer(41)
+    print(resultat)
+    return 0
+}

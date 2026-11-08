@@ -1,0 +1,357 @@
+/* Clair Studio (V0.58 a V0.64.1) */
+:root {
+  --fond: #ffffff; --fond2: #f3f4f6; --bord: #d9dce1; --texte: #1d2129; --discret: #6b7280;
+  --accent: #2563eb; --vert: #15803d; --rouge: #b91c1c; --erreur-fond: #fde8e8;
+  --mot: #7c3aed; --type: #0f766e; --chaine: #b45309; --nombre: #1d4ed8; --comm: #6b7280; --fonc: #be185d;
+  --code: ui-monospace, "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --taille: 14px; --ligne: 21px;      /* V0.62 : reglables */
+  color-scheme: light dark;
+}
+/* V0.62 : le theme suit le telephone (auto), ou il est choisi : data-theme="clair" ou "sombre" */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="clair"]) {
+    --fond: #16181d; --fond2: #1f2229; --bord: #30343c; --texte: #e6e8ec; --discret: #8b919c;
+    --accent: #60a5fa; --vert: #4ade80; --rouge: #f87171; --erreur-fond: #4a1d1d;
+    --mot: #c4a7ff; --type: #5eead4; --chaine: #fbbf24; --nombre: #93c5fd; --comm: #7d8590; --fonc: #f9a8d4;
+  }
+}
+:root[data-theme="sombre"] {
+    --fond: #16181d; --fond2: #1f2229; --bord: #30343c; --texte: #e6e8ec; --discret: #8b919c;
+    --accent: #60a5fa; --vert: #4ade80; --rouge: #f87171; --erreur-fond: #4a1d1d;
+    --mot: #c4a7ff; --type: #5eead4; --chaine: #fbbf24; --nombre: #93c5fd; --comm: #7d8590; --fonc: #f9a8d4;
+  color-scheme: dark;
+}
+:root[data-theme="clair"] { color-scheme: light; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--fond); color: var(--texte); font-family: system-ui, sans-serif; }
+#app { display: flex; flex-direction: column; height: 100dvh; }
+/* V0.64.1 : la barre des touches et l'aide restent juste au-dessus du clavier. Si le navigateur pose le clavier
+   par-dessus la page au lieu de la rapetisser, studio.js met la page a la taille de ce qui se voit. */
+#app.ajuste { position: fixed; top: 0; left: 0; right: 0; height: var(--visible); transform: translateY(var(--decalage)); }
+/* clavier ouvert : dans le code, la console se cache (elle revient quand le clavier se ferme) ;
+   dans l'entree d'un programme, c'est l'editeur, l'aide et les touches qui laissent la place a la console */
+#app.clavier.dans-code .console { display: none; }
+#app.clavier.dans-entree .editeur, #app.clavier.dans-entree .aide, #app.clavier.dans-entree .touches,
+#app.clavier.dans-entree .diag { display: none; }
+#app.clavier.dans-entree .console { flex: 1; max-height: none; min-height: 0; }
+button { font: inherit; color: inherit; background: var(--fond2); border: 1px solid var(--bord); border-radius: 8px;
+         min-height: 40px; padding: 0 12px; cursor: pointer; touch-action: manipulation; }
+button:active { filter: brightness(0.9); }
+[hidden] { display: none !important; }
+.discret { color: var(--discret); font-size: 12px; }
+
+.barre { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--bord); }
+.barre .titre { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+#nom-fichier { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icone { width: 40px; padding: 0; }
+.texte { font-family: var(--code); font-weight: 700; }
+.lancer { background: var(--vert); color: #fff; border-color: transparent; width: 56px; font-size: 18px; }
+.arreter { color: var(--rouge); }
+
+.editeur { flex: 1; display: flex; min-height: 0; position: relative; font-family: var(--code); font-size: var(--taille); }
+.marge { width: 44px; overflow: hidden; background: var(--fond2); border-right: 1px solid var(--bord); color: var(--discret);
+         text-align: right; flex: none; }
+#numeros { padding: 8px 0; line-height: var(--ligne); will-change: transform; }
+#numeros .nl { display: block; height: var(--ligne); padding-right: 6px; }
+#numeros .ga { box-shadow: inset -3px 0 0 var(--vert); }
+#numeros .gm { box-shadow: inset -3px 0 0 var(--accent); }
+#numeros .gd { box-shadow: inset 0 2px 0 var(--rouge); }
+#numeros .err { color: var(--rouge); font-weight: 700; }
+.zone { position: relative; flex: 1; min-width: 0; }
+.zone pre, .zone textarea { position: absolute; inset: 0; margin: 0; padding: 8px 10px; border: 0; font: inherit;
+         line-height: var(--ligne); white-space: pre; tab-size: 4; overflow: auto; }
+.zone pre { pointer-events: none; color: var(--texte); }
+.zone textarea { background: transparent; color: transparent; caret-color: var(--texte); resize: none; outline: none; }
+.zone textarea::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); color: transparent; }
+.couleurs .l { display: block; min-height: var(--ligne); }
+.couleurs .l.err { background: var(--erreur-fond); }
+.couleurs .l.verif { text-decoration: underline wavy var(--rouge); text-decoration-skip-ink: none; text-underline-offset: 4px; }
+.couleurs .largeur { display: block; height: 0; }
+/* V0.71.4 : rechercher et remplacer */
+.chercher { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--bord);
+            background: var(--fond2); }
+.ch-ligne { display: flex; align-items: center; gap: 4px; }
+.ch-ligne input { flex: 1; min-width: 0; min-height: 34px; padding: 0 8px; font: var(--taille) var(--code); color: var(--texte);
+                  background: var(--fond); border: 1px solid var(--bord); border-radius: 8px; }
+.ch-ligne input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: -1px; }
+.ch-ligne input.invalide { border-color: var(--rouge); outline-color: var(--rouge); }
+#ch-compte { min-width: 56px; text-align: center; white-space: nowrap; }
+.chercher .petit { min-height: 34px; width: 34px; }
+.chercher .option { min-height: 30px; padding: 0 10px; font-family: var(--code); font-size: 13px; }
+.chercher .option[aria-pressed="true"] { color: var(--accent); border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 18%, var(--fond2)); }
+.couleurs mark.trouve { color: inherit; background: color-mix(in srgb, #f59e0b 32%, transparent); border-radius: 2px; }
+.couleurs mark.trouve.actuel { color: #1a1a1a; background: #fbbf24; box-shadow: 0 0 0 1px #d97706; }   /* lisible dans les deux themes */
+/* V0.71.3 : le texte selectionne, surligne partout ou il revient (comme VS Code) */
+.couleurs mark.meme { color: inherit; background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 2px;
+         box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.couleurs .vide { display: block; }
+#numeros .verif { color: var(--rouge); }
+.k { color: var(--mot); font-weight: 600; } .t { color: var(--type); } .s { color: var(--chaine); }
+.n { color: var(--nombre); } .c { color: var(--comm); font-style: italic; } .f { color: var(--fonc); } .d { color: var(--accent); }
+
+.diag { flex: none; padding: 6px 10px; font: 13px var(--code); color: var(--rouge); background: var(--erreur-fond);
+        border-top: 1px solid var(--bord); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.aide { flex: none; border-top: 1px solid var(--bord); background: var(--fond); }
+#signature { padding: 4px 10px 0; font: 12.5px var(--code); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#signature:empty, #suggestions:empty { display: none; }
+#signature b { color: var(--accent); }
+#suggestions { display: flex; gap: 4px; padding: 4px; overflow-x: auto; scrollbar-width: none; }
+.sug { flex: none; min-height: 34px; padding: 0 10px; font: var(--taille) var(--code); display: flex; align-items: center; gap: 6px; }
+.sug span { color: var(--discret); font-size: 11px; }
+.sug.f { color: var(--fonc); } .sug.k { color: var(--mot); } .sug.t, .sug.c { color: var(--type); } .sug.m { color: var(--accent); }
+.touches { display: flex; gap: 4px; padding: 4px; overflow-x: auto; border-top: 1px solid var(--bord); background: var(--fond2);
+           scrollbar-width: none; flex: none; }
+.touches button { min-width: 38px; min-height: 38px; padding: 0 6px; font-family: var(--code); flex: none; }
+.touches .outil-edition { min-width: 54px; font-weight: 700; color: var(--accent); }
+#b-nouveau-rapide { font-size: 22px; width: 36px; min-width: 36px; padding: 0; }
+
+.console { flex: none; max-height: 42dvh; display: flex; flex-direction: column; border-top: 2px solid var(--bord); }
+.console-tete { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px; font-size: 13px;
+                background: var(--fond2); }
+.petit { min-height: 30px; width: 30px; }
+#sortie, #texte-c { margin: 0; padding: 8px 10px; overflow: auto; font: calc(var(--taille) - 1px)/1.45 var(--code); white-space: pre-wrap;
+                    word-break: break-word; flex: 1; min-height: 60px; }
+#sortie .err { color: var(--rouge); }
+#sortie a { color: var(--rouge); text-decoration: underline; cursor: pointer; }
+#sortie .info { color: var(--discret); }
+#sortie .test { font-weight: 600; padding: 2px 0; }
+#sortie .test.ok { color: var(--vert); }
+#sortie .test.ko { color: var(--rouge); }
+#sortie .test-detail { margin: 2px 0 8px 18px; padding-left: 8px; border-left: 2px solid var(--bord); }
+.entree { padding: 4px 8px 8px; }
+.entree input { width: 100%; font: 14px var(--code); padding: 8px; border: 1px solid var(--bord); border-radius: 8px;
+                background: var(--fond); color: var(--texte); }
+
+.voile { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); }
+.tiroir { position: fixed; top: 0; bottom: 0; left: 0; width: min(320px, 86vw); background: var(--fond); display: flex;
+          flex-direction: column; border-right: 1px solid var(--bord); }
+.tiroir-tete { padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--bord); }
+/* V0.62 : l'explorateur */
+.chemin { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; font-size: 13px; }
+.chemin button { min-height: 30px; padding: 0 8px; background: none; border-color: transparent; color: var(--accent); }
+.chemin button:last-child { color: var(--texte); font-weight: 600; }
+#liste { list-style: none; margin: 0; padding: 4px 0; overflow: auto; flex: 1; }
+#liste li.fichier { padding: 4px 6px 4px 12px; cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 44px; }
+#liste li.vide { padding: 14px; }
+#liste li.actif { background: var(--fond2); font-weight: 600; }
+#liste .icone { width: 22px; text-align: center; flex: none; }
+#liste li.fichier .nom { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#liste li.est-dossier .nom { font-weight: 600; }
+#liste .plus { flex: none; background: none; border-color: transparent; font-size: 18px; }
+#liste .actions { flex-basis: 100%; display: flex; gap: 6px; padding: 2px 0 6px 30px; }
+#liste .actions button { flex: 1; min-height: 36px; font-size: 14px; }
+.reglages { border-top: 1px solid var(--bord); padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.reglage { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; }
+.segments { display: flex; align-items: center; gap: 4px; }
+.segments button { min-height: 34px; padding: 0 10px; font-size: 14px; }
+.segments button.actif { background: var(--accent); color: #fff; border-color: transparent; }
+#r-taille { min-width: 28px; text-align: center; font-variant-numeric: tabular-nums; }
+.tiroir-pied { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--bord); flex-wrap: wrap; }
+.tiroir-pied button { flex: 1; }
+.danger { color: var(--rouge); }
+
+.fenetre { position: fixed; inset: 8px; background: var(--fond); border: 1px solid var(--bord); border-radius: 12px;
+           display: flex; flex-direction: column; overflow: hidden; }
+
+
+/* V0.65 : explorateur de dossiers Android */
+.dossier-selection {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--bord);
+}
+#b-choisir-dossier {
+  text-align: left;
+  font-weight: 600;
+}
+#dossier-actif {
+  overflow-wrap: anywhere;
+  max-height: 2.7em;
+  overflow: hidden;
+}
+#fenetre-dossiers { z-index: 20; }
+.selection-chemin {
+  padding: 10px 14px;
+  font: 13px/1.5 var(--code);
+  border-bottom: 1px solid var(--bord);
+  overflow-wrap: anywhere;
+}
+.selection-liste {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 5px 8px;
+  margin: 0;
+  list-style: none;
+}
+.selection-liste button {
+  width: 100%;
+  min-height: 48px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--bord);
+  border-radius: 0;
+  background: transparent;
+  overflow-wrap: anywhere;
+}
+.selection-liste button:active {
+  background: var(--fond2);
+}
+.selection-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--bord);
+  flex: none;
+}
+.selection-actions button {
+  flex: 1;
+  min-width: 0;
+}
+.selection-erreur {
+  margin: 0;
+  padding: 10px;
+  color: var(--rouge);
+}
+
+/* V0.65.3 : enregistrer sous dans l'explorateur */
+.selection-nom-csv {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--bord);
+}
+.selection-nom-csv label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.selection-nom-csv input {
+  min-height: 42px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--bord);
+  border-radius: 8px;
+  background: var(--fond);
+  color: var(--texte);
+  font: 14px var(--code);
+}
+
+/* V0.60 : Git */
+#b-git { position: relative; display: inline-flex; align-items: center; justify-content: center; }
+.badge { position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+         background: var(--accent); color: #fff; font: 700 11px/18px system-ui, sans-serif; }
+.onglets { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--bord); flex: none; }
+.onglets button { flex: 1; }
+.onglets button.actif { background: var(--accent); color: #fff; border-color: transparent; }
+.git-corps { flex: 1; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.git-corps p { margin: 4px 0; }
+.git-ligne { font-size: 13px; color: var(--discret); overflow-wrap: anywhere; }
+.git-boite { border: 1px solid var(--bord); border-radius: 10px; overflow: hidden; flex: none; }
+.git-tete { display: flex; gap: 10px; align-items: center; padding: 10px; cursor: pointer; }
+.git-nom { flex: 1; min-width: 0; overflow-wrap: anywhere; font-family: var(--code); font-size: 14px; }
+.git-tete .git-nom .discret { font-family: system-ui, sans-serif; }
+.git-detail { border-top: 1px solid var(--bord); display: flex; flex-direction: column; gap: 6px; padding: 6px; background: var(--fond2); }
+.lettre { flex: none; width: 24px; text-align: center; border-radius: 5px; font: 700 12px/22px var(--code); color: #fff; }
+.lettre.M, .lettre.R { background: var(--accent); } .lettre.N, .lettre.A { background: var(--vert); } .lettre.D { background: var(--rouge); }
+.diff { margin: 0; padding: 6px; font: 12px/1.45 var(--code); white-space: pre; overflow-x: auto; }
+.diff .add { color: var(--vert); } .diff .del { color: var(--rouge); } .diff .hunk { color: var(--accent); } .diff .meta { color: var(--discret); }
+.git-message { width: 100%; font: 14px var(--code); padding: 8px; border: 1px solid var(--bord); border-radius: 8px;
+               background: var(--fond); color: var(--texte); resize: vertical; flex: none; }
+.principal { background: var(--accent); color: #fff; border-color: transparent; flex: none; }
+.principal:disabled { opacity: 0.5; }
+.git-distant { display: flex; gap: 6px; flex-wrap: wrap; flex: none; }
+.git-distant button { flex: 1; }
+.git-sortie { margin: 0; padding: 8px; font: 12px/1.45 var(--code); white-space: pre-wrap; overflow-wrap: anywhere;
+              border-radius: 8px; background: var(--fond2); flex: none; }
+.git-sortie.err { color: var(--rouge); }
+
+/* V0.61 : les figures de plot */
+#sortie .figure { margin: 6px 0; white-space: normal; }
+.figure svg, .figure img { display: block; width: 100%; max-width: 680px; height: auto; border: 1px solid var(--bord);
+                           border-radius: 8px; cursor: zoom-in; }
+.anim-controles { display: flex; align-items: center; gap: 8px; max-width: 680px; padding: 4px 0; }
+.anim-controles button { min-height: 32px; width: 40px; padding: 0; }
+.anim-controles input { flex: 1; }
+.boutons { display: flex; gap: 6px; align-items: center; flex: none; }
+.figure-titre { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.texte-petit { min-height: 30px; padding: 0 10px; }
+.figure-corps { flex: 1; overflow: auto; padding: 8px; --zoom: 1; }
+.figure-corps svg, .figure-corps img { display: block; width: calc(100% * var(--zoom)); height: auto; max-width: none; }
+.figure-corps .anim-controles { max-width: none; }
+
+/* V0.62 : les figures de plot suivent le theme choisi (leur propre style suit le telephone) */
+:root[data-theme="sombre"] .clair-plot { color: #e5e7eb; }
+:root[data-theme="sombre"] .clair-plot .cp-fond { fill: #16181d; }
+:root[data-theme="sombre"] .clair-plot .cp-grille { stroke: #2b2f37; }
+:root[data-theme="sombre"] .clair-plot .cp-axe { stroke: #8b919c; }
+:root[data-theme="sombre"] .clair-plot .cp-texte { fill: #e5e7eb; }
+:root[data-theme="sombre"] .clair-plot .cp-graduation { fill: #a3a9b3; }
+:root[data-theme="sombre"] .clair-plot .cp-legende { fill: #1f2229; stroke: #3a3f48; }
+:root[data-theme="sombre"] .clair-plot .cp-barre { stroke: #16181d; }
+:root[data-theme="clair"] .clair-plot { color: #1f2937; }
+:root[data-theme="clair"] .clair-plot .cp-fond { fill: #fff; }
+:root[data-theme="clair"] .clair-plot .cp-grille { stroke: #e5e7eb; }
+:root[data-theme="clair"] .clair-plot .cp-axe { stroke: #6b7280; }
+:root[data-theme="clair"] .clair-plot .cp-texte { fill: #1f2937; }
+:root[data-theme="clair"] .clair-plot .cp-graduation { fill: #4b5563; }
+:root[data-theme="clair"] .clair-plot .cp-legende { fill: #fff; stroke: #d1d5db; }
+:root[data-theme="clair"] .clair-plot .cp-barre { stroke: #fff; }
+
+/* Laboratoire : couleurs des symboles Clair. */
+.couleurs .clair-var { color: var(--accent); }
+.couleurs .clair-param { color: var(--vert); }
+.couleurs .clair-module {
+    color: var(--type);
+    font-weight: 600;
+}
+
+/* Clair Studio Labo V3 : champs et methodes. */
+.couleurs .clair-attribut {
+    color: var(--accent);
+    font-style: italic;
+}
+.couleurs .clair-methode {
+    color: var(--fonc);
+    font-weight: 700;
+}
+.couleurs .clair-self {
+    color: var(--vert);
+}
+
+/* Clair Studio Labo V5.2 :
+   menu flottant de selection. */
+
+.menu-texte-labo {
+    position: fixed;
+    z-index: 150;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px;
+    max-width: calc(100vw - 16px);
+    border: 1px solid var(--bord);
+    border-radius: 12px;
+    background: var(--fond2);
+    color: var(--texte);
+    box-shadow: 0 4px 18px rgba(0,0,0,.28);
+}
+
+.menu-texte-labo button {
+    flex: 0 1 auto;
+    min-height: 36px;
+    padding: 0 9px;
+    border: 0;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+    touch-action: manipulation;
+}
+
+.menu-texte-labo button:active {
+    background: var(--fond);
+}

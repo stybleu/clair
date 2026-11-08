@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="theme-color" content="#16181d">
+<title>Clair Studio</title>
+<link rel="stylesheet" href="/static/studio.css?v=53">
+<script>
+/* V0.62 : le theme et la taille du texte avant le premier affichage (sans eclair blanc) */
+try {
+  var r = JSON.parse(localStorage.getItem("clair-studio-reglages") || "{}");
+  if (r.theme === "clair" || r.theme === "sombre") document.documentElement.setAttribute("data-theme", r.theme);
+  if (r.taille >= 10 && r.taille <= 26) {
+    document.documentElement.style.setProperty("--taille", r.taille + "px");
+    document.documentElement.style.setProperty("--ligne", Math.round(r.taille * 1.5) + "px");
+  }
+} catch (e) {}
+</script>
+</head>
+<body>
+<div id="app">
+  <header class="barre">
+    <button id="b-fichiers" class="icone" title="Fichiers" aria-label="Fichiers">☰</button>
+    <button id="b-nouveau-rapide" class="icone" title="Nouveau document Clair" aria-label="Nouveau document">＋</button>
+    <div class="titre">
+      <span id="nom-fichier">…</span>
+      <span id="etat-sauve" class="discret"></span><span class="discret">Labo V5.3</span>
+    </div>
+    <button id="b-git" class="icone" title="Git : les modifications et les versions" aria-label="Git">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="8" r="2.2"/><path d="M6 7.2v9.6M18 10.2c0 4-6 3-11 7"/></svg>
+      <span id="git-badge" class="badge" hidden></span>
+    </button>
+    <button id="b-c" class="texte" title="Voir le C écrit par Clair">C</button>
+    <button id="b-tester" class="icone" title="Lancer les tests (test &quot;nom&quot; { ... })" aria-label="Tests">🧪</button>
+    <button id="b-arreter" class="icone arreter" title="Arrêter" aria-label="Arrêter" hidden>■</button>
+    <button id="b-lancer" class="lancer" title="Compiler et lancer" aria-label="Lancer">▶</button>
+  </header>
+
+  <!-- V0.71.4 : rechercher et remplacer (Ctrl+F, Ctrl+H, ou la touche 🔍) -->
+  <div class="chercher" id="chercher" hidden>
+    <div class="ch-ligne">
+      <input id="ch-texte" placeholder="Rechercher" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Rechercher">
+      <span id="ch-compte" class="discret" aria-live="polite"></span>
+      <button id="ch-prec" class="icone petit" title="Précédent (Maj+Entrée)" aria-label="Précédent">↑</button>
+      <button id="ch-suiv" class="icone petit" title="Suivant (Entrée)" aria-label="Suivant">↓</button>
+      <button id="ch-fermer" class="icone petit" title="Fermer (Échap)" aria-label="Fermer la recherche">✕</button>
+    </div>
+    <div class="ch-ligne">
+      <button id="ch-casse" class="option" title="Respecter les majuscules" aria-pressed="false">Aa</button>
+      <button id="ch-mot" class="option" title="Mot entier" aria-pressed="false">Mot</button>
+      <button id="ch-regex" class="option" title="Expression régulière ($1, $2… dans le remplacement)" aria-pressed="false">.*</button>
+      <button id="ch-bascule" class="option" title="Remplacer (Ctrl+H)" aria-pressed="false">Remplacer</button>
+    </div>
+    <div class="ch-ligne" id="ch-remplacement" hidden>
+      <input id="ch-par" placeholder="Remplacer par" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-label="Remplacer par">
+      <button id="ch-un" class="texte-petit" title="Remplacer celui-ci, puis aller au suivant (Entrée)">Remplacer</button>
+      <button id="ch-tous" class="texte-petit" title="Remplacer partout">Tout</button>
+    </div>
+  </div>
+
+  <main class="editeur" id="editeur">
+    <div class="marge" id="marge"><div id="numeros"></div></div>
+    <div class="zone">
+      <pre class="couleurs" id="couleurs" aria-hidden="true"></pre>
+      <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"
+                wrap="off" aria-label="Code Clair"></textarea>
+    </div>
+  </main>
+
+  <div class="diag" id="diag" role="status" hidden></div>
+  <div class="aide" id="aide" hidden>
+    <div id="signature"></div>
+    <div id="suggestions"></div>
+  </div>
+
+  <nav class="touches" id="touches" aria-label="Touches">
+    <button class="outil-edition" data-outil="tout">Tout</button>
+    
+    
+    <button class="outil-edition" data-outil="chercher" title="Rechercher et remplacer" aria-label="Rechercher et remplacer">🔍</button>
+    <button data-t="    ">⇥</button><button data-t="{">{</button><button data-t="}">}</button>
+    <button data-t="(">(</button><button data-t=")">)</button><button data-t="[">[</button><button data-t="]">]</button>
+    <button data-t=":">:</button><button data-t="&quot;">"</button><button data-t="=">=</button>
+    <button data-t="->">-&gt;</button><button data-t="<">&lt;</button><button data-t=">">&gt;</button>
+    <button data-t="+">+</button><button data-t="-">-</button><button data-t="*">*</button><button data-t="/">/</button>
+    <button data-t="±">±</button><button data-t="_">_</button><button data-t=".">.</button><button data-t=",">,</button>
+    <button data-cmd="undo" title="Annuler">↶</button><button data-cmd="redo" title="Refaire">↷</button>
+  </nav>
+
+  <section class="console" id="console" hidden>
+    <div class="console-tete">
+      <span id="etat">Prêt</span>
+      <span class="boutons">
+        <button id="b-sauver-csv" class="texte-petit" title="Enregistrer le CSV dans le dossier du programme" hidden disabled>CSV ↓</button>
+        <button id="b-copier" class="texte-petit" title="Copier tout ce que le programme a écrit">Copier</button>
+        <button id="b-fermer" class="icone petit" aria-label="Fermer la console">✕</button>
+      </span>
+    </div>
+    <pre id="sortie"></pre>
+    <form id="f-entree" class="entree" hidden>
+      <input id="entree" autocomplete="off" autocapitalize="off" placeholder="Entrée du programme (Entrée pour envoyer)">
+    </form>
+  </section>
+</div>
+
+<div class="voile" id="voile" hidden></div>
+<aside class="tiroir" id="tiroir" hidden>
+  <div class="tiroir-tete">
+    <strong>Fichiers</strong>
+    <nav class="chemin" id="chemin" data-dossier="{{ dossier }}" title="{{ dossier }}" aria-label="Dossier"></nav>
+  </div>
+  <ul id="liste"></ul>
+  <div class="tiroir-pied">
+    <button id="b-nouveau">+ Fichier</button>
+    <button id="b-nouveau-dossier">+ Dossier</button>
+  </div>
+  <div class="dossier-selection">
+    <button id="b-choisir-dossier">📁 Choisir un dossier de travail…</button>
+    <span id="dossier-actif" class="discret">{{ dossier }}</span>
+  </div>
+  <div class="reglages">
+    <div class="reglage"><span>Thème</span>
+      <div class="segments" id="r-theme"><button data-v="auto">Auto</button><button data-v="clair">Clair</button><button data-v="sombre">Sombre</button></div>
+    </div>
+    <div class="reglage"><span>Taille du texte</span>
+      <div class="segments"><button id="r-moins" aria-label="Texte plus petit">A−</button><span id="r-taille">14</span><button id="r-plus" aria-label="Texte plus grand">A+</button></div>
+    </div>
+  </div>
+</aside>
+
+<div class="fenetre" id="fenetre-dossiers" hidden role="dialog" aria-modal="true" aria-label="Sélectionner un dossier">
+  <div class="console-tete">
+    <strong>Choisir un dossier</strong>
+    <button id="b-fermer-dossiers" class="icone petit" aria-label="Fermer">✕</button>
+  </div>
+  <div id="selection-chemin" class="selection-chemin"></div>
+  <div id="selection-nom-csv" class="selection-nom-csv" hidden>
+    <label for="nom-csv">Nom du fichier CSV</label>
+    <input id="nom-csv" type="text" value="meteo.csv" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </div>
+  <ul id="selection-liste" class="selection-liste"></ul>
+  <p id="selection-erreur" class="selection-erreur" role="alert" hidden></p>
+  <div class="selection-actions">
+    <button id="b-emplacements">Emplacements</button>
+    <button id="b-utiliser-dossier" class="principal" disabled>Utiliser ce dossier</button>
+  </div>
+</div>
+
+<div class="fenetre" id="fenetre-git" hidden>
+  <div class="console-tete"><span>Git</span><button id="b-fermer-git" class="icone petit" aria-label="Fermer">✕</button></div>
+  <div class="onglets" id="git-onglets" hidden>
+    <button id="git-o-chg" class="actif">Changements</button><button id="git-o-hist">Historique</button>
+  </div>
+  <div class="git-corps" id="git-corps"></div>
+</div>
+
+<div class="fenetre" id="fenetre-figure" hidden>
+  <div class="console-tete">
+    <span class="figure-titre">Figure <span id="figure-info" class="discret"></span></span>
+    <span class="boutons">
+      <button id="b-figure-moins" class="icone petit" aria-label="Plus petit">−</button>
+      <button id="b-figure-plus" class="icone petit" aria-label="Plus grand">+</button>
+      <button id="b-figure-garder" class="texte-petit" title="Enregistrer la figure dans le dossier des programmes">Garder</button>
+      <button id="b-fermer-figure" class="icone petit" aria-label="Fermer">✕</button>
+    </span>
+  </div>
+  <div class="figure-corps" id="figure-corps"></div>
+</div>
+
+<div class="fenetre" id="fenetre-c" hidden>
+  <div class="console-tete"><span id="titre-c">Le C</span><button id="b-fermer-c" class="icone petit" aria-label="Fermer">✕</button></div>
+  <pre id="texte-c"></pre>
+</div>
+
+
+<div id="selection-flottante"
+     class="menu-texte-labo"
+     role="toolbar"
+     aria-label="Actions sur le texte"
+     hidden>
+  <button type="button" data-action="tout">Tout sélectionner</button>
+  <button type="button" data-action="copier">Copier</button>
+  <button type="button" data-action="coller">Coller</button>
+</div>
+<script src="/static/studio.js?v=52"></script>
+</body>
+</html>

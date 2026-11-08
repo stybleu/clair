@@ -1,0 +1,10 @@
+def addition(a: int, b: int) -> int {
+    let resultat: int = a + b
+    return resultat
+}
+
+def main() -> int {
+    let valeur: int = addition(40, 2)
+    print(valeur)
+    return 0
+}

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- l'icone : un C (Clair) et un curseur, dans la zone sure de 66 dp au centre -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M63.44,40.56 A19,19 0 1,0 63.44,67.44"
+        android:fillColor="#00000000"
+        android:strokeColor="#60a5fa"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M70,68 L80,68"
+        android:fillColor="#00000000"
+        android:strokeColor="#4ade80"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+</vector>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Clair Studio en application Android (V0.71.6) : le Studio dans une WebView, sans les menus du navigateur.
+     Construite sur le telephone par fabriquer.sh. versionCode : a augmenter a chaque changement de l'appli,
+     studio.sh la reconstruit et la propose a l'installation quand le telephone a une version plus ancienne. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="clair.studio.labo"
+    android:versionCode="2"
+    android:versionName="0.71.8-labo1">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+
+    <!-- le Studio est un petit serveur web sur le telephone (127.0.0.1) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- demander a Termux de lancer le Studio, et de lire sa cle (Android demande la permission une fois) -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
+
+    <application
+        android:label="Clair Studio Labo"
+        android:icon="@mipmap/icone"
+        android:roundIcon="@mipmap/icone"
+        android:theme="@style/Clair"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".Studio"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- V0.71.7 : Termux demande la version installee (am broadcast), pm lui est refuse sur Android 16 -->
+        <receiver
+            android:name=".Version"
+            android:exported="true" />
+    </application>
+</manifest>

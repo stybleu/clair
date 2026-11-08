@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Le cadre (V0.71.8) : un petit morceau d'Android, voir generer.py. Lie avec aapt2 -x (paquet android, numero 0x01). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="android" />
