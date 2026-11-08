@@ -16,6 +16,29 @@ La première fois, `studio.sh` installe ce qui manque (clang, cmake, make), comp
 tout de suite, et recompile Clair seul quand ses sources ont changé (après un `git pull`). Tes programmes
 sont dans `~/clair_projets`. Le détail : [Clair Studio](docs/README_V0.58.md).
 
+## Clair Studio Android : nouveautés du laboratoire
+
+Des améliorations de l'éditeur sont expérimentées dans
+**Clair Studio Labo** sur Android :
+
+- Coloration syntaxique enrichie des classes, méthodes,
+  attributs et variables.
+- Autocomplétion des membres et méthodes des objets.
+- **Aller à la définition** depuis le menu Android,
+  accessible par un appui long sur le code.
+- Surlignage de la déclaration retrouvée.
+- Commandes **Annuler** et **Refaire** distinctes de
+  la navigation dans le code.
+
+Un test de navigation sur un programme de 150 lignes
+a été effectué dans le laboratoire.
+
+**Statut : expérimental.** Ces fonctions ne sont
+pas encore intégrées dans l'application stable.
+Le retour à l'emplacement initial reste à fiabiliser.
+
+[Documentation détaillée du laboratoire](docs/README_STUDIO_NAVIGATION_V63.md).
+
 ## Fonctionnalités
 
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON
@@ -124,6 +147,7 @@ Les validations principales sont réalisées sous Termux ARM64.
 Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 
 ## Documentation
+- [Navigation Clair Studio Labo V6.3](docs/README_STUDIO_NAVIGATION_V63.md) : aller à la définition, surlignage et menu contextuel Android (expérimental).
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
