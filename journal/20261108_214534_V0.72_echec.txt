@@ -1,0 +1,16 @@
+date : 2026-11-08T21:45:33Z
+titre : mise a jour V0.72 (echec)
+clair : b14f632 docs(studio): documenter la navigation Android experimentale
+processeur : aarch64, coeurs : 8
+android : 13
+clang : clang version 21.1.8
+--- resultat
+ECHEC : ~/clair n'est pas exactement le main de GitHub (b14f632)
+b14f632 docs(studio): documenter la navigation Android exper
+A  tools/studio/android_autonome_code/AndroidManifest.xml
+A  tools/studio/android_autonome_code/AndroidManifest.xml.avant-v07210
+A  tools/studio/android_autonome_code/AndroidManifest.xml.avant-v07211
+A  tools/studio/android_autonome_code/AndroidManifest.xml.avant-v07212
+--- erreurs
+--- compilation
+--- tests
