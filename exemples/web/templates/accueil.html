@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block titre %}Mes notes{% endblock %}
+{% block contenu %}
+<h1>Mes notes</h1>
+<form method="post" action="/ajouter">
+  <input name="texte" placeholder="Une nouvelle note" autofocus>
+  <button>Ajouter</button>
+</form>
+{% if notes %}
+<ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>
+{% else %}
+<p>Pas encore de note.</p>
+{% endif %}
+<p class="petit">Visite numéro {{ visites }}</p>
+{% endblock %}

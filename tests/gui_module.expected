@@ -1,0 +1,18 @@
+taille 200 x 120
+appui 40 95 bouton 1
+rectangle 230,41,55
+disque 255,204,0
+anneau 0,200,0
+polygone 140,60,200
+fond 0,0,0
+copie BMP True, PNG True
+images 4
+clics sur OK 1
+espace 1
+lettre E accent : True
+largeur du texte 48
+image 200 x 120
+image dessinee 230,41,55
+image tournee 230,41,55
+image PNG 200 x 120
+une autre fenetre 64 x 48

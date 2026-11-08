@@ -1,0 +1,2 @@
+# fichier de test avec des fins de ligne Windows : garde tel quel
+tests/donnees/mesures.txt -text -diff

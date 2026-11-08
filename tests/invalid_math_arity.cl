@@ -1,0 +1,4 @@
+def main() -> int {
+    print(sqrt(1.0, 2.0))
+    return 0
+}

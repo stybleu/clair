@@ -1,0 +1,24 @@
+kepler, demi-grand axe garde a 1e-13 : oui
+kepler, excentricite gardee a 1e-13 : oui
+kepler, a l'heure a 1e-8 degre : oui
+kepler, pas comme REBOUND (9717) : oui
+kepler, temps exact : oui
+pythagore, energie gardee a 1e-12 : oui
+pythagore, moment cinetique garde : oui
+pythagore, comme REBOUND a 1e-8 : oui
+pythagore, pas comme REBOUND (615) : oui
+un pas seul : oui
+ellipse : oui
+periode : 11.234088 (2 pi sqrt(8 / 2.5025) = 11.234088)
+hyperbole : oui
+equation de Kepler : oui
+autour du centre de masse (-1) : oui
+corps : 9, G = 39.476926 UA^3 / (masse solaire an^2)
+Mercure : a = 0.38710 UA, e = 0.20564, i = 7.0050, periode 0.2408 an
+Terre : a = 1.00000 UA, e = 0.01671, i = 0.0000, periode 1.0000 an
+Jupiter : a = 5.20289 UA, e = 0.04839, i = 1.3044, periode 11.8623 an
+Neptune : a = 30.06992 UA, e = 0.00859, i = 1.7700, periode 164.8904 an
+cent ans, energie gardee a 1e-14 : oui
+cent ans, demi-grand axe de Jupiter : 5.203 UA
+centre de masse immobile : oui
+collision : 1, corps restants 1, quantite de mouvement gardee : oui

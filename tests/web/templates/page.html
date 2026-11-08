@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{# un commentaire #}
+{% block titre %}{{ titre }}{% endblock %}
+{% block contenu %}
+<p>Bonjour {{ nom }}, {{ lien|safe }} {{ inconnu }}</p>
+{% if vide %}plein{% else %}vide{% endif %}
+{% if not vide %}pas vide{% endif %}
+{% if nom %}nom{% elif titre %}titre{% else %}rien{% endif %}
+<ul>{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>
+{% endblock %}

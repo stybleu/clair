@@ -1,0 +1,14 @@
+etoiles : 4000
+equilibre (viriel a 5 % pres) : oui
+rayon de demi-masse a 6 % pres de 1.305 : oui
+centre de masse au centre, immobile : oui
+meme graine, meme amas : oui
+arbre comme le calcul direct (ecart moyen < 1e-4) : oui
+energie gardee avec l'arbre (1e-4) : oui
+un coeur ou tous, memes nombres : oui
+Yoshida avec l'arbre : oui
+collisions : l'arbre trouve les memes : oui
+quantite de mouvement : directe a 1e-12, arbre a 1e-5 : oui
+deux amas : 1000 etoiles, centre de masse au milieu : oui, couleurs oui
+relu : oui
+pas choisi seul : oui

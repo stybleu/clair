@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# Compares programs compiled by Clair with the same programs written by hand
+# in C: was the hot loop vectorized in each version, and how fast are they.
+# Clair and C are run alternately 5 times and the median time of each is kept,
+# so both are measured under the same conditions (a phone slows down when hot)
+# and one lucky run (memory placed favourably by chance) does not decide.
+# Every run is pinned to the same core, the fastest one (tools/pin_core.c):
+# otherwise the phone may give the fast core to one program and not the other.
+# A last table runs the matrix programs on every core and gives the gain.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BENCH="$ROOT/tools/bench"
+WORK="${TMPDIR:-/tmp}/clair_rapport"
+ROUNDS=5
+mkdir -p "$WORK"
+
+case "$(uname -m)" in
+    aarch64|arm64) SIMD_NAME="NEON"; SIMD_RE='\bv[0-9]+\.(2d|4s|16b|8h)' ;;
+    x86_64)        SIMD_NAME="SSE"; SIMD_RE='(mul|add|sub|fmadd[0-9]*|fmadd)p[sd]|padd[bwdq]|vpadd' ;;
+    *)             SIMD_NAME="SIMD"; SIMD_RE='^$' ;;
+esac
+
+seconds() {
+    local start end
+    start=$EPOCHREALTIME
+    "$@" > /dev/null 2>&1
+    end=$EPOCHREALTIME
+    awk -v s="$start" -v e="$end" 'BEGIN { printf "%.4f", e - s }'
+}
+
+# Same core for every run, when the system lets us choose it.
+PIN=()
+CORE_INFO="coeur non choisi (epinglage refuse)"
+if clang -O2 "$ROOT/tools/pin_core.c" -o "$WORK/pin_core" 2> "$WORK/pin_core.log" &&
+   best=$("$WORK/pin_core" best 2>> "$WORK/pin_core.log") &&
+   "$WORK/pin_core" "${best%% *}" true 2>> "$WORK/pin_core.log"; then
+    PIN=("$WORK/pin_core" "${best%% *}")
+    CORE_INFO=$(awk -v c="${best%% *}" -v k="${best##* }" \
+        'BEGIN { printf "coeur %d", c; if (k > 0) printf " (%.2f GHz)", k / 1e6; printf " pour Clair et C" }')
+fi
+
+# The chosen core may be switched off while the report runs (battery saver, heat):
+# then a pinned run would fail at once and give a time that means nothing.
+core_ok() {
+    [ ${#PIN[@]} -eq 0 ] || "${PIN[@]}" true 2> /dev/null
+}
+
+median() { printf '%s\n' "$@" | sort -n | awk '{ v[NR] = $1 } END { print (NR % 2) ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2 }'; }
+
+# "oui" when the machine code of these functions contains SIMD instructions
+vectorized() {
+    local asm="$1" fn count=0
+    shift
+    for fn in "$@"; do
+        count=$((count + $(awk -v f="$fn" '$0 ~ "^"f":" {p=1} p {print} p && /\.size|^\.Lfunc_end/ {exit}' "$asm" | grep -cE "$SIMD_RE")))
+    done
+    if [ "$count" -gt 0 ]; then printf 'oui'; else printf 'non'; fi
+}
+
+version=$(clang --version | head -n 1 | sed -E 's/.*clang version ([0-9.]+).*/clang \1/')
+printf 'RAPPORT CODE MACHINE (%s, %s)\n' "$(uname -m)" "$version"
+printf '%s\n' "$CORE_INFO"
+printf '%-9s %-11s %-7s %-7s %s\n' "programme" "$SIMD_NAME Cl/C" "Clair" "C" "ecart"
+
+for name in collatz dot axpy axpy32 octets while forin matmul matmul32 matrice couche couche32 reseau; do
+    # hot function: "// noyau: name" in the program, otherwise its first def
+    kernel=$(grep -m 1 -oE '^// noyau: [A-Za-z_]+' "$BENCH/$name.cl" | cut -d' ' -f3)
+    [ -n "$kernel" ] || kernel=$(grep -m 1 -oE '^def [a-z_]+' "$BENCH/$name.cl" | cut -d' ' -f2)
+    ref_kernel=$(grep -m 1 -oE '^/\* noyau: [A-Za-z_]+' "$BENCH/${name}_ref.c" | cut -d' ' -f3)
+
+    if ! "$ROOT/build/clair" "$BENCH/$name.cl" -o "$WORK/$name" > "$WORK/$name.log" 2>&1; then
+        printf '%-9s ECHEC de compilation Clair\n' "$name"
+        continue
+    fi
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 "$BENCH/${name}_ref.c" -o "$WORK/${name}_ref" -lm 2>> "$WORK/$name.log"
+
+    # Keep the hot functions out of line so their machine code can be read alone.
+    sed -E "s/^static ([a-z0-9_]+) clair_fn_${kernel}\(/static __attribute__((noinline)) \1 clair_fn_${kernel}(/" \
+        "$WORK/$name.generated.c" > "$WORK/$name.noinline.c"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 -S "$WORK/$name.noinline.c" -o "$WORK/$name.s" 2>> "$WORK/$name.log"
+    sed -E "s/^static ([a-z0-9_]+) ${ref_kernel}\(/static __attribute__((noinline)) \1 ${ref_kernel}(/" \
+        "$BENCH/${name}_ref.c" > "$WORK/${name}_ref.noinline.c"
+    clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 -S "$WORK/${name}_ref.noinline.c" -o "$WORK/${name}_ref.s" 2>> "$WORK/$name.log"
+    # the function and the jobs of its dense layers, run by each core (clair_layer_<function>_N)
+    layers=$(grep -oE "^clair_layer_${kernel}_[0-9]+:" "$WORK/$name.s" | tr -d ':')
+    v_clair=$(vectorized "$WORK/$name.s" "clair_fn_${kernel}" $layers)
+    v_ref=$(vectorized "$WORK/${name}_ref.s" "${ref_kernel}")
+
+    out_clair=$("$WORK/$name"); out_ref=$("$WORK/${name}_ref")
+    same=""
+    [ "$out_clair" = "$out_ref" ] || same=" RESULTAT DIFFERENT"
+
+    if ! core_ok; then
+        printf '%-9s coeur %s indisponible (economie d energie ou chaleur ?)\n' "$name" "${PIN[1]}"
+        continue
+    fi
+    times_clair=(); times_ref=()
+    for _ in $(seq "$ROUNDS"); do
+        times_clair+=("$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/$name")")
+        times_ref+=("$(seconds ${PIN[@]+"${PIN[@]}"} "$WORK/${name}_ref")")
+    done
+    t_clair=$(median "${times_clair[@]}")
+    t_ref=$(median "${times_ref[@]}")
+    gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
+    printf '%-9s %-11s %-7s %-7s %s%s\n' "$name" "$v_clair/$v_ref" \
+        "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"
+done
+
+# Several cores: the big matrix products and dense layers share their rows
+# between all the cores. Same programs, one core (pinned) against all of them.
+cores=$(nproc 2>/dev/null || echo 1)
+printf '\nPLUSIEURS COEURS (%s coeurs)\n' "$cores"
+[ "$cores" -lt "$(getconf _NPROCESSORS_CONF 2>/dev/null || echo "$cores")" ] &&
+    printf 'attention : %s coeurs sur %s en marche (economie d energie ou chaleur ?)\n' "$cores" "$(getconf _NPROCESSORS_CONF)"
+printf '%-9s %-7s %-7s %s\n' "programme" "1 coeur" "tous" "gain"
+for name in matmul matmul32 matrice couche couche32; do
+    [ -x "$WORK/$name" ] || continue
+    out_one=$(CLAIR_THREADS=1 "$WORK/$name"); out_all=$("$WORK/$name")
+    same=""
+    [ "$out_one" = "$out_all" ] || same=" RESULTAT DIFFERENT"
+    if ! core_ok; then
+        printf '%-9s coeur %s indisponible\n' "$name" "${PIN[1]}"
+        continue
+    fi
+    times_one=(); times_all=()
+    for _ in $(seq "$ROUNDS"); do
+        times_one+=("$(seconds env CLAIR_THREADS=1 ${PIN[@]+"${PIN[@]}"} "$WORK/$name")")
+        times_all+=("$(seconds "$WORK/$name")")
+    done
+    t_one=$(median "${times_one[@]}")
+    t_all=$(median "${times_all[@]}")
+    gain=$(awk -v a="$t_one" -v b="$t_all" 'BEGIN { printf "x%.1f", a / b }')
+    printf '%-9s %-7s %-7s %s%s\n' "$name" "$(printf '%.3f' "$t_one")" "$(printf '%.3f' "$t_all")" "$gain" "$same"
+done
+
+# The tests used to compare languages (V0.43): the Computer Language Benchmarks
+# Game and PLB2, the same algorithm in Clair and in plain C.  The size is read
+# on the standard input; both programs must write exactly the same thing.
+JEUX="$ROOT/tools/jeux"
+# V0.46: the input of a game is its size, or a file ("fasta:N": what fasta writes for N)
+feed() {
+    if [ -n "$input_file" ]; then "$@" < "$input_file"; else "$@" <<< "$size"; fi
+}
+seconds_in() {
+    local start end
+    start=$EPOCHREALTIME
+    feed "$@" > /dev/null 2>&1
+    end=$EPOCHREALTIME
+    awk -v s="$start" -v e="$end" 'BEGIN { printf "%.4f", e - s }'
+}
+printf '\nJEUX DE TESTS DES LANGAGES (memes algorithmes en Clair et en C)\n'
+printf '%-10s %-8s %-7s %-7s %s\n' "programme" "taille" "Clair" "C" "ecart"
+while read -r name size _; do
+    case "$name" in ''|'#'*) continue ;; esac
+    input_file=""
+    shown="${size#fasta:}"
+    case "$size" in
+        fasta:*)
+            input_file="$WORK/entree_$name.txt"
+            if ! clang -std=c11 -O2 "$JEUX/fasta_ref.c" -o "$WORK/jeu_fasta_entree" > /dev/null 2>&1 ||
+               ! "$WORK/jeu_fasta_entree" <<< "${size#fasta:}" > "$input_file"; then
+                printf '%-10s ECHEC de l entree (fasta)\n' "$name"
+                continue
+            fi
+            ;;
+    esac
+    if ! "$ROOT/build/clair" "$JEUX/$name.cl" -o "$WORK/jeu_$name" > "$WORK/jeu_$name.log" 2>&1; then
+        printf '%-10s ECHEC de compilation Clair\n' "$name"
+        continue
+    fi
+    libs="-lm"
+    [ "$name" = pidigits ] && libs="-lgmp"
+    if ! clang -std=c11 -O2 -fwrapv -fno-math-errno -ffp-contract=off -falign-loops=64 \
+            "$JEUX/${name}_ref.c" -o "$WORK/jeu_${name}_ref" $libs >> "$WORK/jeu_$name.log" 2>&1; then
+        t_clair=$(seconds_in ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")
+        if [ "$name" = pidigits ]; then
+            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$shown" "$(printf '%.3f' "$t_clair")" "-" "C sans GMP (pkg install libgmp)"
+        else
+            printf '%-10s %-8s %-7s %-7s %s\n' "$name" "$shown" "$(printf '%.3f' "$t_clair")" "-" "ECHEC de compilation C"
+        fi
+        continue
+    fi
+    out_clair=$(feed "$WORK/jeu_$name" | cksum); out_ref=$(feed "$WORK/jeu_${name}_ref" | cksum)
+    same=""
+    [ "$out_clair" = "$out_ref" ] || same=" RESULTAT DIFFERENT"
+    if ! core_ok; then
+        printf '%-10s coeur %s indisponible\n' "$name" "${PIN[1]}"
+        continue
+    fi
+    times_clair=(); times_ref=()
+    for _ in $(seq "$ROUNDS"); do
+        times_clair+=("$(seconds_in ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_$name")")
+        times_ref+=("$(seconds_in ${PIN[@]+"${PIN[@]}"} "$WORK/jeu_${name}_ref")")
+    done
+    t_clair=$(median "${times_clair[@]}")
+    t_ref=$(median "${times_ref[@]}")
+    gap=$(awk -v a="$t_clair" -v b="$t_ref" 'BEGIN { printf "%+.0f%%", (a / b - 1) * 100 }')
+    printf '%-10s %-8s %-7s %-7s %s%s\n' "$name" "$shown" "$(printf '%.3f' "$t_clair")" "$(printf '%.3f' "$t_ref")" "$gap" "$same"
+    [ -n "$input_file" ] && rm -f "$input_file"
+done < "$JEUX/tailles.txt"
