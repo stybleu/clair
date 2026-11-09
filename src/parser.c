@@ -117,14 +117,15 @@ static AstNode *parse_atom(Parser *p) {
 
     if (t.kind == TOKEN_FLOAT_LITERAL) {
         /* 1_000.5: the underscores only help reading */
-        char text[400];
-        size_t n = 0;
-        for (size_t i = 0; i < t.length && n + 1 < sizeof(text); i++) {
-            if (t.start[i] != '_') text[n++] = t.start[i];
-        }
         next(p);
-        AstNode *num = ast_new(AST_FLOAT, text, n);
-        if (num && p->current.kind == TOKEN_LBRACKET && !parse_unit(p, num)) {   /* V0.48: 9.81[m/s^2] */
+        AstNode *num = ast_new(AST_FLOAT, t.start, t.length);
+        if (!num) return NULL;
+        size_t n = 0;
+        for (size_t i = 0; i < t.length; i++) {
+            if (t.start[i] != '_') num->text[n++] = t.start[i];
+        }
+        num->text[n] = '\0';
+        if (p->current.kind == TOKEN_LBRACKET && !parse_unit(p, num)) {   /* V0.48: 9.81[m/s^2] */
             ast_free(num);
             return NULL;
         }

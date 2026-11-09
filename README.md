@@ -139,6 +139,12 @@ Compare treize programmes types avec leur version écrite à la main en C : vect
 bash tests/run_tests.sh
 ```
 
+Correctif du 8 novembre 2026 : les nombres flottants écrits dans le code sont lus
+en entier, même au-delà de 399 caractères. Auparavant, un nombre très long pouvait
+perdre son exposant et donner une valeur fausse sans erreur. Le test
+`tests/float_long_literal.cl` couvre les exposants, les séparateurs `_`, `float32`
+et les unités physiques. Cela ne change pas la précision des types flottants.
+
 ## Statut
 
 Clair est en développement.

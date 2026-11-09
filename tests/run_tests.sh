@@ -120,6 +120,12 @@ expected_float_numeric="$(printf '7.5\n2.5\n7\n9\n6\n2.5\n-1.5\n1')"
 [ "$out_float_numeric" = "$expected_float_numeric" ]
 printf '%s\n' 'float_numeric.cl : OK -> float, promotions int->float, calcul mixte, division, unaire, comparaisons'
 
+./build/clair tests/float_long_literal.cl -o build/test_float_long_literal
+out_float_long_literal="$(./build/test_float_long_literal)"
+expected_float_long_literal="$(printf '100\n0.01\n100\n100\n100')"
+[ "$out_float_long_literal" = "$expected_float_long_literal" ]
+printf '%s\n' 'float_long_literal.cl : OK -> nombres de plus de 399 caracteres, exposants conserves, separateurs, float32 et unites'
+
 if ./build/clair tests/invalid_float_to_int.cl -o build/test_invalid_float_to_int >build/invalid_float_to_int.stdout 2>build/invalid_float_to_int.stderr; then
     printf '%s\n' 'invalid_float_to_int.cl : ECHEC -> float vers int implicite aurait du etre refuse' >&2
     exit 1
