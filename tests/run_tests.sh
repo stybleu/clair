@@ -642,9 +642,23 @@ printf '%s\n' 'float32.cl : OK -> float32 identique a NumPy : calculs, listes, m
 expect_compile_error invalid_float32_to_int "cannot initialize int 'n' with float32"
 
 ./build/clair tests/noyaux_float32.cl -o build/test_noyaux_float32
-[ "$(./build/test_noyaux_float32)" = "$(cat tests/noyaux_float32.expected)" ]
+./build/clair tests/noyaux_float32_ref.cl -o build/test_noyaux_float32_ref
+if grep -Eq 'clair_rt_(matmul|matvec|layer)_f32\(' build/test_noyaux_float32_ref.generated.c; then
+    echo 'FLOAT32_REFERENCE_NON_SCALAIRE' >&2
+    exit 1
+fi
+./build/test_noyaux_float32_ref > build/noyaux_float32.reference
+[ "$(wc -l < build/noyaux_float32.reference)" -eq 15 ]
+# Les sept premiers resultats n'utilisent aucune fonction transcendante.
+head -n 7 tests/noyaux_float32.expected > build/noyaux_float32.fixes_attendus
+head -n 7 build/noyaux_float32.reference > build/noyaux_float32.fixes_obtenus
+diff -u build/noyaux_float32.fixes_attendus build/noyaux_float32.fixes_obtenus
+# Comparaison exacte avec la reference locale, sans tolerance ajoutee.
+./build/test_noyaux_float32 > build/noyaux_float32.obtenus
+diff -u build/noyaux_float32.reference build/noyaux_float32.obtenus
 for threads in 1 2 3 7; do
-    [ "$(CLAIR_THREADS=$threads ./build/test_noyaux_float32)" = "$(cat tests/noyaux_float32.expected)" ]
+    CLAIR_THREADS=$threads ./build/test_noyaux_float32 > build/noyaux_float32.obtenus
+    diff -u build/noyaux_float32.reference build/noyaux_float32.obtenus
 done
 [ "$(grep -c 'clair_rt_matmul_f32(' build/test_noyaux_float32.generated.c)" = "3" ]
 grep -Fq 'clair_rt_layer_f32(w->rows, w->cols, clair_layer_couche_1, &clair_layer);' build/test_noyaux_float32.generated.c

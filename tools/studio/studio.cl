@@ -116,7 +116,7 @@ def dossier_permis(chemin: string) -> bool {
     if chemin == "" {
         return false
     }
-    let racines: list[string] = [os.home(), "/storage/emulated/0", dossier()]
+    let racines: list[string] = [os.home(), "/storage/emulated/0", web.load("dossier_initial", ""), dossier()]
     for base in racines {
         let b: string = dossier_canonique(base)
         if b != "" and (chemin == b or chemin[0:len(b) + 1] == b + "/") {
@@ -792,6 +792,7 @@ def main() -> int {
         print("Clair Studio : " + os.error())
         return 1
     }
+    web.save("dossier_initial", d)
     web.save("dossier", d)
     os.set_env("GIT_TERMINAL_PROMPT", "0")       // V0.60 : git ne pose jamais de question au terminal
     // V0.61 : les figures des programmes, effacees a chaque demarrage du Studio
