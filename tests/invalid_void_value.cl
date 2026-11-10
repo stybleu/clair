@@ -1,4 +1,4 @@
-// V0.72 : une fonction sans -> type ne rend rien : elle ne sert pas de valeur
+// V0.72 : une fonction qui n'a aucun return avec une valeur ne rend rien : elle ne sert pas de valeur
 def rien() {
     pass
 }

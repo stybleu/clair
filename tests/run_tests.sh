@@ -702,13 +702,22 @@ printf '%s\n' 'squelettes.cl : OK -> pass, def main { }, def f { } sans type, re
 ./build/clair tests/textes_python.cl -o build/test_textes_python
 [ "$(./build/test_textes_python)" = "$(cat tests/textes_python.expected)" ]
 printf '%s\n' 'textes_python.cl : OK -> len, s[i], s[a:b], for c in s en caracteres ; lower, upper, title, split, join, find, replace, isalpha... identiques a Python'
-expect_compile_error invalid_void_value "rien() gives nothing back (its def has no -> type): it cannot be used as a value"
-expect_compile_error invalid_void_return "f() has no -> type, so it gives nothing back"
+expect_compile_error invalid_void_value "rien() gives nothing back (no return with a value): it cannot be used as a value"
 expect_compile_error invalid_return_empty "return needs a value: f() gives back int"
 expect_compile_error invalid_string_assign "a string cannot be changed in place"
 expect_compile_error invalid_string_method "a string has no method 'majuscules'"
 expect_runtime_error string_index_runtime '\xc3\xa9' 'Clair runtime error: string index out of range (line 5)'
 expect_runtime_error substring_runtime '3' 'Clair runtime error: substring not found (line 4)'
+# V0.73 : les types devines, comme Python
+./build/clair tests/types_devines.cl -o build/test_types_devines
+[ "$(./build/test_types_devines)" = "$(cat tests/types_devines.expected)" ]
+grep -Fq 'static double clair_fn_melange(int64_t x);' build/test_types_devines.generated.c
+grep -Fq 'static bool clair_fn_pair(int64_t n);' build/test_types_devines.generated.c
+grep -Fq 'static void clair_fn_rien(void);' build/test_types_devines.generated.c
+printf '%s\n' 'types_devines.cl : OK -> let x = 5, let p = Point(...), type rendu devine : simple, recursif (fact, fib), mutuel (pair, impair), methodes, int et float melanges, rien'
+expect_compile_error invalid_let_empty "let xs = []: an empty list has no type to guess, write it: let xs: list[int] = []"
+expect_compile_error invalid_return_guess "vide() gives back an empty list, of no known type"
+expect_compile_error invalid_guess_cycle "what b() gives back cannot be guessed, it depends on itself"
 expect_runtime_error dict_changed_runtime 'a' 'Clair runtime error: dictionary changed size during iteration'
 expect_compile_error invalid_in_type "'in' cannot look for float in list[int]: convert it first, e.g. int(x)"
 expect_compile_error invalid_in_right "'in' needs a list, a string or a dictionary on the right, got int"

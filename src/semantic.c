@@ -16,8 +16,10 @@ extern int clair_v17_diag_enabled(void);
 
 static size_t sem_line = 0;
 static const char *sem_file = NULL;
+static int sem_quiet = 0;          /* V0.73: > 0 while a body is only read to guess its type: nothing is said */
 
 static void report(const char *fmt, ...) {
+    if (sem_quiet) return;
     char buf[4096];
     va_list ap;
     va_start(ap, fmt);
@@ -60,11 +62,22 @@ typedef struct {
     const char *return_type;
     const char *function_name;   /* V0.72: the function being checked, for the messages */
     const AstNode *void_ok;      /* V0.72: the call of a statement f(), which may give nothing back */
+    /* V0.73: guessing what a function without -> type gives back (guess_return_types) */
+    struct InferEntry *infer;    /* the functions to guess */
+    size_t infer_count;
+    int probing;                 /* > 0: a body is read only to see its return values */
+    const AstNode *probe_fn;     /* the function read */
+    const char *probe_type;      /* what its return statements give, so far */
+    int probe_values;            /* a return with a value was seen */
+    int probe_blocked;           /* a call to a function not guessed yet */
+    int probe_tentative;         /* a call to a function guessed for now only */
     int had_error;
     int absolue;                 /* > 0 inside an absolue block or an absolue def */
     AstNode *absolue_block;      /* the outermost absolue block being checked */
     const char *alloc_type;      /* let p: ptr[float32] = alloc(n): the type alloc() gives */
 } Semantic;
+
+typedef struct InferEntry { AstNode *fn; char *type; int done; } InferEntry;
 
 /* ptr[float32] ... : the element type, or NULL */
 static const char *ptr_element(const char *type) {
@@ -558,7 +571,7 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
         }
 
         if (strcmp(value, value_type) != 0) {
-            fprintf(stderr,
+            if (!sem_quiet) fprintf(stderr,
                     "semantic error: dictionary literal mixes incompatible value types %s and %s\n",
                     value_type, value);
             s->had_error = 1;
@@ -858,6 +871,27 @@ static int check_format_call(Semantic *s, AstNode *n) {
  *   split(s) / split(s, sep) -> list[string], strip(s) -> string.
  * 1 when n is one of them (renamed @load_csv...), 0 otherwise, -1 on error.
  */
+/*
+ * V0.73: what a call of fn gives.  A function without -> type is guessed first
+ * (guess_return_types): while it is not known yet, reading a body that calls it
+ * stops there (blocked), or goes on with the guess of the previous round.
+ */
+static const char *call_result_type(Semantic *s, const AstNode *fn) {
+    if (!fn->type_name || strcmp(fn->type_name, "@infer") != 0) return fn->type_name;
+    if (s->probing) {
+        for (size_t i = 0; i < s->infer_count; i++) {
+            if (s->infer[i].fn == fn && s->infer[i].type) { s->probe_tentative = 1; return s->infer[i].type; }
+        }
+        if (fn == s->probe_fn && s->probe_type) { s->probe_tentative = 1; return s->probe_type; }
+        s->probe_blocked = 1;
+        return NULL;
+    }
+    report("semantic error: what %s() gives back cannot be guessed, it depends on itself: "
+           "write its type, def %s(...) -> type\n", shown_name(fn->text), shown_name(fn->text));
+    s->had_error = 1;
+    return NULL;
+}
+
 /* V0.72: n becomes the call @tx_name of the text runtime (src/clair_text_rt.c), of that type */
 static const char *to_text_call(AstNode *n, const char *name, const char *type) {
     char *text = malloc(strlen(name) + 5);
@@ -2403,7 +2437,7 @@ static const char *expr_type(Semantic *s, AstNode *n) {
     const char *t = expr_type_at(s, n);
     if (t && strcmp(t, "void") == 0 && n != s->void_ok) {
         /* V0.72: f() without -> type is a statement, never a value */
-        report("semantic error: %s() gives nothing back (its def has no -> type): it cannot be used as a value\n",
+        report("semantic error: %s() gives nothing back (no return with a value): it cannot be used as a value\n",
                n->text ? shown_name(n->text) : "this call");
         s->had_error = 1;
         t = NULL;
@@ -2525,7 +2559,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
         case AST_IDENTIFIER: {
             const char *type = find_var(s, n->text);
             if (!type) {
-                const char *suggestion = clair_v16_suggest(s, n->text);
+                const char *suggestion = sem_quiet ? NULL : clair_v16_suggest(s, n->text);
                 if (suggestion)
                     clair_v17_set_suggestion(suggestion);
                 report("semantic error: undefined variable '%s'\n", n->text);
@@ -2668,7 +2702,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     const char *expected = field->type_name;
                     const char *actual = expr_type_expected(s, n->children[i], expected);
                     if (!actual || !assignable(expected, actual)) {
-                        fprintf(stderr,
+                        if (!sem_quiet) fprintf(stderr,
                                 "semantic error: constructor argument %zu for '%s.%s' expects %s, got %s\n",
                                 i + 1, cls->text, field->text, expected ? expected : "?",
                                 actual ? actual : "invalid");
@@ -2731,7 +2765,9 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     return NULL;
                 }
             }
-            set_type(n, fn->type_name);
+            const char *result = call_result_type(s, fn);       /* V0.73 */
+            if (!result) return NULL;
+            set_type(n, result);
             return n->type_name;
         }
         case AST_METHOD_CALL: {
@@ -2798,7 +2834,9 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             free(n->text);
             n->text = mangled;
             n->kind = AST_CALL;
-            set_type(n, fn->type_name);
+            const char *result = call_result_type(s, fn);       /* V0.73 */
+            if (!result) return NULL;
+            set_type(n, result);
             return n->type_name;
         }
         case AST_CONSTRUCT:
@@ -2895,6 +2933,27 @@ static int check_stmt(Semantic *s, AstNode *n) {
 static int check_stmt_at(Semantic *s, AstNode *n) {
     switch (n->kind) {
         case AST_LET: {
+            if (!n->type_name) {
+                /* V0.73: let x = 5, the type of its value, as in Python */
+                AstNode *value = n->children[0];
+                if ((value->kind == AST_LIST || value->kind == AST_DICT) && value->child_count == 0) {
+                    int list = value->kind == AST_LIST;
+                    report("semantic error: let %s = %s: an empty %s has no type to guess, write it: let %s: %s = %s\n",
+                           n->text, list ? "[]" : "{}", list ? "list" : "dictionary", n->text,
+                           list ? "list[int]" : "dict[string, int]", list ? "[]" : "{}");
+                    s->had_error = 1;
+                    return 0;
+                }
+                const char *actual = expr_type(s, value);
+                if (!actual) return 0;
+                if (is_matrix_row_type(actual)) {
+                    error_type(s, "m[i] alone is a matrix row: write m[i][j]");
+                    return 0;
+                }
+                if (!set_type(n, actual)) return 0;
+                if (is_ptr_type(n->type_name) && !require_absolue(s, "a ptr variable")) return 0;
+                return add_var(s, n->text, n->type_name);
+            }
             if (is_ptr_type(n->type_name) && !require_absolue(s, "a ptr variable")) return 0;
             const char *actual = expr_type_expected(s, n->children[0], n->type_name);
             if (!actual) return 0;
@@ -3091,6 +3150,29 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
         case AST_RETURN: {
             /* V0.72: a function without -> type gives nothing back (void) */
             const char *fname = s->function_name ? shown_name(s->function_name) : "the function";
+            if (s->return_type && strcmp(s->return_type, "@infer") == 0) {
+                /* V0.73: what it gives back is guessed from its return statements */
+                if (n->child_count == 0) return 1;
+                AstNode *value = n->children[0];
+                if (!s->probing) {
+                    if ((value->kind == AST_LIST || value->kind == AST_DICT) && value->child_count == 0)
+                        report("semantic error: %s() gives back an empty %s, of no known type: write it, "
+                               "def %s(...) -> %s\n", fname, value->kind == AST_LIST ? "list" : "dictionary", fname,
+                               value->kind == AST_LIST ? "list[int]" : "dict[string, int]");
+                    else if (expr_type(s, value))
+                        report("semantic error: what %s() gives back cannot be guessed: write its type, "
+                               "def %s(...) -> type\n", fname, fname);
+                    s->had_error = 1;
+                    return 0;
+                }
+                s->probe_values = 1;
+                const char *t = expr_type(s, value);
+                if (!t) return 1;               /* not known yet, or a mistake the real check will show */
+                if (!s->probe_type) s->probe_type = t;
+                else if (strcmp(t, s->probe_type) != 0 && assignable(t, s->probe_type) && !assignable(s->probe_type, t))
+                    s->probe_type = t;          /* return 1 here, return 2.5 there: float */
+                return 1;
+            }
             if (s->return_type && strcmp(s->return_type, "void") == 0) {
                 if (n->child_count == 0) return 1;
                 report("semantic error: %s() has no -> type, so it gives nothing back: write return alone, "
@@ -3304,7 +3386,8 @@ static const char *zero_text(const char *type) {
 
 static int end_with_return(Semantic *s, AstNode *fn) {
     AstNode *body = fn->children[fn->child_count - 1];
-    if (strcmp(fn->type_name, "void") == 0 || strcmp(fn->text, "main") == 0 || always_returns(body)) return 1;
+    if (strcmp(fn->type_name, "void") == 0 || strcmp(fn->type_name, "@infer") == 0 ||
+        strcmp(fn->text, "main") == 0 || always_returns(body)) return 1;
     if (strncmp(fn->text, "__test_", 7) == 0) return 1;
     AstNode *zero = zero_value(fn->type_name);
     if (!zero) {
@@ -3329,7 +3412,7 @@ static int check_function_signature(Semantic *s, AstNode *fn) {
     sem_line = fn->line;          /* V0.49 */
     sem_file = fn->file;
     if (!fn || fn->kind != AST_FUNCTION || !fn->type_name) return 0;
-    if (strcmp(fn->type_name, "void") != 0 && !is_known_type(s, fn->type_name)) {
+    if (strcmp(fn->type_name, "void") != 0 && strcmp(fn->type_name, "@infer") != 0 && !is_known_type(s, fn->type_name)) {
         report("semantic error: unknown return type '%s' for function '%s'\n",
                 fn->type_name, fn->text);
         s->had_error = 1;
@@ -3385,6 +3468,78 @@ static int check_function(Semantic *s, AstNode *fn) {
     return ok;
 }
 
+/*
+ * V0.73: def f(x: int) { return x * 2 } gives back an int, as Python would.  Each
+ * function without -> type is read quietly, only to see what its return
+ * statements give; one that calls a function not guessed yet waits for the next
+ * round.  A recursive one (def fact(n: int) { if n < 2 { return 1 } return n *
+ * fact(n - 1) }) takes, for its own calls, what its other return statements give,
+ * until the guess no longer changes.  Without any return value: void.
+ */
+static void guess_return_types(Semantic *s) {
+    AstNode *program = s->program;
+    size_t count = 0;
+    for (size_t i = 0; i < program->child_count; i++) {
+        AstNode *fn = program->children[i];
+        count += fn->kind == AST_FUNCTION && fn->type_name && strcmp(fn->type_name, "@infer") == 0;
+    }
+    if (count == 0) return;
+    InferEntry *entries = calloc(count, sizeof(*entries));
+    if (!entries) return;
+    size_t k = 0;
+    for (size_t i = 0; i < program->child_count; i++) {
+        AstNode *fn = program->children[i];
+        if (fn->kind == AST_FUNCTION && fn->type_name && strcmp(fn->type_name, "@infer") == 0) entries[k++].fn = fn;
+    }
+    s->infer = entries;
+    s->infer_count = count;
+    for (size_t round = 0; round < 2 * count + 2; round++) {
+        int changed = 0;
+        for (size_t i = 0; i < count; i++) {
+            InferEntry *e = &entries[i];
+            if (e->done) continue;
+            /* read the body quietly; whatever it changes in the scopes is put back */
+            size_t var_count = s->var_count, depth = s->depth;
+            int had_error = s->had_error, absolue = s->absolue;
+            AstNode *absolue_block = s->absolue_block;
+            s->probing = 1;
+            s->probe_fn = e->fn;
+            s->probe_type = NULL;
+            s->probe_values = s->probe_blocked = s->probe_tentative = 0;
+            sem_quiet++;
+            (void)check_function(s, e->fn);
+            sem_quiet--;
+            while (s->var_count > var_count) free(s->vars[--s->var_count].name);
+            s->depth = depth;
+            s->had_error = had_error;
+            s->absolue = absolue;
+            s->absolue_block = absolue_block;
+            s->return_type = NULL;
+            s->probing = 0;
+            const char *t = s->probe_type;
+            if (!s->probe_blocked && (!s->probe_tentative || (t && e->type && strcmp(t, e->type) == 0))) {
+                if (t) (void)ast_set_type(e->fn, t, strlen(t));
+                else if (!s->probe_values) (void)ast_set_type(e->fn, "void", 4);
+                e->done = 1;                    /* still @infer: the real check says why */
+                changed = 1;
+            } else if (t && (!e->type || strcmp(t, e->type) != 0)) {
+                free(e->type);
+                e->type = malloc(strlen(t) + 1);
+                if (e->type) strcpy(e->type, t);
+                changed = 1;
+            }
+        }
+        if (!changed) break;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (!entries[i].done && entries[i].type) (void)ast_set_type(entries[i].fn, entries[i].type, strlen(entries[i].type));
+        free(entries[i].type);
+    }
+    free(entries);
+    s->infer = NULL;
+    s->infer_count = 0;
+}
+
 int semantic_check(AstNode *program) {
     if (!program || program->kind != AST_PROGRAM) return 0;
 
@@ -3422,6 +3577,7 @@ int semantic_check(AstNode *program) {
         }
     }
 
+    if (!s.had_error) guess_return_types(&s);          /* V0.73 */
     for (size_t i = 0; i < program->child_count && !s.had_error; i++) {
         AstNode *decl = program->children[i];
         if (decl->kind == AST_FUNCTION && !check_function(&s, decl)) break;

@@ -1546,10 +1546,12 @@ static AstNode *parse_statement(Parser *p) {
         next(p);
         Token name = p->current;
         if (!expect(p, TOKEN_IDENTIFIER, "variable name")) return NULL;
-        if (!expect(p, TOKEN_COLON, "':'")) return NULL;
+        /* V0.73: let x = 5, the type is the value's, as in Python */
+        int typed = p->current.kind != TOKEN_EQUAL;
+        if (typed && !expect(p, TOKEN_COLON, "':' or '='")) return NULL;
         AstNode *n = ast_new(AST_LET, name.start, name.length);
         if (!n) return NULL;
-        if (!parse_and_set_type(p, n)) { ast_free(n); return NULL; }
+        if (typed && !parse_and_set_type(p, n)) { ast_free(n); return NULL; }
         if (!expect(p, TOKEN_EQUAL, "'='")) { ast_free(n); return NULL; }
 
         AstNode *value = parse_expression(p);
@@ -1858,15 +1860,16 @@ static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_l
 
     if (parens && !expect(p, TOKEN_RPAREN, "')'")) { ast_free(fn); return NULL; }
     /*
-     * V0.72: without -> type, the function gives back nothing (void), as a Python
-     * function without return.  main without a type is main() -> int, ending with 0.
+     * V0.72: without -> type, a function gives back what its return statements give
+     * (V0.73: the semantic pass guesses it, "@infer" until then), or nothing (void),
+     * as in Python.  main without a type is main() -> int, ending with 0.
      */
     int is_main = !owner && name.length == 4 && memcmp(name.start, "main", 4) == 0;
     int typed = p->current.kind == TOKEN_ARROW;
     if (typed) {
         next(p);
         if (!parse_and_set_type(p, fn)) { ast_free(fn); return NULL; }
-    } else if (!(is_main ? ast_set_type(fn, "int", 3) : ast_set_type(fn, "void", 4))) {
+    } else if (!(is_main ? ast_set_type(fn, "int", 3) : ast_set_type(fn, "@infer", 6))) {
         ast_free(fn);
         return NULL;
     }
