@@ -258,11 +258,11 @@ grep -Fq 'list index must be int, got float' build/invalid_list_index_type.stder
 printf '%s\n' 'invalid_list_index_type.cl : OK -> index non-int refuse'
 
 if ./build/clair tests/invalid_index_non_list.cl -o build/test_invalid_index_non_list >build/invalid_index_non_list.stdout 2>build/invalid_index_non_list.stderr; then
-    printf '%s\n' 'invalid_index_non_list.cl : ECHEC -> indexation string aurait du etre refusee' >&2
+    printf '%s\n' 'invalid_index_non_list.cl : ECHEC -> indexation d un int aurait du etre refusee' >&2
     exit 1
 fi
-grep -Fq 'indexing expects a list or dictionary, got string' build/invalid_index_non_list.stderr
-printf '%s\n' 'invalid_index_non_list.cl : OK -> indexation reservee aux listes et dictionnaires'
+grep -Fq 'indexing expects a list, a string or a dictionary, got int' build/invalid_index_non_list.stderr
+printf '%s\n' 'invalid_index_non_list.cl : OK -> indexation reservee aux listes, textes et dictionnaires'
 
 if ./build/clair tests/invalid_list_type.cl -o build/test_invalid_list_type >build/invalid_list_type.stdout 2>build/invalid_list_type.stderr; then
     printf '%s\n' 'invalid_list_type.cl : ECHEC -> liste imbriquee aurait du etre refusee en V0.13' >&2
@@ -692,6 +692,23 @@ expect_runtime_error split_empty_runtime '2' 'Clair runtime error: split() empty
 grep -Fq 'static ClairList clair_fn_comprehension_1(ClairList xs) {' build/test_briques_python.generated.c
 grep -Fq 'clair_rt_list_has_i64(xs, 4)' build/test_briques_python.generated.c
 printf '%s\n' 'briques_python.cl : OK -> xs[-1], x in xs, [x * x for x in xs if ...], for k in dico ; identique a Python'
+# V0.72 : squelettes (pass, def main { }, return seul, else if) et textes en caracteres, comme Python
+./build/clair tests/squelettes.cl -o build/test_squelettes 2> build/squelettes.stderr
+[ "$(./build/test_squelettes)" = "$(cat tests/squelettes.expected)" ]
+grep -Fq 'warning: calcul() can reach its end without return: it then gives back 0.0 (line 24)' build/squelettes.stderr
+grep -Fq 'warning: premier_pair() can reach its end without return: it then gives back 0 (line 53)' build/squelettes.stderr
+if grep -q 'does not return a value' build/squelettes.stderr; then printf '%s\n' 'squelettes.cl : ECHEC -> Clang voit une fonction sans return' >&2; exit 1; fi
+printf '%s\n' 'squelettes.cl : OK -> pass, def main { }, def f { } sans type, return seul, else if, fonction typee sans return : 0 et un avertissement'
+./build/clair tests/textes_python.cl -o build/test_textes_python
+[ "$(./build/test_textes_python)" = "$(cat tests/textes_python.expected)" ]
+printf '%s\n' 'textes_python.cl : OK -> len, s[i], s[a:b], for c in s en caracteres ; lower, upper, title, split, join, find, replace, isalpha... identiques a Python'
+expect_compile_error invalid_void_value "rien() gives nothing back (its def has no -> type): it cannot be used as a value"
+expect_compile_error invalid_void_return "f() has no -> type, so it gives nothing back"
+expect_compile_error invalid_return_empty "return needs a value: f() gives back int"
+expect_compile_error invalid_string_assign "a string cannot be changed in place"
+expect_compile_error invalid_string_method "a string has no method 'majuscules'"
+expect_runtime_error string_index_runtime '\xc3\xa9' 'Clair runtime error: string index out of range (line 5)'
+expect_runtime_error substring_runtime '3' 'Clair runtime error: substring not found (line 4)'
 expect_runtime_error dict_changed_runtime 'a' 'Clair runtime error: dictionary changed size during iteration'
 expect_compile_error invalid_in_type "'in' cannot look for float in list[int]: convert it first, e.g. int(x)"
 expect_compile_error invalid_in_right "'in' needs a list, a string or a dictionary on the right, got int"

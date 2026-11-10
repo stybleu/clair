@@ -60,6 +60,7 @@ static int run_clang(const char *cpath, const char *output) {
             "-Wall",
             "-Wextra",
             "-Wno-unused-function",
+            "-Wno-unused-parameter",   /* V0.72: def calcul(x: float) -> float { pass }, as Python says nothing */
             "-Wno-implicit-const-int-float-conversion",   /* let x: float32 = 16777217 rounds, like NumPy */
             "-fno-math-errno",   /* Clair never reads errno: lets Clang vectorize sqrt() and friends */
             allow_fma ? "-ffp-contract=on" : "-ffp-contract=off",

@@ -90,6 +90,17 @@ add_custom_command(
     COMMENT "Embedding the module os (C part)")
 target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_os_module.h ${CMAKE_CURRENT_BINARY_DIR}/clair_os_runtime.h)
 
+# V0.72: the methods of a text and the texts counted in characters (C part)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_text_runtime.h
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_CURRENT_SOURCE_DIR}
+            "-DIN=clair_text_rt.c" -DNAME=clair_text_runtime_text
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/clair_text_runtime.h
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.cmake
+    DEPENDS src/clair_text_rt.c tools/embed_file.cmake
+    COMMENT "Embedding the text methods (C part)")
+target_sources(clair PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/clair_text_runtime.h)
+
 # V0.61: the module plot, the same way
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/clair_plot_module.h

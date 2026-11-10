@@ -1,6 +1,7 @@
 #include "semantic.h"
 extern void clair_v19_set_plus_column(size_t);
 #include "diagnostics.h"
+#include "text_methods.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,17 @@ static void report(const char *fmt, ...) {
     clair_diag_show(83, sem_file, sem_line, 1, buf);
 }
 
+/* Moteur__bouge, as written: Moteur.bouge */
+static const char *shown_name(const char *name) {
+    static char buf[2][256];
+    static int which = 0;
+    const char *sep = name ? strstr(name, "__") : NULL;
+    if (!sep || sep == name) return name ? name : "?";
+    char *out = buf[which ^= 1];
+    snprintf(out, sizeof(buf[0]), "%.*s.%s", (int)(sep - name), name, sep + 2);
+    return out;
+}
+
 typedef struct {
     char *name;
     const char *type;
@@ -46,6 +58,8 @@ typedef struct {
     size_t var_capacity;
     size_t depth;
     const char *return_type;
+    const char *function_name;   /* V0.72: the function being checked, for the messages */
+    const AstNode *void_ok;      /* V0.72: the call of a statement f(), which may give nothing back */
     int had_error;
     int absolue;                 /* > 0 inside an absolue block or an absolue def */
     AstNode *absolue_block;      /* the outermost absolue block being checked */
@@ -844,6 +858,50 @@ static int check_format_call(Semantic *s, AstNode *n) {
  *   split(s) / split(s, sep) -> list[string], strip(s) -> string.
  * 1 when n is one of them (renamed @load_csv...), 0 otherwise, -1 on error.
  */
+/* V0.72: n becomes the call @tx_name of the text runtime (src/clair_text_rt.c), of that type */
+static const char *to_text_call(AstNode *n, const char *name, const char *type) {
+    char *text = malloc(strlen(name) + 5);
+    if (!text) return NULL;
+    strcpy(text, "@tx_");
+    strcat(text, name);
+    free(n->text);
+    n->text = text;
+    n->kind = AST_CALL;
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
+/*
+ * V0.72: s.lower(), s.split(","), ", ".join(xs)... (children: the text, then the
+ * arguments), checked with the table of src/text_methods.h.
+ */
+static const char *check_text_method(Semantic *s, AstNode *n) {
+    const TextMethod *m = text_method(n->text);
+    if (!m) {
+        report("semantic error: a string has no method '%s'\n", n->text);
+        s->had_error = 1;
+        return NULL;
+    }
+    size_t given = n->child_count - 1;
+    if ((int)given < m->min || (int)given > m->max) {
+        if (m->min == m->max) report("semantic error: %s() expects %d argument(s), got %zu\n", m->name, m->min, given);
+        else report("semantic error: %s() expects %d to %d arguments, got %zu\n", m->name, m->min, m->max, given);
+        s->had_error = 1;
+        return NULL;
+    }
+    for (size_t i = 0; i < given; i++) {
+        const char *expected = m->args[i];
+        const char *actual = expr_type_expected(s, n->children[i + 1], expected);
+        int ok = actual && (strcmp(expected, "int") == 0 ? is_index_type(actual) : assignable(expected, actual));
+        if (!ok) {
+            report("semantic error: argument %zu of %s() expects %s, got %s\n", i + 1, m->name, expected,
+                   actual ? actual : "invalid");
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    return to_text_call(n, m->name, m->result);
+}
+
 static int check_text_call(Semantic *s, AstNode *n) {
     static const char *const names[] = { "load_csv", "save_csv", "read_lines", "split", "strip", NULL };
     size_t c = 0;
@@ -2135,6 +2193,17 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         return n->type_name;
     }
 
+    /* V0.72: "ab" * 3, 3 * "ab": the text repeated, like Python */
+    if (strcmp(n->text, "*") == 0 && n->child_count == 2 &&
+        ((strcmp(left, "string") == 0 && is_index_type(right)) || (is_index_type(left) && strcmp(right, "string") == 0))) {
+        if (strcmp(right, "string") == 0) {
+            AstNode *t = n->children[0];
+            n->children[0] = n->children[1];
+            n->children[1] = t;
+        }
+        return to_text_call(n, "repeat", "string");
+    }
+
     if (strcmp(n->text, "-") == 0 || strcmp(n->text, "*") == 0 ||
         strcmp(n->text, "/") == 0) {
         if (!is_numeric(left) || !is_numeric(right)) {
@@ -2332,6 +2401,13 @@ static const char *expr_type(Semantic *s, AstNode *n) {
     const char *saved_file = sem_file;
     if (n && n->line) { sem_line = n->line; sem_file = n->file; }
     const char *t = expr_type_at(s, n);
+    if (t && strcmp(t, "void") == 0 && n != s->void_ok) {
+        /* V0.72: f() without -> type is a statement, never a value */
+        report("semantic error: %s() gives nothing back (its def has no -> type): it cannot be used as a value\n",
+               n->text ? shown_name(n->text) : "this call");
+        s->had_error = 1;
+        t = NULL;
+    }
     sem_line = saved_line;
     sem_file = saved_file;
     return t;
@@ -2413,7 +2489,16 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 return n->type_name;
             }
 
-            report("semantic error: indexing expects a list or dictionary, got %s\n",
+            if (base && strcmp(base, "string") == 0) {             /* V0.72: s[i], one character */
+                if (!index || !is_index_type(index)) {
+                    report("semantic error: string index must be int, got %s\n", index ? index : "invalid");
+                    s->had_error = 1;
+                    return NULL;
+                }
+                return to_text_call(n, "at", "string");
+            }
+
+            report("semantic error: indexing expects a list, a string or a dictionary, got %s\n",
                     base ? base : "invalid");
             s->had_error = 1;
             return NULL;
@@ -2456,6 +2541,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+            /* V0.72: a text call already checked (s.lower(), s[i], len(s), s * n) */
+            if (n->text && strncmp(n->text, "@tx_", 4) == 0 && n->type_name) return n->type_name;
             /* V0.47: m.sqrt(x) after import math as m: the builtin, even if the program has its own sqrt */
             int from_math = 0;
             if (n->text && strncmp(n->text, "math.", 5) == 0) {
@@ -2563,6 +2650,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     s->had_error = 1;
                     return NULL;
                 }
+                if (strcmp(arg, "string") == 0) return to_text_call(n, "len", "int");   /* V0.72: in characters */
                 set_type(n, "int");
                 return n->type_name;
             }
@@ -2654,6 +2742,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
              */
             if (n->child_count < 1 || !n->text) return NULL;
             const char *receiver = expr_type(s, n->children[0]);
+            if (receiver && strcmp(receiver, "string") == 0) return check_text_method(s, n);   /* V0.72 */
             const AstNode *cls = receiver ? find_class(s, receiver) : NULL;
             if (!cls) {
                 if (receiver && is_list_type(receiver) && strcmp(n->text, "append") == 0) {
@@ -2876,6 +2965,11 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
         case AST_INDEX_ASSIGN: {
             const char *base = write_target_type(s, n, 2, "assignment to");
             if (!base) return 0;
+            if (strcmp(base, "string") == 0) {                     /* V0.72 */
+                error_type(s, "a string cannot be changed in place, as in Python: build a new one, "
+                              "s[0:i] + c + s[i + 1:]");
+                return 0;
+            }
 
             const char *index = expr_type(s, n->children[0]);
 
@@ -2995,6 +3089,21 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             return 1;
         }
         case AST_RETURN: {
+            /* V0.72: a function without -> type gives nothing back (void) */
+            const char *fname = s->function_name ? shown_name(s->function_name) : "the function";
+            if (s->return_type && strcmp(s->return_type, "void") == 0) {
+                if (n->child_count == 0) return 1;
+                report("semantic error: %s() has no -> type, so it gives nothing back: write return alone, "
+                       "or give it a type (def %s(...) -> type)\n", fname, fname);
+                s->had_error = 1;
+                return 0;
+            }
+            if (n->child_count == 0) {
+                report("semantic error: return needs a value: %s() gives back %s\n", fname,
+                       s->return_type ? s->return_type : "a value");
+                s->had_error = 1;
+                return 0;
+            }
             const char *actual = expr_type_expected(s, n->children[0], s->return_type);
             if (!actual || !assignable(s->return_type, actual)) {
                 report("semantic error: return expects %s, got %s\n",
@@ -3058,6 +3167,7 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             if (!list) return 0;
             const char *element = list_element_type(list);
             if (is_dict_type(list)) element = "string";             /* for k in d: the keys, in order */
+            if (strcmp(list, "string") == 0) element = "string";    /* V0.72: for c in s, its characters */
             if (!element) {
                 char message[160];
                 if (is_matrix_type(list)) {
@@ -3077,6 +3187,7 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
         }
         case AST_EXPR_STMT:
             /* A call used as a statement; its result, if any, is discarded. */
+            s->void_ok = n->child_count == 1 ? n->children[0] : NULL;
             return n->child_count == 1 && expr_type(s, n->children[0]) != NULL;
         case AST_BREAK:
         case AST_CONTINUE:
@@ -3134,11 +3245,91 @@ static int check_class_decl(Semantic *s, AstNode *cls) {
     return 1;
 }
 
+/*
+ * V0.72: a function with a type that can reach its end without return.  Every
+ * path ends with return: return itself, a block holding one, if/else whose two
+ * branches do, while true with no break out of it.
+ */
+static int breaks_out(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_BREAK) return 1;
+    if (n->kind == AST_WHILE || n->kind == AST_FOR || n->kind == AST_FOR_EACH) return 0;   /* their own break */
+    for (size_t i = 0; i < n->child_count; i++) if (breaks_out(n->children[i])) return 1;
+    return 0;
+}
+
+static int always_returns(const AstNode *n) {
+    if (!n) return 0;
+    switch (n->kind) {
+        case AST_RETURN:
+            return 1;
+        case AST_BLOCK:
+            for (size_t i = 0; i < n->child_count; i++) if (always_returns(n->children[i])) return 1;
+            return 0;
+        case AST_IF:
+            return n->child_count == 3 && always_returns(n->children[1]) && always_returns(n->children[2]);
+        case AST_WHILE:
+            return n->child_count == 2 && n->children[0]->kind == AST_BOOL && n->children[0]->text &&
+                   strcmp(n->children[0]->text, "true") == 0 && !breaks_out(n->children[1]);
+        default:
+            return 0;
+    }
+}
+
+/* the value given back when such a function reaches its end, as Python gives None: 0, 0.0, false, "", [], {} */
+static AstNode *zero_value(const char *type) {
+    if (!type) return NULL;
+    if (machine_bits(type) || is_big(type)) return ast_new(AST_INTEGER, "0", 1);
+    if (strcmp(type, "bigint") == 0) {
+        AstNode *call = ast_new(AST_CALL, "bigint", 6), *zero = ast_new(AST_INTEGER, "0", 1);
+        if (!call || !zero || !ast_add_child(call, zero)) { ast_free(call); ast_free(zero); return NULL; }
+        return call;
+    }
+    if (is_float_type(type)) return ast_new(AST_FLOAT, "0.0", 3);
+    if (strcmp(type, "bool") == 0) return ast_new(AST_BOOL, "false", 5);
+    if (strcmp(type, "string") == 0) return ast_new(AST_STRING, "", 0);
+    if (is_list_type(type)) return ast_new(AST_LIST, NULL, 0);
+    if (is_dict_type(type)) return ast_new(AST_DICT, NULL, 0);
+    return NULL;
+}
+
+static const char *zero_text(const char *type) {
+    if (is_list_type(type)) return "an empty list";
+    if (is_dict_type(type)) return "an empty dict";
+    if (strcmp(type, "bool") == 0) return "false";
+    if (strcmp(type, "string") == 0) return "\"\"";
+    if (is_float_type(type)) return "0.0";
+    return "0";
+}
+
+static int end_with_return(Semantic *s, AstNode *fn) {
+    AstNode *body = fn->children[fn->child_count - 1];
+    if (strcmp(fn->type_name, "void") == 0 || strcmp(fn->text, "main") == 0 || always_returns(body)) return 1;
+    if (strncmp(fn->text, "__test_", 7) == 0) return 1;
+    AstNode *zero = zero_value(fn->type_name);
+    if (!zero) {
+        report("semantic error: %s() can reach its end without return: add a return of %s at the end\n",
+               shown_name(fn->text), fn->type_name);
+        s->had_error = 1;
+        return 0;
+    }
+    AstNode *ret = ast_new(AST_RETURN, NULL, 0);
+    if (!ret || !ast_add_child(ret, zero)) { ast_free(ret); ast_free(zero); return 0; }
+    zero->line = ret->line = fn->line;
+    zero->file = ret->file = fn->file;
+    if (!ast_add_child(body, ret)) { ast_free(ret); return 0; }
+    fprintf(stderr, "warning: %s() can reach its end without return: it then gives back %s", shown_name(fn->text),
+            zero_text(fn->type_name));
+    if (fn->file) fprintf(stderr, " (%s, line %zu)\n", fn->file, fn->line);
+    else fprintf(stderr, " (line %zu)\n", fn->line);
+    return 1;
+}
+
 static int check_function_signature(Semantic *s, AstNode *fn) {
     sem_line = fn->line;          /* V0.49 */
     sem_file = fn->file;
     if (!fn || fn->kind != AST_FUNCTION || !fn->type_name) return 0;
-    if (!is_known_type(s, fn->type_name)) {
+    if (strcmp(fn->type_name, "void") != 0 && !is_known_type(s, fn->type_name)) {
         report("semantic error: unknown return type '%s' for function '%s'\n",
                 fn->type_name, fn->text);
         s->had_error = 1;
@@ -3161,7 +3352,9 @@ static int check_function_signature(Semantic *s, AstNode *fn) {
 static int check_function(Semantic *s, AstNode *fn) {
     sem_line = fn->line;          /* V0.49 */
     sem_file = fn->file;
+    if (!end_with_return(s, fn)) return 0;
     s->return_type = fn->type_name;
+    s->function_name = fn->text;
     enter_scope(s);
 
     size_t param_count = fn->child_count ? fn->child_count - 1 : 0;

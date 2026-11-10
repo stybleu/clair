@@ -23,6 +23,27 @@ static int expect(Parser *p, TokenKind kind, const char *what) {
 }
 
 static AstNode *parse_expression(Parser *p);
+
+/*
+ * V0.72: pass, as in Python: a statement that does nothing, to keep the place of a
+ * body not written yet (def plus_tard() { pass }, Class Moteur { pass }).  It is
+ * not a keyword: a variable may still be called pass (pass = 3, pass.x, pass: int).
+ */
+static int at_pass(Parser *p) {
+    if (p->current.kind != TOKEN_IDENTIFIER || p->current.length != 4 ||
+        memcmp(p->current.start, "pass", 4) != 0) return 0;
+    Lexer ahead = p->lexer;
+    switch (lexer_next(&ahead).kind) {
+        case TOKEN_EQUAL: case TOKEN_LPAREN: case TOKEN_DOT: case TOKEN_LBRACKET: case TOKEN_COLON:
+        case TOKEN_PLUS_EQUAL: case TOKEN_MINUS_EQUAL: case TOKEN_STAR_EQUAL: case TOKEN_SLASH_EQUAL:
+        case TOKEN_PERCENT_EQUAL: case TOKEN_AMP_EQUAL: case TOKEN_PIPE_EQUAL: case TOKEN_CARET_EQUAL:
+        case TOKEN_SHL_EQUAL: case TOKEN_SHR_EQUAL:
+            return 0;
+        default:
+            return 1;
+    }
+}
+
 static AstNode *parse_block(Parser *p);
 static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_len);
 static int parse_unit(Parser *p, AstNode *node);
@@ -696,6 +717,23 @@ static AstNode *parse_if_statement(Parser *p) {
 
     if (p->current.kind == TOKEN_ELSE) {
         next(p);
+        if (p->current.kind == TOKEN_IF) {
+            /* V0.72: else if c { } (elif in Python): an else block holding that if */
+            AstNode *inner = parse_if_statement(p);
+            AstNode *else_block = inner ? ast_new(AST_BLOCK, NULL, 0) : NULL;
+            if (!else_block || !ast_add_child(else_block, inner)) {
+                ast_free(else_block);
+                ast_free(inner);
+                ast_free(n);
+                return NULL;
+            }
+            if (!ast_add_child(n, else_block)) {
+                ast_free(else_block);
+                ast_free(n);
+                return NULL;
+            }
+            return n;
+        }
         if (!expect(p, TOKEN_LBRACE, "'{'")) {
             ast_free(n);
             return NULL;
@@ -1525,12 +1563,23 @@ static AstNode *parse_statement(Parser *p) {
         return n;
     }
 
+    if (at_pass(p)) {
+        /* nothing: an empty @splice, which parse_block leaves out */
+        next(p);
+        return ast_new(AST_BLOCK, "@splice", 7);
+    }
+
     if (p->current.kind == TOKEN_IDENTIFIER) {
         return parse_identifier_statement(p);
     }
 
     if (p->current.kind == TOKEN_RETURN) {
+        Token ret = p->current;
         next(p);
+        /* V0.72: return alone (the end of the line or of the block), in a function without -> type */
+        if (p->current.kind == TOKEN_RBRACE || p->current.kind == TOKEN_EOF || p->current.line != ret.line) {
+            return ast_new(AST_RETURN, NULL, 0);
+        }
         AstNode *value = parse_expression(p);
         if (!value) return NULL;
 
@@ -1648,6 +1697,10 @@ static AstNode *parse_class(Parser *p, AstNode *program) {
     size_t prefix_len = strlen(cls->text) + 2;
 
     while (p->current.kind != TOKEN_RBRACE && p->current.kind != TOKEN_EOF) {
+        if (at_pass(p)) {               /* V0.72: Class Moteur { pass } */
+            next(p);
+            continue;
+        }
         if (p->current.kind == TOKEN_DEF) {
             Token def_token = p->current;
             AstNode *method = parse_function_impl(p, cls->text, strlen(cls->text));
@@ -1725,6 +1778,22 @@ static AstNode *parse_class(Parser *p, AstNode *program) {
     return cls;
 }
 
+/* V0.72: def main { }: return alone gives 0 (main is still main() -> int for C) */
+static int main_returns_zero(AstNode *n) {
+    if (!n) return 1;
+    if (n->kind == AST_RETURN && n->child_count == 0) {
+        AstNode *zero = ast_new(AST_INTEGER, "0", 1);
+        if (!zero) return 0;
+        zero->line = n->line;
+        if (!ast_add_child(n, zero)) { ast_free(zero); return 0; }
+        return 1;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (!main_returns_zero(n->children[i])) return 0;
+    }
+    return 1;
+}
+
 /*
  * Parses `def name(params) -> type { body }`.
  *
@@ -1738,7 +1807,9 @@ static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_l
 
     Token name = p->current;
     if (!expect(p, TOKEN_IDENTIFIER, "function name")) return NULL;
-    if (!expect(p, TOKEN_LPAREN, "'('") ) return NULL;
+    /* V0.72: without parameters, the parentheses may be left out: def main { } */
+    int parens = p->current.kind != TOKEN_LBRACE && p->current.kind != TOKEN_ARROW;
+    if (parens && !expect(p, TOKEN_LPAREN, "'('") ) return NULL;
 
     AstNode *fn = NULL;
     if (owner) {
@@ -1765,7 +1836,7 @@ static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_l
         }
     }
 
-    if (p->current.kind != TOKEN_RPAREN) {
+    if (parens && p->current.kind != TOKEN_RPAREN) {
         for (;;) {
             Token param_name = p->current;
             if (!expect(p, TOKEN_IDENTIFIER, "parameter name")) { ast_free(fn); return NULL; }
@@ -1785,15 +1856,31 @@ static AstNode *parse_function_impl(Parser *p, const char *owner, size_t owner_l
         }
     }
 
-    if (!expect(p, TOKEN_RPAREN, "')'")) { ast_free(fn); return NULL; }
-    if (!expect(p, TOKEN_ARROW, "'->'")) { ast_free(fn); return NULL; }
-    if (!parse_and_set_type(p, fn)) { ast_free(fn); return NULL; }
+    if (parens && !expect(p, TOKEN_RPAREN, "')'")) { ast_free(fn); return NULL; }
+    /*
+     * V0.72: without -> type, the function gives back nothing (void), as a Python
+     * function without return.  main without a type is main() -> int, ending with 0.
+     */
+    int is_main = !owner && name.length == 4 && memcmp(name.start, "main", 4) == 0;
+    int typed = p->current.kind == TOKEN_ARROW;
+    if (typed) {
+        next(p);
+        if (!parse_and_set_type(p, fn)) { ast_free(fn); return NULL; }
+    } else if (!(is_main ? ast_set_type(fn, "int", 3) : ast_set_type(fn, "void", 4))) {
+        ast_free(fn);
+        return NULL;
+    }
     if (!expect(p, TOKEN_LBRACE, "'{'")) { ast_free(fn); return NULL; }
 
     AstNode *body = parse_block(p);
     if (!body) { ast_free(fn); return NULL; }
 
     if (!expect(p, TOKEN_RBRACE, "'}'")) {
+        ast_free(body);
+        ast_free(fn);
+        return NULL;
+    }
+    if (is_main && !typed && !main_returns_zero(body)) {
         ast_free(body);
         ast_free(fn);
         return NULL;
