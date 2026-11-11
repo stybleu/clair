@@ -79,7 +79,20 @@ static AstNode *parse_call_after_name(Parser *p, Token name) {
 
     if (p->current.kind != TOKEN_RPAREN) {
         for (;;) {
-            AstNode *arg = parse_expression(p);
+            /* V0.75: key=f, reverse=true (sorted, sort, min, max) */
+            AstNode *arg = NULL;
+            if (p->current.kind == TOKEN_IDENTIFIER) {
+                Lexer ahead = p->lexer;
+                if (lexer_next(&ahead).kind == TOKEN_EQUAL) {
+                    Token name = p->current;
+                    next(p);
+                    next(p);
+                    AstNode *value = parse_expression(p);
+                    arg = value ? ast_new(AST_KWARG, name.start, name.length) : NULL;
+                    if (!arg || !ast_add_child(arg, value)) { ast_free(arg); ast_free(value); ast_free(call); return NULL; }
+                }
+            }
+            if (!arg) arg = parse_expression(p);
             if (!arg) { ast_free(call); return NULL; }
             if (!ast_add_child(call, arg)) { ast_free(arg); ast_free(call); return NULL; }
 
@@ -381,6 +394,17 @@ static AstNode *parse_primary(Parser *p) {
     if (!base) return NULL;
 
     for (;;) {
+        /* V0.75: ops[i](x), ajouteur(3)(4): a call of the value just read (on the same line) */
+        if (p->current.kind == TOKEN_LPAREN && p->current.line == p->previous.line) {
+            Token marker = { TOKEN_IDENTIFIER, "@call", 5, p->current.line, p->current.column };
+            AstNode *call = parse_call_after_name(p, marker);
+            if (!call) { ast_free(base); return NULL; }
+            if (!ast_add_child(call, base)) { ast_free(call); ast_free(base); return NULL; }
+            for (size_t i = call->child_count - 1; i > 0; i--) call->children[i] = call->children[i - 1];
+            call->children[0] = base;
+            base = call;
+            continue;
+        }
         if (p->current.kind == TOKEN_LBRACKET) {
             next(p);
             if (p->current.kind == TOKEN_COLON || p->current.kind == TOKEN_RBRACKET) {
@@ -669,7 +693,38 @@ static AstNode *parse_or(Parser *p) {
     return left;
 }
 
+/*
+ * V0.75: lambda x, y: x + y, as in Python.  The types of x and y come from where
+ * the lambda goes (sorted(xs, key=lambda p: p.x), a parameter def(float) -> float).
+ * "lambda" is not a reserved word: lambda followed by a name or ':' starts one.
+ */
+static int at_lambda(Parser *p) {
+    if (p->current.kind != TOKEN_IDENTIFIER || p->current.length != 6 || memcmp(p->current.start, "lambda", 6) != 0)
+        return 0;
+    Lexer ahead = p->lexer;
+    TokenKind k = lexer_next(&ahead).kind;
+    return k == TOKEN_IDENTIFIER || k == TOKEN_COLON;
+}
+
+static AstNode *parse_lambda(Parser *p) {
+    next(p);
+    AstNode *n = ast_new(AST_LAMBDA, NULL, 0);
+    if (!n) return NULL;
+    while (p->current.kind == TOKEN_IDENTIFIER) {
+        AstNode *param = ast_new(AST_PARAM, p->current.start, p->current.length);
+        if (!param || !ast_add_child(n, param)) { ast_free(param); ast_free(n); return NULL; }
+        next(p);
+        if (p->current.kind != TOKEN_COMMA) break;
+        next(p);
+    }
+    if (!expect(p, TOKEN_COLON, "':' after the parameters of lambda")) { ast_free(n); return NULL; }
+    AstNode *body = parse_expression(p);
+    if (!body || !ast_add_child(n, body)) { ast_free(body); ast_free(n); return NULL; }
+    return n;
+}
+
 static AstNode *parse_expression(Parser *p) {
+    if (at_lambda(p)) return parse_lambda(p);
     return parse_or(p);
 }
 
@@ -1133,6 +1188,36 @@ static int parse_inner_type(Parser *p, char *out, size_t size) {
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
 
+    /* V0.75: def(float, int) -> float, the type of a function given as a value; def(int): gives nothing */
+    if (t.kind == TOKEN_DEF) {
+        next(p);
+        if (!expect(p, TOKEN_LPAREN, "'(' after def in a type")) return 0;
+        char full[512];
+        size_t used = (size_t)snprintf(full, sizeof(full), "def(");
+        int first = 1;
+        while (p->current.kind != TOKEN_RPAREN) {
+            char inner[400];
+            if (!first && !expect(p, TOKEN_COMMA, "','")) return 0;
+            if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
+            used += (size_t)snprintf(full + used, used < sizeof(full) ? sizeof(full) - used : 0, "%s%s", first ? "" : ",", inner);
+            first = 0;
+            if (used >= sizeof(full)) break;
+        }
+        if (!expect(p, TOKEN_RPAREN, "')'")) return 0;
+        char result[400] = "void";
+        if (p->current.kind == TOKEN_ARROW) {
+            next(p);
+            if (!parse_inner_type(p, result, sizeof(result))) return 0;
+        }
+        used += (size_t)snprintf(full + used, used < sizeof(full) ? sizeof(full) - used : 0, ")->%s", result);
+        if (used >= sizeof(full)) {
+            fprintf(stderr, "parse error at %zu:%zu: function type too long\n", t.line, t.column);
+            p->had_error = 1;
+            return 0;
+        }
+        return ast_set_type(node, full, strlen(full));
+    }
+
     /* ptr[float32]: the address of numbers in memory (only inside absolue blocks) */
     if (t.kind == TOKEN_IDENTIFIER && t.length == 3 && strncmp(t.start, "ptr", 3) == 0) {
         next(p);
@@ -1209,7 +1294,7 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         if (!expect(p, TOKEN_LBRACKET, "'['")) return 0;
 
         /* V0.74: list[Point], list[list[int]], list[dict[string,int]] */
-        if (p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT ||
+        if (p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT || p->current.kind == TOKEN_DEF ||   /* V0.75 */
             (p->current.kind == TOKEN_IDENTIFIER && !is_float32_token(p->current) && !machine_type_token(p->current))) {
             char inner[480], full[512];
             if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
@@ -1280,7 +1365,7 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
 
         /* V0.74: the values may be objects, lists or dictionaries: dict[string, Point], dict[int, list[int]] */
         if (strcmp(key, "int") == 0 || p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT ||
-            p->current.kind == TOKEN_IDENTIFIER) {
+            p->current.kind == TOKEN_IDENTIFIER || p->current.kind == TOKEN_DEF) {          /* V0.75: functions */
             char inner[480], full[512];
             if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
             if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;

@@ -432,10 +432,26 @@ static int member_ok(Scope *s, const char *module, const char *member, int call)
         import_error(s->where, "module '%s' has no function or class '%s'", module, member);
         return 0;
     }
-    if (!call) {
-        import_error(s->where, "%s.%s is a function or a class: a module has no variables", module, member);
+    if (!call && !module_has_function(m, member)) {       /* V0.75: a function may be given as a value */
+        import_error(s->where, "%s.%s is a class: a module has no variables", module, member);
         return 0;
     }
+    return 1;
+}
+
+/* V0.75: orbite.f (or f imported from orbite) given as a value: the identifier orbite.f */
+static int fn_value_of_module(Scope *s, AstNode *n, const char *module, const char *member) {
+    if (is_builtin_module(module)) return 0;
+    Module *m = find_module(module);
+    if (!m || !module_has_function(m, member)) return 0;
+    char *full = join(module, ".", member);
+    if (!full) { failed = 1; return 1; }
+    for (size_t i = 0; i < n->child_count; i++) ast_free(n->children[i]);
+    n->child_count = 0;
+    n->kind = AST_IDENTIFIER;
+    set_text(n, full);
+    free(full);
+    (void)s;
     return 1;
 }
 
@@ -486,6 +502,7 @@ static void rewrite_at(Scope *s, AstNode *n) {
                 const char *module = scope_alias(s, n->children[0]->text);
                 if (module) {
                     if (!member_ok(s, module, n->text, 0)) return;
+                    if (fn_value_of_module(s, n, module, n->text)) return;
                     make_number(n, module, n->text);
                     return;
                 }
@@ -501,8 +518,15 @@ static void rewrite_at(Scope *s, AstNode *n) {
         case AST_IDENTIFIER:
             if (n->text && !declares(fn, n->text)) {
                 const char *module, *member;
+                if (s->module && scope_own(s, n->text)) {
+                    /* V0.75: f inside orbite.cl given as a value is orbite.f */
+                    char *full = join(s->module, ".", n->text);
+                    if (full) { free(n->text); n->text = full; }
+                    return;
+                }
                 if (scope_name(s, n->text, &module, &member)) {
                     if (!member_ok(s, module, member, 0)) return;
+                    if (fn_value_of_module(s, n, module, member)) return;
                     make_number(n, module, member);
                     return;
                 }

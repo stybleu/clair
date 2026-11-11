@@ -728,6 +728,24 @@ done
 printf '%s\n' 'listes_objets.cl : OK -> list[Point], list[list[int]] a trois niveaux, arbre de Noeud, grille[i][j] = v, comprehensions de listes, identique a Python, sans erreur memoire (ASan)'
 printf '%s\n' 'dicts_listes.cl : OK -> dict[int, ...] (memo de fib, cles negatives et extremes), dict[string, Ville], dict[string, list[int]], dict de dict, identique a Python, sans erreur memoire (ASan)'
 expect_compile_error invalid_in_objects "'in' does not look in a list of P yet: compare with a loop"
+# V0.75 : les fonctions comme valeurs, lambda, sorted/sort/min/max/sum/map/filter ; compares a Python, puis avec ASan et UBSan
+for t in fonctions_valeurs tris regions_listes; do
+    ./build/clair tests/$t.cl -o build/test_$t
+    [ "$(./build/test_$t)" = "$(cat tests/$t.expected)" ]
+    clang -std=c11 -O1 -g -fwrapv -fsanitize=address,undefined -fno-sanitize-recover=all -w build/test_$t.generated.c -o build/test_${t}_san -lm -pthread
+    [ "$(./build/test_${t}_san)" = "$(cat tests/$t.expected)" ]
+done
+printf '%s\n' 'fonctions_valeurs.cl : OK -> integrer(carre, ...), lambda qui garde ses variables, fonctions qui rendent des fonctions, compose, listes, dictionnaires et champs de fonctions, Vec.norme2, str.upper, identique a Python, sans erreur memoire (ASan)'
+printf '%s\n' 'tris.cl : OK -> sorted, sort, min, max, sum, map, filter : entiers, textes Unicode, objets, listes, dictionnaires, key= et reverse= stables, sum de Neumaier, 3 000 nombres, identique a Python, sans erreur memoire (ASan)'
+printf '%s\n' 'regions_listes.cl : OK -> une boucle garde les textes d une liste d objets, d une liste de listes, d un dictionnaire d objets ou d une lambda ranges plus loin (correctif de la V0.74), sans erreur memoire (ASan)'
+expect_compile_error invalid_lambda_type "a lambda needs to know the types of its parameters"
+expect_compile_error invalid_lambda_arity "this lambda takes 2 parameter(s), a function of 1 is expected here (def(float) -> float)"
+expect_compile_error invalid_fn_type "a function def(float) -> float is expected here, got def(string) -> string"
+expect_compile_error invalid_sort_objects "sorted() compares numbers, texts or booleans; a list of Point needs key= (key=lambda p: p.x)"
+expect_compile_error invalid_sort_kwarg "sorted() has no argument cle="
+expect_compile_error invalid_call_value "xs is a list[int], not a function: it cannot be called"
+expect_compile_error invalid_kwarg_user "aire() has no argument largeur= (named arguments work with sorted, sort, min and max)"
+expect_runtime_error min_empty_runtime '4' 'Clair runtime error: min() iterable argument is empty (line 6)'
 expect_runtime_error dict_changed_runtime 'a' 'Clair runtime error: dictionary changed size during iteration'
 expect_compile_error invalid_in_type "'in' cannot look for float in list[int]: convert it first, e.g. int(x)"
 expect_compile_error invalid_in_right "'in' needs a list, a string or a dictionary on the right, got int"

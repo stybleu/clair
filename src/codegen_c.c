@@ -93,7 +93,8 @@ static int is_dict_type(const char *type);
 static const char *list_elem(const char *type);
 
 /* V0.74: objects, lists and dictionaries in a list or a dictionary: held by reference (a pointer) */
-static int is_ref_element(const char *t) { return t && (list_elem(t) || is_dict_type(t) || class_like(t)); }
+static int is_fn_type(const char *t);
+static int is_ref_element(const char *t) { return t && (list_elem(t) || is_dict_type(t) || class_like(t) || is_fn_type(t)); }
 
 /* the element type of any list type, or NULL */
 static const char *list_elem(const char *type) {
@@ -143,6 +144,73 @@ static const char *dict_value(const char *type) {
 }
 
 static int is_dict_type(const char *type) { return dict_value(type) != NULL; }
+
+/* V0.75: def(A,B)->R, a function given as a value: a struct { fn, env } in C (ClairFn_<n>) */
+static int is_fn_type(const char *t) { return t && strncmp(t, "def(", 4) == 0; }
+
+/* its parameters (at most max) and what it gives back; 0 when t is not one */
+static int cg_fn_parts(const char *t, const char **params, size_t max, size_t *count, const char **result) {
+    if (!is_fn_type(t)) return 0;
+    const char *p = t + 4, *start = p;
+    size_t n = 0;
+    int depth = 0;
+    if (*p == ')') {
+        p++;
+    } else {
+        for (;; p++) {
+            char c = *p;
+            if (!c) return 0;
+            if (c == '[' || c == '(') depth++;
+            else if ((c == ']' || c == ')') && depth > 0) depth--;
+            else if ((c == ',' || c == ')') && depth == 0) {
+                if (n >= max) return 0;
+                params[n++] = cg_intern(start, (size_t)(p - start));
+                start = p + 1;
+                if (c == ')') { p++; break; }
+            }
+        }
+    }
+    if (strncmp(p, "->", 2) != 0) return 0;
+    *count = n;
+    *result = cg_intern(p + 2, strlen(p + 2));
+    return *result != NULL;
+}
+
+/*
+ * Each function type of the program has its own C struct, so no cast is needed:
+ *   def(float)->float   typedef struct { double (*fn)(void *, double); void *env; } ClairFn_0;
+ * its parameters and its result are registered first (they may be function types too).
+ */
+#define FN_TYPE_MAX 256
+static const char *fn_types[FN_TYPE_MAX];
+static size_t fn_type_count = 0;
+
+static int fn_type_index(const char *t) {
+    for (size_t i = 0; t && i < fn_type_count; i++) if (strcmp(fn_types[i], t) == 0) return (int)i;
+    return -1;
+}
+
+static void register_fn_types(const char *t, int depth) {
+    if (!t || depth > 32) return;
+    if (is_fn_type(t)) {
+        if (fn_type_index(t) >= 0) return;
+        const char *params[16], *result;
+        size_t count;
+        if (!cg_fn_parts(t, params, 16, &count, &result)) return;
+        for (size_t i = 0; i < count; i++) register_fn_types(params[i], depth + 1);
+        register_fn_types(result, depth + 1);
+        if (fn_type_count < FN_TYPE_MAX) fn_types[fn_type_count++] = cg_intern(t, strlen(t));
+        return;
+    }
+    if (strncmp(t, "list[", 5) == 0 && list_elem(t)) register_fn_types(list_elem(t), depth + 1);
+    else if (strncmp(t, "dict[", 5) == 0 && dict_value(t)) register_fn_types(dict_value(t), depth + 1);
+}
+
+static void collect_fn_types(const AstNode *n) {
+    if (!n) return;
+    register_fn_types(n->type_name, 0);
+    for (size_t i = 0; i < n->child_count; i++) collect_fn_types(n->children[i]);
+}
 
 /* dict[int,...]: its keys are kept as decimal texts (clair_rt_ikey) */
 static int dict_int_keys(const char *type) { return is_dict_type(type) && strncmp(type, "dict[int,", 9) == 0; }
@@ -218,6 +286,13 @@ static const char *c_type_name(const char *clair_type) {
 
     if (!clair_type) return NULL;
     if (strcmp(clair_type, "void") == 0) return "void";                           /* V0.72: def f() { } */
+    if (is_fn_type(clair_type)) {                                                   /* V0.75 */
+        int k = fn_type_index(clair_type);
+        char name[32];
+        if (k < 0) return NULL;
+        snprintf(name, sizeof(name), "ClairFn_%d", k);
+        return cg_intern(name, strlen(name));
+    }
     if (strcmp(clair_type, "bigint") == 0) return "ClairDynInt *";
     if (strcmp(clair_type, "bigfloat") == 0) return "ClairDynFloat *";
     if (strcmp(clair_type, "certfloat") == 0) return "ClairCertFloat *";
@@ -454,9 +529,33 @@ static int is_random_call(const char *name) {
     return 0;
 }
 
+/*
+ * V0.75: calls that run a function given as a value (f(x) with f a variable,
+ * sorted/sort/min/max with key=, map, filter): any function of the program, so
+ * the analyses below assume they can do anything.
+ */
+static int is_v075_call(const char *name) {
+    static const char *const names[] = { "@fncall", "@sorted", "@sort", "@minl", "@maxl", "@sum", "@map", "@filter",
+                                         "@dict_keys", NULL };
+    if (!name) return 0;
+    if (strncmp(name, "@fn:", 4) == 0) return 1;
+    for (size_t i = 0; names[i]; i++) if (strcmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+static int runs_fn_value(const AstNode *n) {
+    if (!n || n->kind != AST_CALL || !n->text) return 0;
+    if (!strcmp(n->text, "@fncall") || !strcmp(n->text, "@map") || !strcmp(n->text, "@filter")) return 1;
+    if (!strcmp(n->text, "@sorted") || !strcmp(n->text, "@sort")) return n->child_count == 3;      /* xs, reverse, key */
+    if (!strcmp(n->text, "@minl") || !strcmp(n->text, "@maxl")) return n->child_count == 2;        /* xs, key */
+    return 0;
+}
+
 /* Builtins that can never stop the program (only int(float) and matrix() can). */
 static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
+    if (is_v075_call(call->text))                       /* V0.75: min([]) stops, a function given can do anything */
+        return strncmp(call->text, "@fn:", 4) == 0 || strcmp(call->text, "@sum") == 0 || strcmp(call->text, "@dict_keys") == 0;
     if (strncmp(call->text, "@tx_", 4) == 0) {             /* V0.72: s[i], s.index(x), s.split(""), s.ljust(n, "ab") */
         const TextMethod *m = text_method_call(call->text);
         return strcmp(call->text, "@tx_at") != 0 && !(m && (m->flags & TX_LINE));
@@ -552,6 +651,7 @@ static int call_is_safe(const AstNode *call) {
 static int tree_may_grow_lists(const AstNode *n) {
     if (!n) return 0;
     if (n->kind == AST_LIST_APPEND) return 1;
+    if (runs_fn_value(n)) return 1;                       /* V0.75 */
     if (n->kind == AST_CALL && !call_is_safe(n)) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (tree_may_grow_lists(n->children[i])) return 1;
@@ -578,6 +678,7 @@ static int fn_writes_fields(const char *name) {
 static int tree_may_rebind_fields(const AstNode *n) {
     if (!n) return 0;
     if (n->kind == AST_MEMBER_ASSIGN) return 1;
+    if (runs_fn_value(n)) return 1;                       /* V0.75 */
     if (n->kind == AST_CALL && n->text && n->text[0] != '@' &&
         strcmp(n->text, "len") != 0 && strcmp(n->text, "input_int") != 0 &&
         fn_writes_fields(n->text)) return 1;
@@ -622,6 +723,8 @@ static int tree_writes_lists(const AstNode *n) {
     if (n->kind == AST_CALL && n->text && n->text[0] != '@' && strcmp(n->text, "len") != 0 &&
         strcmp(n->text, "input_int") != 0 && fn_writes_lists(n->text)) return 1;
     if (n->kind == AST_CALL && n->text && strcmp(n->text, "@shuffle") == 0) return 1;
+    if (n->kind == AST_CALL && n->text && strcmp(n->text, "@sort") == 0) return 1;      /* V0.75: xs.sort() */
+    if (runs_fn_value(n)) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (tree_writes_lists(n->children[i])) return 1;
     }
@@ -903,6 +1006,7 @@ static void fast_plan_add(FastPlan *plan, const AstNode *node, const char *base,
 /* Does the loop body call a function that may reassign an object field? */
 static int tree_calls_field_writer(const AstNode *n) {
     if (!n) return 0;
+    if (runs_fn_value(n)) return 1;                       /* V0.75 */
     if (n->kind == AST_CALL && n->text && n->text[0] != '@' &&
         strcmp(n->text, "len") != 0 && strcmp(n->text, "input_int") != 0 &&
         fn_writes_fields(n->text)) return 1;
@@ -2127,6 +2231,8 @@ static int matvec_rest_ok(const AstNode *n, MatvecPattern *p) {
             if (n->text && n->text[0] != '@' && strcmp(n->text, "len") != 0 &&
                 strcmp(n->text, "input_int") != 0 && fn_writes_lists(n->text)) return 0;
             if (n->text && strcmp(n->text, "@shuffle") == 0) return 0;       /* would reorder w, x or b */
+            if (n->text && strcmp(n->text, "@sort") == 0) return 0;          /* V0.75: so would xs.sort() */
+            if (runs_fn_value(n)) return 0;
             break;
         case AST_INDEX_ASSIGN:
         case AST_MATRIX_SET: {
@@ -3237,6 +3343,11 @@ static int fresh_expr(const AstNode *e) {
     if (e->kind == AST_CALL && e->text && (strcmp(e->text, "@tx_split") == 0 || strcmp(e->text, "@tx_rsplit") == 0 ||
                                            strcmp(e->text, "@tx_splitlines") == 0) && is_owned_type(e->type_name))
         return 1;
+    /* V0.75: sorted(xs), map(f, xs), filter(f, xs), the keys of a dictionary */
+    if (e->kind == AST_CALL && e->text && (strcmp(e->text, "@sorted") == 0 || strcmp(e->text, "@map") == 0 ||
+                                           strcmp(e->text, "@dict_keys") == 0 ||
+                                           strcmp(e->text, "@filter") == 0) && is_list_type(e->type_name))
+        return 1;
     if (is_list_repeat(e)) return 1;
     return 0;
 }
@@ -3262,6 +3373,10 @@ static int own_expr_ok(const AstNode *n, const char *name, int visible, const As
             if (strcmp(callee, "@shuffle") == 0 || strcmp(callee, "@choice") == 0) return 1;   /* nothing kept */
             if (strcmp(callee, "@write") == 0 || strcmp(callee, "@write_file") == 0 ||
                 strcmp(callee, "@decode") == 0 || strcmp(callee, "@tx_join") == 0) return 1;   /* read, not kept */
+            /* V0.75: sorted(v), v.sort(), min(v), max(v), sum(v), map(f, v), filter(f, v) */
+            if ((strcmp(callee, "@sorted") == 0 || strcmp(callee, "@sort") == 0 || strcmp(callee, "@minl") == 0 ||
+                 strcmp(callee, "@maxl") == 0 || strcmp(callee, "@sum") == 0) && idx == 0) return 1;
+            if ((strcmp(callee, "@map") == 0 || strcmp(callee, "@filter") == 0) && idx == 1) return 1;
             if (callee[0] != '@' && find_program_function(callee) && !param_escapes(callee, idx)) return 1;
         }
         return 0;
@@ -3516,6 +3631,10 @@ static int tmp_used_up(const AstNode *parent, size_t idx) {
             if (strncmp(c, "@slice", 6) == 0) return idx == 0;           /* xs[a:b] copies */
             if (strcmp(c, "@choice") == 0 || strcmp(c, "@write") == 0 || strcmp(c, "@write_file") == 0 ||
                 strcmp(c, "@decode") == 0 || strcmp(c, "@tx_join") == 0) return 1;
+            /* V0.75: sorted(new), min(new), max(new), sum(new), map(f, new), filter(f, new) */
+            if (strcmp(c, "@sorted") == 0 || strcmp(c, "@minl") == 0 || strcmp(c, "@maxl") == 0 || strcmp(c, "@sum") == 0)
+                return idx == 0;
+            if (strcmp(c, "@map") == 0 || strcmp(c, "@filter") == 0) return idx == 1;
             return c[0] != '@' && find_program_function(c) && !param_escapes(c, idx);
         }
         default:
@@ -3757,6 +3876,10 @@ static int arena_type(const char *t, int depth) {
     if (!t) return 0;
     if (depth > 16) return 1;
     if (!strcmp(t, "string") || !strcmp(t, "list[string]") || !strcmp(t, "dict[string,string]")) return 1;
+    if (is_fn_type(t)) return 1;                      /* V0.75: what a lambda keeps is in the arena */
+    /* V0.75, correction of V0.74: list[Point], list[list[string]], dict[string,Point] hold arena memory too */
+    if (list_elem(t)) return arena_type(list_elem(t), depth + 1);
+    if (dict_value(t)) return arena_type(dict_value(t), depth + 1);
     const AstNode *cls = codegen_program ? class_named(codegen_program, t) : NULL;
     if (!cls) return 0;
     if (!is_value_class(t)) return 1;                 /* an object: itself in the arena */
@@ -3837,6 +3960,7 @@ static int region_keeps(const AstNode *n, const AstNode *fn, const AstNode *scop
                 size_t k = region_index(n->text);              /* not in the program: len(), input_int()... */
                 if (k < region_flag_count && (region_flags[k] & 1)) return 1;
             }
+            if (runs_fn_value(n)) return 1;                    /* V0.75: any function may keep what it makes */
             break;
         default:
             break;
@@ -3859,6 +3983,8 @@ static int region_makes(const AstNode *n) {
     if (n->kind == AST_CALL && n->text && n->text[0] == '@' &&
         (!strcmp(n->text, "@split") || !strcmp(n->text, "@read_lines"))) return 1;
     if (n->kind == AST_CALL && n->text && strncmp(n->text, "@tx_", 4) == 0 && arena_type(n->type_name, 0)) return 1;
+    if (runs_fn_value(n)) return 1;                                                 /* V0.75 */
+    if (n->kind == AST_CALL && n->text && strncmp(n->text, "@fn:", 4) == 0 && n->child_count) return 1;   /* its env */
     if (n->kind == AST_CALL && n->text && n->text[0] != '@') {
         size_t k = region_index(n->text);
         if (k < region_flag_count && (region_flags[k] & 2)) return 1;
@@ -3992,6 +4118,7 @@ static int emit_as_bigfloat(FILE *f, const AstNode *n);
 static int emit_return_value(FILE *f, const AstNode *value);
 static int clair_num_frame_open;     /* the function being written has a ClairNumFrameGuard */
 static int emit_expr(FILE *f, const AstNode *n);
+static int emit_v075_call(FILE *f, const AstNode *n);    /* V0.75 */
 
 /*
  * A big integer literal: clair_i256_from_i64(-5) when it fits in 64 bits,
@@ -4600,6 +4727,7 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
             }
             if (n->text && n->text[0] == '@') {
                 const char *name = n->text + 1;
+                if (is_v075_call(n->text)) return emit_v075_call(f, n);
                 if (strcmp(name, "assert") == 0) {
                     /* V0.59: the message is only made when the check fails */
                     fputs("((", f);
@@ -5764,6 +5892,443 @@ static const char *kernel_ctype(const char *elem) { return is_f32(elem) ? "float
 static FILE *layer_helpers = NULL;
 static const char *layer_fn_name = NULL;
 static int layer_count = 0;
+
+/* ------------------------------------------------------------------ */
+/* V0.75: functions as values, lambda, sorted, sort, min, max, sum,    */
+/* map, filter.                                                        */
+/*                                                                    */
+/* A value def(A)->R is a ClairFn_<n> { fn, env }: fn is clair_fw_<name>,*/
+/* which takes env first; env holds what a lambda captured (made by    */
+/* clair_mk_<name> in the arena), NULL for a plain function.  The list */
+/* builtins are small functions written once per kind of list, before  */
+/* the function that first uses them.                                  */
+/* ------------------------------------------------------------------ */
+
+#define V075_HELPER_MAX 256
+static char *v075_helpers[V075_HELPER_MAX];
+static size_t v075_helper_count = 0;
+
+static void v075_reset(void) {
+    for (size_t i = 0; i < v075_helper_count; i++) free(v075_helpers[i]);
+    v075_helper_count = 0;
+}
+
+/* the number of the helper for this signature; *fresh: it still has to be written */
+static long v075_helper(const char *signature, int *fresh) {
+    for (size_t i = 0; i < v075_helper_count; i++) {
+        if (strcmp(v075_helpers[i], signature) == 0) { *fresh = 0; return (long)i; }
+    }
+    if (v075_helper_count >= V075_HELPER_MAX) return -1;
+    char *copy = malloc(strlen(signature) + 1);
+    if (!copy) return -1;
+    strcpy(copy, signature);
+    v075_helpers[v075_helper_count] = copy;
+    *fresh = 1;
+    return (long)v075_helper_count++;
+}
+
+/* a < b for keys of this Clair type (texts: by code point, as UTF-8 bytes keep that order) */
+static void emit_key_less(FILE *h, const char *key_type, const char *a, const char *b) {
+    if (strcmp(key_type, "string") == 0) fprintf(h, "strcmp(%s, %s) < 0", a, b);
+    else fprintf(h, "%s < %s", a, b);
+}
+
+static void emit_oom_check(FILE *h, const char *ptr) {
+    fprintf(h, "    if (!%s) { fputs(\"Clair runtime error: out of memory\\n\", stderr); exit(EXIT_FAILURE); }\n", ptr);
+}
+
+/*
+ * xs.sort(reverse=r, key=k), in place: stable (a merge sort), the key called
+ * once per element, in order, as Python does.  reverse keeps equal elements
+ * in their order, like Python.
+ */
+static long v075_sort_helper(const char *list_type, const char *key_fn_type) {
+    char sig[512];
+    snprintf(sig, sizeof(sig), "sort|%s|%s", list_type, key_fn_type ? key_fn_type : "");
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *e = list_element_c_type(list_type), *elem = list_elem(list_type);
+    const char *params[16], *key_result = elem;
+    size_t count = 0;
+    if (key_fn_type && !cg_fn_parts(key_fn_type, params, 16, &count, &key_result)) return -1;
+    const char *k = c_type_kept(key_result);
+    if (!h || !e || !k) return -1;
+    const char *kf = key_fn_type ? c_type_kept(key_fn_type) : NULL;
+    if (key_fn_type && !kf) return -1;
+    fprintf(h, "static void clair_v_sort_%ld(ClairList xs, bool rev", id);
+    if (kf) fprintf(h, ", %s key", kf);
+    fputs(", size_t line) {\n", h);
+    fputs("    size_t n = xs->len;\n", h);
+    fputs("    if (n == 0) return;\n", h);
+    fprintf(h, "    %s *keys = malloc(n * sizeof(%s));\n", k, k);   /* free((void *)keys): K may be const char * */
+    emit_oom_check(h, "keys");
+    fputs("    for (size_t i = 0; i < n; i++) ", h);
+    if (key_fn_type) {
+        fprintf(h, "keys[i] = key.fn(key.env, ((%s *)xs->data)[i]);\n", e);
+        fputs("    if (xs->len != n) {\n"
+              "        fprintf(stderr, \"Clair runtime error: list modified during sort (line %zu)\\n\", line);\n"
+              "        exit(EXIT_FAILURE);\n"
+              "    }\n", h);
+    } else {
+        fprintf(h, "keys[i] = ((%s *)xs->data)[i];\n", e);
+        fputs("    (void)line;\n", h);
+    }
+    fputs("    if (n < 2) { free((void *)keys); return; }\n", h);
+    fputs("    size_t *ix = malloc(n * sizeof(size_t)), *tmp = malloc(n * sizeof(size_t));\n", h);
+    emit_oom_check(h, "ix && tmp");
+    fputs("    for (size_t i = 0; i < n; i++) ix[i] = i;\n", h);
+    fputs("    for (size_t w = 1; w < n; w *= 2) {\n"
+          "        for (size_t lo = 0; lo + w < n; lo += 2 * w) {\n"
+          "            size_t mid = lo + w, hi = n - mid > w ? mid + w : n, a = lo, b = mid, o = lo;\n"
+          "            while (a < mid && b < hi) {\n"
+          "                bool right = rev ? ", h);
+    emit_key_less(h, key_result, "keys[ix[a]]", "keys[ix[b]]");
+    fputs(" : ", h);
+    emit_key_less(h, key_result, "keys[ix[b]]", "keys[ix[a]]");
+    fputs(";\n"
+          "                tmp[o++] = right ? ix[b++] : ix[a++];\n"
+          "            }\n"
+          "            while (a < mid) tmp[o++] = ix[a++];\n"
+          "            while (b < hi) tmp[o++] = ix[b++];\n"
+          "            memcpy(ix + lo, tmp + lo, (hi - lo) * sizeof(size_t));\n"
+          "        }\n"
+          "    }\n", h);
+    fprintf(h, "    %s *d = xs->data;\n    %s *out = malloc(n * sizeof(%s));\n", e, e, e);
+    emit_oom_check(h, "out");
+    fputs("    for (size_t i = 0; i < n; i++) out[i] = d[ix[i]];\n", h);
+    fprintf(h, "    memcpy(d, out, n * sizeof(%s));\n", e);
+    fputs("    free((void *)out);\n    free(tmp);\n    free(ix);\n    free((void *)keys);\n}\n\n", h);
+    /* sorted(xs): a copy, sorted; the key function never sees it */
+    fprintf(h, "static ClairList clair_v_sorted_%ld(ClairList xs, bool rev", id);
+    if (kf) fprintf(h, ", %s key", kf);
+    fputs(", size_t line) {\n", h);
+    fprintf(h, "    ClairList copy = clair_rt_list_make(xs->data, xs->len, sizeof(%s));\n", e);
+    fprintf(h, "    clair_v_sort_%ld(copy, rev%s, line);\n    return copy;\n}\n\n", id, key_fn_type ? ", key" : "");
+    return id;
+}
+
+/* min(xs, key=k) and max(xs, key=k): the first smallest (largest), as Python */
+static long v075_minmax_helper(const char *list_type, const char *key_fn_type, int is_max) {
+    char sig[512];
+    snprintf(sig, sizeof(sig), "%s|%s|%s", is_max ? "max" : "min", list_type, key_fn_type ? key_fn_type : "");
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *e = list_element_c_type(list_type), *elem = list_elem(list_type);
+    const char *params[16], *key_result = elem;
+    size_t count = 0;
+    if (key_fn_type && !cg_fn_parts(key_fn_type, params, 16, &count, &key_result)) return -1;
+    const char *k = c_type_kept(key_result);
+    if (!h || !e || !k) return -1;
+    const char *kf = key_fn_type ? c_type_kept(key_fn_type) : NULL;
+    if (key_fn_type && !kf) return -1;
+    fprintf(h, "static %s clair_v_minmax_%ld(ClairList xs", e, id);
+    if (kf) fprintf(h, ", %s key", kf);
+    fputs(", size_t line) {\n", h);
+    fprintf(h, "    if (xs->len == 0) {\n"
+               "        fprintf(stderr, \"Clair runtime error: %s() iterable argument is empty (line %%zu)\\n\", line);\n"
+               "        exit(EXIT_FAILURE);\n"
+               "    }\n", is_max ? "max" : "min");
+    fprintf(h, "    %s best = ((%s *)xs->data)[0];\n", e, e);
+    if (key_fn_type) {
+        fprintf(h, "    %s best_key = key.fn(key.env, best);\n", k);
+    } else {
+        fprintf(h, "    %s best_key = best;\n", k);
+    }
+    fputs("    for (size_t i = 1; i < xs->len; i++) {\n", h);
+    fprintf(h, "        %s v = ((%s *)xs->data)[i];\n", e, e);
+    if (key_fn_type) {
+        fprintf(h, "        %s v_key = key.fn(key.env, v);\n", k);
+    } else {
+        fprintf(h, "        %s v_key = v;\n", k);
+    }
+    fputs("        if (", h);
+    if (is_max) emit_key_less(h, key_result, "best_key", "v_key");
+    else emit_key_less(h, key_result, "v_key", "best_key");
+    fputs(") { best = v; best_key = v_key; }\n    }\n    return best;\n}\n\n", h);
+    return id;
+}
+
+/* sum(xs): integers wrap around like +; floats are added as Python 3.12 does (Neumaier) */
+static long v075_sum_helper(const char *list_type, const char *result) {
+    char sig[512];
+    snprintf(sig, sizeof(sig), "sum|%s", list_type);
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *e = list_element_c_type(list_type);
+    if (!h || !e) return -1;
+    if (strcmp(result, "float") == 0) {
+        fprintf(h, "static double clair_v_sum_%ld(ClairList xs) {\n", id);
+        fprintf(h, "    const %s *d = xs->data;\n", e);
+        fputs("    if (xs->len == 0) return 0.0;\n"
+              "    double s = 0.0 + (double)d[0], c = 0.0;\n"
+              "    for (size_t i = 1; i < xs->len; i++) {\n"
+              "        double x = (double)d[i], t = s + x;\n"
+              "        if (__builtin_fabs(s) >= __builtin_fabs(x)) c += (s - t) + x;\n"
+              "        else c += (x - t) + s;\n"
+              "        s = t;\n"
+              "    }\n"
+              "    if (c != 0.0 && __builtin_isfinite(c)) s += c;\n"
+              "    return s;\n"
+              "}\n\n", h);
+    } else {
+        fprintf(h, "static int64_t clair_v_sum_%ld(ClairList xs) {\n", id);
+        fprintf(h, "    const %s *d = xs->data;\n", e);
+        fputs("    uint64_t s = 0;\n"
+              "    for (size_t i = 0; i < xs->len; i++) s += (uint64_t)(int64_t)d[i];\n"
+              "    return (int64_t)s;\n"
+              "}\n\n", h);
+    }
+    return id;
+}
+
+/* map(f, xs) and filter(f, xs): new lists (in Python: list(map(f, xs))) */
+static long v075_map_helper(const char *list_type, const char *fn_type, const char *result_list, int is_filter) {
+    char sig[768];
+    snprintf(sig, sizeof(sig), "%s|%s|%s", is_filter ? "filter" : "map", list_type, fn_type);
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *e = list_element_c_type(list_type), *r = list_element_c_type(result_list), *ft = c_type_kept(fn_type);
+    if (!h || !e || !r || !ft) return -1;
+    fprintf(h, "static ClairList clair_v_map_%ld(%s f, ClairList xs) {\n", id, ft);
+    fprintf(h, "    size_t cap = xs->len ? xs->len : 1, n = 0;\n"
+               "    %s *out = malloc(cap * sizeof(%s));\n", r, r);
+    emit_oom_check(h, "out");
+    fputs("    for (size_t i = 0; i < xs->len; i++) {\n", h);
+    fprintf(h, "        %s v = ((%s *)xs->data)[i];\n", e, e);
+    if (is_filter) {
+        fputs("        if (!f.fn(f.env, v)) continue;\n", h);
+    } else {
+        fprintf(h, "        %s y = f.fn(f.env, v);\n", r);
+    }
+    fprintf(h, "        if (n == cap) {\n"
+               "            %s *grown = cap <= SIZE_MAX / 2 / sizeof(%s) ? realloc(out, 2 * cap * sizeof(%s)) : NULL;\n",
+               r, r, r);
+    emit_oom_check(h, "grown");
+    fputs("            out = grown;\n"
+          "            cap *= 2;\n"
+          "        }\n", h);
+    fprintf(h, "        out[n++] = %s;\n    }\n", is_filter ? "v" : "y");
+    fprintf(h, "    ClairList result = clair_rt_list_make(NULL, 0, sizeof(%s));\n", r);
+    fputs("    result->data = out;\n"
+          "    result->len = n;\n"
+          "    result->capacity = cap;\n"
+          "    return result;\n"
+          "}\n\n", h);
+    return id;
+}
+
+static int emit_v075_call(FILE *f, const AstNode *n) {
+    const char *name = n->text;
+    if (strncmp(name, "@fn:", 4) == 0) {
+        /* a function as a value: with what its lambda captured, or alone */
+        if (n->child_count == 0) {
+            const char *t = c_type_kept(n->type_name);
+            if (!t) return 0;
+            fprintf(f, "((%s){ clair_fw_%s, NULL })", t, name + 4);
+            return 1;
+        }
+        fprintf(f, "clair_mk_%s(", name + 4);
+        for (size_t i = 0; i < n->child_count; i++) {
+            if (i) fputs(", ", f);
+            if (!emit_expr(f, n->children[i])) return 0;
+        }
+        fputc(')', f);
+        return 1;
+    }
+    if (strcmp(name, "@fncall") == 0) {
+        /* f(x): ((R (*)(void *, A))f.fn)(f.env, x) ; ops[i](x): the value is read once, first */
+        if (n->child_count < 1) return 0;
+        static size_t serial = 0;
+        const AstNode *callee = n->children[0];
+        int plain = callee->kind == AST_IDENTIFIER;
+        size_t id = serial++;
+        const char *t = c_type_kept(callee->type_name);
+        if (!t) return 0;
+        if (plain) {
+            fprintf(f, "%s.fn(%s.env", callee->text, callee->text);
+        } else {
+            fprintf(f, "({ %s clair_fv_%zu = ", t, id);
+            if (!emit_expr(f, callee)) return 0;
+            fprintf(f, "; clair_fv_%zu.fn(clair_fv_%zu.env", id, id);
+        }
+        for (size_t i = 1; i < n->child_count; i++) {
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[i])) return 0;
+        }
+        fputs(plain ? ")" : "); })", f);
+        return 1;
+    }
+    if (strcmp(name, "@dict_keys") == 0) {
+        /* sorted(d): the keys of d, in their order, as a new list */
+        if (n->child_count != 1) return 0;
+        int ints = dict_int_keys(n->children[0]->type_name);
+        int fresh = 0;
+        long id = v075_helper(ints ? "keys|int" : "keys|string", &fresh);
+        if (id < 0 || !layer_helpers) return 0;
+        if (fresh) {
+            fprintf(layer_helpers, "static ClairList clair_v_keys_%ld(ClairDict d) {\n", id);
+            if (ints)
+                fputs("    ClairList r = clair_rt_list_make(NULL, 0, sizeof(int64_t));\n"
+                      "    if (d->len == 0) return r;\n"
+                      "    int64_t *v = malloc(d->len * sizeof(int64_t));\n"
+                      "    if (!v) { fputs(\"Clair runtime error: out of memory\\n\", stderr); exit(EXIT_FAILURE); }\n"
+                      "    for (size_t i = 0; i < d->len; i++) v[i] = clair_rt_ikey_value(d->keys[i]);\n"
+                      "    r->data = v;\n"
+                      "    r->len = r->capacity = d->len;\n"
+                      "    return r;\n", layer_helpers);
+            else
+                fputs("    return clair_rt_list_make(d->keys, d->len, sizeof(const char *));\n", layer_helpers);
+            fputs("}\n\n", layer_helpers);
+        }
+        fprintf(f, "clair_v_keys_%ld(", id);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputc(')', f);
+        return 1;
+    }
+    if (strcmp(name, "@sorted") == 0 || strcmp(name, "@sort") == 0) {
+        if (n->child_count < 2 || n->child_count > 3) return 0;
+        const char *lt = n->children[0]->type_name;
+        const char *key = n->child_count == 3 ? n->children[2]->type_name : NULL;
+        long id = v075_sort_helper(lt, key);
+        if (id < 0) return 0;
+        fprintf(f, "clair_v_sort%s_%ld(", strcmp(name, "@sort") == 0 ? "" : "ed", id);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputs(", ", f);
+        if (!emit_expr(f, n->children[1])) return 0;
+        if (key) {
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[2])) return 0;
+        }
+        fprintf(f, ", %zu)", n->line);
+        return 1;
+    }
+    if (strcmp(name, "@minl") == 0 || strcmp(name, "@maxl") == 0) {
+        if (n->child_count < 1 || n->child_count > 2) return 0;
+        const char *key = n->child_count == 2 ? n->children[1]->type_name : NULL;
+        long id = v075_minmax_helper(n->children[0]->type_name, key, name[2] == 'a');
+        if (id < 0) return 0;
+        fprintf(f, "clair_v_minmax_%ld(", id);
+        if (!emit_expr(f, n->children[0])) return 0;
+        if (key) {
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[1])) return 0;
+        }
+        fprintf(f, ", %zu)", n->line);
+        return 1;
+    }
+    if (strcmp(name, "@sum") == 0) {
+        if (n->child_count != 1) return 0;
+        long id = v075_sum_helper(n->children[0]->type_name, n->type_name);
+        if (id < 0) return 0;
+        fprintf(f, "clair_v_sum_%ld(", id);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputc(')', f);
+        return 1;
+    }
+    if (strcmp(name, "@map") == 0 || strcmp(name, "@filter") == 0) {
+        if (n->child_count != 2) return 0;
+        long id = v075_map_helper(n->children[1]->type_name, n->children[0]->type_name, n->type_name, name[1] == 'f');
+        if (id < 0) return 0;
+        fprintf(f, "clair_v_map_%ld(", id);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fputs(", ", f);
+        if (!emit_expr(f, n->children[1])) return 0;
+        fputc(')', f);
+        return 1;
+    }
+    return 0;
+}
+
+/* the functions given as values (@fn:name), each once, with the number of values its lambda captured */
+#define FN_VALUE_MAX 512
+static const AstNode *fn_value_nodes[FN_VALUE_MAX];
+static size_t fn_value_count = 0;
+
+static void collect_fn_values(const AstNode *n) {
+    if (!n) return;
+    if (n->kind == AST_CALL && n->text && strncmp(n->text, "@fn:", 4) == 0) {
+        size_t k = 0;
+        while (k < fn_value_count && strcmp(fn_value_nodes[k]->text, n->text) != 0) k++;
+        if (k == fn_value_count && fn_value_count < FN_VALUE_MAX) fn_value_nodes[fn_value_count++] = n;
+    }
+    for (size_t i = 0; i < n->child_count; i++) collect_fn_values(n->children[i]);
+}
+
+/* a lambda that captured values: its env is in the arena */
+static int node_uses_lambda_env(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_CALL && n->text && strncmp(n->text, "@fn:", 4) == 0 && n->child_count) return 1;
+    for (size_t i = 0; i < n->child_count; i++) if (node_uses_lambda_env(n->children[i])) return 1;
+    return 0;
+}
+
+/*
+ * For each function given as a value:
+ *   static R clair_fw_f(void *env, A a)            calls clair_fn_f(captured..., a)
+ *   static ClairFn_<n> clair_mk_f(captured...)    a lambda that captured values: env in the arena
+ */
+static int emit_fn_value_wrappers(FILE *f, const AstNode *program) {
+    fn_value_count = 0;
+    collect_fn_values(program);
+    for (size_t k = 0; k < fn_value_count; k++) {
+        const AstNode *use = fn_value_nodes[k];
+        const char *name = use->text + 4;
+        const AstNode *fn = find_program_function(name);
+        if (!fn) return 0;
+        size_t total = function_param_count(fn), captured = use->child_count;
+        if (captured > total) return 0;
+        const char *r = c_type_kept(fn->type_name);
+        if (!r) return 0;
+        if (captured) {
+            fputs("typedef struct {", f);
+            for (size_t i = 0; i < captured; i++) {
+                const char *t = c_type_kept(fn->children[i]->type_name);
+                if (!t) return 0;
+                fprintf(f, " %s c%zu;", t, i);
+            }
+            fprintf(f, " } ClairEnv_%s;\n", name);
+        }
+        fprintf(f, "static %s clair_fw_%s(void *clair_env", r, name);
+        for (size_t i = captured; i < total; i++) {
+            const char *t = c_type_kept(fn->children[i]->type_name);
+            if (!t) return 0;
+            fprintf(f, ", %s a%zu", t, i);
+        }
+        fputs(") {\n", f);
+        if (captured) fprintf(f, "    ClairEnv_%s *e = clair_env;\n", name);
+        else fputs("    (void)clair_env;\n", f);
+        fprintf(f, "    %sclair_fn_%s(", strcmp(r, "void") == 0 ? "" : "return ", name);
+        for (size_t i = 0; i < total; i++) {
+            if (i) fputs(", ", f);
+            if (i < captured) fprintf(f, "e->c%zu", i);
+            else fprintf(f, "a%zu", i);
+        }
+        fputs(");\n}\n", f);
+        if (captured) {
+            const char *vt = c_type_kept(use->type_name);
+            if (!vt) return 0;
+            fprintf(f, "static %s clair_mk_%s(", vt, name);
+            for (size_t i = 0; i < captured; i++) {
+                const char *t = c_type_kept(fn->children[i]->type_name);
+                if (!t) return 0;
+                fprintf(f, "%s%s c%zu", i ? ", " : "", t, i);
+            }
+            fprintf(f, ") {\n    ClairEnv_%s *e = clair_rt_arena_alloc(sizeof(*e));\n", name);
+            for (size_t i = 0; i < captured; i++) fprintf(f, "    e->c%zu = c%zu;\n", i, i);
+            fprintf(f, "    return (%s){ clair_fw_%s, e };\n}\n", vt, name);
+        }
+    }
+    if (fn_value_count) fputc('\n', f);
+    return 1;
+}
 
 /* one statement of what follows a sum, inside clair_layer_<id> */
 static int emit_pure_stmt(FILE *f, const AstNode *n, int depth, const PureCtx *c) {
@@ -7775,6 +8340,21 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
             fprintf(f, "typedef struct ClairClass_%s ClairClass_%s;\n", cls->text, cls->text);
         }
     }
+    /* V0.75: a function given as a value: its C function (first argument: what its lambda captured) */
+    for (size_t k = 0; k < fn_type_count; k++) {
+        const char *params[16], *result;
+        size_t n = 0;
+        if (!cg_fn_parts(fn_types[k], params, 16, &n, &result)) return 0;
+        const char *r = c_type_kept(result);
+        if (!r) return 0;
+        fprintf(f, "typedef struct { %s (*fn)(void *", r);
+        for (size_t i = 0; i < n; i++) {
+            const char *a = c_type_kept(params[i]);
+            if (!a) return 0;
+            fprintf(f, ", %s", a);
+        }
+        fprintf(f, "); void *env; } ClairFn_%zu;   /* %s */\n", k, fn_types[k]);
+    }
 
     int had_class = 0;
     size_t count = program->child_count;
@@ -9636,6 +10216,8 @@ static int list_registry_emitted = 0;   /* V0.55: clair_rt_lists exists (the web
 
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
+    fn_type_count = 0;
+    collect_fn_types(program);                      /* V0.75: before any C type is written */
     compute_value_classes(program);
     int has_dynamic = 0, has_dynamic_fields = 0;
     clair_num_scan_ast(program, &has_dynamic, &has_dynamic_fields);
@@ -9907,7 +10489,10 @@ int codegen_c_file(const AstNode *program, const char *path) {
         int uses_list_slice = node_uses_slice(program, 0);
         int uses_list_literal = node_uses_kind(program, AST_LIST) || uses_list_slice || node_uses_os(program) || node_uses_gui(program) ||
                                 node_uses_call_named(program, "@read_lines") || node_uses_call_named(program, "@split") ||
-                                (io_uses(program) & 4) || node_uses_list_repeat(program) || (tx_uses(program) & 4);
+                                (io_uses(program) & 4) || node_uses_list_repeat(program) || (tx_uses(program) & 4) ||
+                                node_uses_call_named(program, "@sort") || node_uses_call_named(program, "@sorted") ||
+                                node_uses_call_named(program, "@map") || node_uses_call_named(program, "@filter") ||
+                                node_uses_call_named(program, "@dict_keys");   /* V0.75 */
         int uses_list_at = node_uses_kind(program, AST_INDEX) || node_uses_kind(program, AST_INDEX_ASSIGN);
         int uses_list_append = node_uses_kind(program, AST_LIST_APPEND);
 
@@ -10152,7 +10737,8 @@ int codegen_c_file(const AstNode *program, const char *path) {
                            node_uses_call_named(program, "@strip");
     uses_text_pieces = uses_text_pieces || node_uses_call_named(program, "@str") || node_uses_call_named(program, "@format");
     unsigned uses_tx = tx_uses(program);             /* V0.72 */
-    region_arena = uses_objects || uses_concat || uses_matrix || uses_string_slice || uses_text_pieces || uses_tx;
+    region_arena = uses_objects || uses_concat || uses_matrix || uses_string_slice || uses_text_pieces || uses_tx ||
+                   node_uses_lambda_env(program);           /* V0.75: what lambdas capture */
     if (region_arena) {
         /*
          * Bump-pointer arena shared by objects and concatenated strings.
@@ -10908,6 +11494,11 @@ int codegen_c_file(const AstNode *program, const char *path) {
         }
     }
     fputc('\n', f);
+    v075_reset();
+    if (!emit_fn_value_wrappers(f, program)) {      /* V0.75 */
+        fclose(f);
+        return 0;
+    }
 
     for (size_t i = 0; i < program->child_count; i++) {
         const AstNode *fn = program->children[i];

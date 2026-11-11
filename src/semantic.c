@@ -256,8 +256,10 @@ static int class_like(const char *t) {
 }
 
 /* V0.74: what a list or a dictionary value can also hold: objects, lists, dictionaries (by reference) */
+static int is_fn_type(const char *t);
+
 static int is_ref_element(const char *t) {
-    return t && (list_element_type(t) != NULL || is_dict_type(t) || class_like(t));
+    return t && (list_element_type(t) != NULL || is_dict_type(t) || class_like(t) || is_fn_type(t));   /* V0.75: functions */
 }
 
 static const char *list_element_type(const char *type) {
@@ -334,6 +336,63 @@ static const char *dict_key_type(const char *type) {
     return strncmp(type + 5, "int,", 4) == 0 ? "int" : "string";
 }
 
+/* V0.75: def(A,B)->R, the type of a function given as a value (R "void": gives nothing) */
+static int is_fn_type(const char *t) { return t && strncmp(t, "def(", 4) == 0; }
+
+/* its parameters (at most max) and what it gives back; 0 when t is not one */
+static int fn_type_parts(const char *t, const char **params, size_t max, size_t *count, const char **result) {
+    if (!is_fn_type(t)) return 0;
+    const char *p = t + 4, *start = p;
+    size_t n = 0;
+    int depth = 0;
+    if (*p == ')') {
+        p++;
+    } else {
+        for (;; p++) {
+            char c = *p;
+            if (!c) return 0;
+            if (c == '[' || c == '(') depth++;
+            else if ((c == ']' || c == ')') && depth > 0) depth--;
+            else if ((c == ',' || c == ')') && depth == 0) {
+                if (n >= max) return 0;
+                params[n++] = type_intern(start, (size_t)(p - start));
+                start = p + 1;
+                if (c == ')') { p++; break; }
+            }
+        }
+    }
+    if (strncmp(p, "->", 2) != 0) return 0;
+    *count = n;
+    *result = type_intern(p + 2, strlen(p + 2));
+    return *result != NULL;
+}
+
+/* def(float,int)->float written as in a program: def(float, int) -> float (for the messages) */
+static const char *shown_type(const char *t) {
+    static char buf[4][512];
+    static int which = 0;
+    if (!t) return "invalid";
+    if (strncmp(t, "def(", 4) != 0) return t;
+    char *out = buf[which = (which + 1) & 3];
+    size_t w = 0;
+    for (const char *q = t; *q && w + 5 < sizeof(buf[0]); q++) {
+        if (*q == ',') { out[w++] = ','; out[w++] = ' '; }
+        else if (q[0] == '-' && q[1] == '>') { memcpy(out + w, " -> ", 4); w += 4; q++; }
+        else out[w++] = *q;
+    }
+    out[w] = '\0';
+    return out;
+}
+
+static const char *fn_type_make(const char *const *params, size_t count, const char *result) {
+    char buf[1024];
+    size_t used = (size_t)snprintf(buf, sizeof(buf), "def(");
+    for (size_t i = 0; i < count && used < sizeof(buf); i++)
+        used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s%s", i ? "," : "", params[i]);
+    if (used < sizeof(buf)) used += (size_t)snprintf(buf + used, sizeof(buf) - used, ")->%s", result);
+    return used < sizeof(buf) ? type_intern(buf, used) : NULL;
+}
+
 static const char *dict_type_for(const char *key, const char *value) {
     if (!key || !value || (strcmp(key, "string") != 0 && strcmp(key, "int") != 0)) return NULL;
     char buf[512];
@@ -393,6 +452,13 @@ static int is_known_type(const Semantic *s, const char *type) {
         return 1;
     }
     if (is_list_type(type)) return is_known_type(s, list_element_type(type));          /* V0.74: list[Point] */
+    if (is_fn_type(type)) {                                                             /* V0.75: def(float) -> float */
+        const char *params[16], *result;
+        size_t count;
+        if (!fn_type_parts(type, params, 16, &count, &result)) return 0;
+        for (size_t i = 0; i < count; i++) if (!is_known_type(s, params[i])) return 0;
+        return strcmp(result, "void") == 0 || is_known_type(s, result);
+    }
     if (is_dict_type(type)) return is_known_type(s, dict_value_type(type));
     return find_class(s, type) != NULL;
 }
@@ -1400,7 +1466,9 @@ static AstNode *new_node(AstKind kind, const char *text, const char *type) {
 static void collect_captures(Semantic *s, const AstNode *n, const char *var, const char **names, const char **types,
                              size_t *count) {
     if (!n) return;
-    if (n->kind == AST_IDENTIFIER && n->text && strcmp(n->text, var) != 0) {
+    /* V0.75: f(x) with f a variable holding a function reads f too */
+    int fn_call = n->kind == AST_CALL && n->text && n->text[0] != '@' && is_fn_type(find_var(s, n->text));
+    if ((n->kind == AST_IDENTIFIER || fn_call) && n->text && strcmp(n->text, var) != 0) {
         const char *type = find_var(s, n->text);
         size_t k = 0;
         while (k < *count && strcmp(names[k], n->text) != 0) k++;
@@ -1410,6 +1478,481 @@ static void collect_captures(Semantic *s, const AstNode *n, const char *var, con
         }
     }
     for (size_t i = 0; i < n->child_count; i++) collect_captures(s, n->children[i], var, names, types, count);
+}
+
+/* ===== V0.75: functions as values, lambda, sorted, min, max, sum, map, filter ===== */
+
+static int lambda_count = 0;
+
+/* the variables of the enclosing function read in a lambda (its own parameters left out) */
+static void collect_lambda_captures(Semantic *s, const AstNode *n, const AstNode *lambda, const char **names,
+                                    const char **types, size_t *count) {
+    if (!n) return;
+    int fn_call = n->kind == AST_CALL && n->text && n->text[0] != '@' && is_fn_type(find_var(s, n->text));
+    if ((n->kind == AST_IDENTIFIER || fn_call) && n->text) {
+        int own = 0;
+        for (size_t i = 0; i + 1 < lambda->child_count; i++) own |= strcmp(lambda->children[i]->text, n->text) == 0;
+        const char *type = own ? NULL : find_var(s, n->text);
+        size_t k = 0;
+        while (k < *count && strcmp(names[k], n->text) != 0) k++;
+        if (type && k == *count && *count < 64) {
+            names[*count] = n->text;
+            types[(*count)++] = type;
+        }
+    }
+    for (size_t i = 0; i < n->child_count; i++) collect_lambda_captures(s, n->children[i], lambda, names, types, count);
+}
+
+/*
+ * lambda x, y: x + y where a def(float, float) -> float is expected ("?": what it
+ * gives is up to the lambda, sorted(key=...)).  It becomes a function of the
+ * program, lambda_1(captured variables..., x, y), and here the value
+ * @fn:lambda_1(captured variables...): the variables are taken as they are now.
+ */
+static const char *check_lambda(Semantic *s, AstNode *n, const char *expected) {
+    const char *params[16], *result;
+    size_t count, given = n->child_count - 1;
+    if (!fn_type_parts(expected, params, 16, &count, &result)) return NULL;
+    if (count != given) {
+        report("semantic error: this lambda takes %zu parameter(s), a function of %zu is expected here (%s)\n",
+               given, count, shown_type(expected));
+        s->had_error = 1;
+        return NULL;
+    }
+    AstNode *body = n->children[given];
+    AstNode *copy = ast_clone(body);                  /* untyped, for the function made from it */
+    if (!copy) return NULL;
+    enter_scope(s);
+    int ok = 1;
+    for (size_t i = 0; i < given && ok; i++) ok = add_var(s, n->children[i]->text, params[i]);
+    const char *t = NULL;
+    /* V0.73: while a body is read only for its return values, a lambda that depends on a
+       function not guessed for good yet waits for the real check */
+    int tentative = s->probe_tentative, blocked = s->probe_blocked;
+    s->probe_tentative = s->probe_blocked = 0;
+    const AstNode *void_ok = s->void_ok;
+    if (ok) {
+        if (strcmp(result, "void") == 0) { s->void_ok = body; t = expr_type(s, body); }
+        else if (strcmp(result, "?") == 0) t = expr_type(s, body);
+        else t = expr_type_expected(s, body, result);
+    }
+    s->void_ok = void_ok;                          /* f(lambda x: g(x)) alone on its line */
+    int depends = s->probe_tentative || s->probe_blocked;
+    s->probe_tentative |= tentative;
+    s->probe_blocked |= blocked;
+    if (s->probing && depends) {
+        s->probe_blocked = 1;
+        t = NULL;
+    }
+    const char *names[64], *types[64];
+    size_t captured = 0;
+    if (t) collect_lambda_captures(s, copy, n, names, types, &captured);
+    leave_scope(s);
+    if (!t) { ast_free(copy); return NULL; }
+    if (strcmp(result, "?") == 0) {
+        if (strcmp(t, "void") == 0) {
+            error_type(s, "this lambda gives nothing back: a value is expected here");
+            ast_free(copy);
+            return NULL;
+        }
+        result = t;
+    } else if (strcmp(result, "void") != 0 && !assignable(result, t)) {
+        report("semantic error: this lambda gives back %s, %s is expected here\n", shown_type(t), shown_type(result));
+        s->had_error = 1;
+        ast_free(copy);
+        return NULL;
+    }
+
+    char fn_name[64];
+    do snprintf(fn_name, sizeof(fn_name), "lambda_%d", ++lambda_count);
+    while (find_function(s, fn_name) || find_class(s, fn_name));
+    AstNode *fn = new_node(AST_FUNCTION, fn_name, result);
+    AstNode *block = new_node(AST_BLOCK, NULL, NULL);
+    AstNode *stmt = new_node(strcmp(result, "void") == 0 ? AST_EXPR_STMT : AST_RETURN, NULL, NULL);
+    if (!fn || !block || !stmt) { ast_free(fn); ast_free(block); ast_free(stmt); ast_free(copy); return NULL; }
+    fn->line = block->line = stmt->line = n->line;
+    fn->file = block->file = stmt->file = n->file;
+    for (size_t k = 0; k < captured; k++) {
+        AstNode *param = new_node(AST_PARAM, names[k], types[k]);
+        if (!param || !ast_add_child(fn, param)) return NULL;
+    }
+    for (size_t i = 0; i < given; i++) {
+        AstNode *param = new_node(AST_PARAM, n->children[i]->text, params[i]);
+        if (!param || !ast_add_child(fn, param)) return NULL;
+    }
+    if (!ast_add_child(stmt, copy) || !ast_add_child(block, stmt) || !ast_add_child(fn, block) ||
+        !ast_add_child(s->program, fn)) return NULL;     /* checked after the functions already there */
+
+    const char *type = fn_type_make(params, count, result);
+    AstNode *args[64];
+    for (size_t k = 0; k < captured; k++) {
+        args[k] = new_node(AST_IDENTIFIER, names[k], types[k]);
+        if (!args[k]) return NULL;
+        args[k]->line = n->line;
+        args[k]->file = n->file;
+    }
+    for (size_t i = 0; i < n->child_count; i++) ast_free(n->children[i]);
+    n->child_count = 0;
+    for (size_t k = 0; k < captured; k++) if (!ast_add_child(n, args[k])) return NULL;
+    char *text = malloc(strlen(fn_name) + 5);
+    if (!text || !type) { free(text); return NULL; }
+    sprintf(text, "@fn:%s", fn_name);
+    free(n->text);
+    n->text = text;
+    n->kind = AST_CALL;
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
+/* len, str, abs, int, float, sum, min, max given as a function: key=len is lambda x: len(x) */
+static int value_builtin(const char *name) {
+    static const char *const names[] = { "len", "str", "abs", "int", "float", "sum", "min", "max", NULL };
+    for (size_t i = 0; names[i]; i++) if (strcmp(name, names[i]) == 0) return 1;
+    return 0;
+}
+
+/* str.lower, Point.norme: a method given as a value; how many parameters it takes (self first), 0 if not one */
+static int method_value_params(Semantic *s, const AstNode *f) {
+    const char *base = f->children[0]->text;
+    if (!base || find_var(s, base)) return 0;
+    if (strcmp(base, "str") == 0) {
+        const TextMethod *m = text_method(f->text);
+        return m && m->min == m->max ? 1 + m->min : 0;
+    }
+    const AstNode *cls = find_class(s, base);
+    if (!cls) return 0;
+    char mangled[256];
+    snprintf(mangled, sizeof(mangled), "%s__%s", cls->text, f->text);
+    const AstNode *fn = find_function(s, mangled);
+    if (!fn) return 0;
+    int count = 0;
+    for (size_t i = 0; i < fn->child_count; i++) count += fn->children[i]->kind == AST_PARAM;
+    return count;
+}
+
+/* the type of f (a variable, or a function given as a value), without changing f */
+static const char *fn_value_type(Semantic *s, const AstNode *f) {
+    const char *type = find_var(s, f->text);
+    if (type) return type;
+    const AstNode *named = find_function(s, f->text);
+    if (!named || strcmp(f->text, "main") == 0) {
+        report("semantic error: undefined variable '%s'\n", f->text);
+        s->had_error = 1;
+        return NULL;
+    }
+    const char *params[16];
+    size_t count = 0;
+    for (size_t i = 0; i < named->child_count && count < 16; i++)
+        if (named->children[i]->kind == AST_PARAM) params[count++] = named->children[i]->type_name;
+    int tentative = s->probe_tentative;
+    s->probe_tentative = 0;
+    const char *result = call_result_type(s, named, NULL);
+    if (s->probing && s->probe_tentative) {
+        s->probe_blocked = 1;
+        result = NULL;
+    }
+    s->probe_tentative |= tentative;
+    return result ? fn_type_make(params, count, result) : NULL;
+}
+
+static const char *check_fn_value(Semantic *s, AstNode *f, const char *expected) {
+    if (f->kind == AST_IDENTIFIER && f->text && value_builtin(f->text) && !find_var(s, f->text) &&
+        !find_function(s, f->text)) {
+        /* f becomes lambda __x: f(__x) */
+        AstNode *param = new_node(AST_PARAM, "__x", NULL), *call = new_node(AST_CALL, f->text, NULL),
+                *arg = new_node(AST_IDENTIFIER, "__x", NULL);
+        if (!param || !call || !arg || !ast_add_child(call, arg)) { ast_free(param); ast_free(call); ast_free(arg); return NULL; }
+        call->line = arg->line = param->line = f->line;
+        call->file = arg->file = param->file = f->file;
+        if (!ast_add_child(f, param) || !ast_add_child(f, call)) return NULL;
+        f->kind = AST_LAMBDA;
+        free(f->text);
+        f->text = NULL;
+    }
+    if (f->kind == AST_MEMBER && f->child_count == 1 && f->children[0]->kind == AST_IDENTIFIER &&
+        method_value_params(s, f) > 0) {
+        /* key=str.lower becomes lambda __a0: __a0.lower(), key=Point.norme lambda __a0: __a0.norme() */
+        size_t params = (size_t)method_value_params(s, f);
+        AstNode *call = new_node(AST_METHOD_CALL, f->text, NULL);
+        if (!call) return NULL;
+        call->line = f->line;
+        call->file = f->file;
+        ast_free(f->children[0]);
+        f->child_count = 0;
+        for (size_t i = 0; i < params; i++) {
+            char name[32];
+            snprintf(name, sizeof(name), "__a%zu", i);
+            AstNode *param = new_node(AST_PARAM, name, NULL), *arg = new_node(AST_IDENTIFIER, name, NULL);
+            if (!param || !arg || !ast_add_child(f, param) || !ast_add_child(call, arg)) {
+                ast_free(param); ast_free(arg); ast_free(call);
+                return NULL;
+            }
+            param->line = arg->line = f->line;
+            param->file = arg->file = f->file;
+        }
+        if (!ast_add_child(f, call)) { ast_free(call); return NULL; }
+        f->kind = AST_LAMBDA;
+        free(f->text);
+        f->text = NULL;
+    }
+    if (f->kind == AST_LAMBDA) return check_lambda(s, f, expected);
+    const char *t = f->kind == AST_IDENTIFIER ? fn_value_type(s, f) : expr_type(s, f);
+    if (!t) return NULL;
+    const char *want[16], *have[16], *want_result, *have_result;
+    size_t want_count, have_count;
+    int fits = fn_type_parts(expected, want, 16, &want_count, &want_result) &&
+               fn_type_parts(t, have, 16, &have_count, &have_result) && want_count == have_count;
+    int same = fits;
+    for (size_t i = 0; fits && i < want_count; i++) {
+        same &= strcmp(want[i], have[i]) == 0;
+        fits &= assignable(have[i], want[i]);          /* what is given can be passed to it */
+    }
+    if (fits) {
+        if (strcmp(want_result, "?") == 0) fits = strcmp(have_result, "void") != 0;
+        else if (strcmp(want_result, "void") == 0) same &= strcmp(have_result, "void") == 0;
+        else { same &= strcmp(want_result, have_result) == 0; fits = assignable(want_result, have_result); }
+    }
+    if (!fits) {
+        if (!is_fn_type(t)) report("semantic error: a function %s is expected here, got %s (a value, not a function)\n",
+                                   shown_type(expected), shown_type(t));
+        else report("semantic error: a function %s is expected here, got %s\n", shown_type(expected), shown_type(t));
+        s->had_error = 1;
+        return NULL;
+    }
+    if (same || f->kind != AST_IDENTIFIER) {
+        if (f->kind == AST_IDENTIFIER) return expr_type(s, f);      /* carre: @fn:carre */
+        if (!same) {
+            report("semantic error: a function %s is expected here, got %s: write lambda x: ... around it\n",
+                   shown_type(expected), shown_type(t));
+            s->had_error = 1;
+            return NULL;
+        }
+        return t;
+    }
+    /* sorted(entiers, key=carre) with carre(x: float): lambda __a0: carre(__a0) converts */
+    AstNode *call = new_node(AST_CALL, f->text, NULL);
+    if (!call) return NULL;
+    call->line = f->line;
+    call->file = f->file;
+    for (size_t i = 0; i < want_count; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "__a%zu", i);
+        AstNode *param = new_node(AST_PARAM, name, NULL), *arg = new_node(AST_IDENTIFIER, name, NULL);
+        if (!param || !arg || !ast_add_child(f, param) || !ast_add_child(call, arg)) {
+            ast_free(param); ast_free(arg); ast_free(call);
+            return NULL;
+        }
+        param->line = arg->line = f->line;
+        param->file = arg->file = f->file;
+    }
+    if (!ast_add_child(f, call)) { ast_free(call); return NULL; }
+    f->kind = AST_LAMBDA;
+    free(f->text);
+    f->text = NULL;
+    return check_lambda(s, f, expected);
+}
+
+/*
+ * A call of a function given as a value: n has the children [callee, args...] and
+ * becomes @fncall(callee, args...).  shown: how the callee is named in the messages.
+ */
+static const char *check_value_call(Semantic *s, AstNode *n, const char *ftype, const char *shown) {
+    const char *params[16], *result;
+    size_t count;
+    if (!fn_type_parts(ftype, params, 16, &count, &result)) {
+        report("semantic error: %s is a %s, not a function: it cannot be called\n", shown, shown_type(ftype));
+        s->had_error = 1;
+        return NULL;
+    }
+    size_t given = n->child_count - 1;
+    for (size_t i = 1; i < n->child_count; i++) {
+        if (n->children[i]->kind == AST_KWARG) {
+            report("semantic error: %s is a %s: named arguments (%s=) cannot be given to it\n", shown,
+                   shown_type(ftype), n->children[i]->text);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    if (given != count) {
+        report("semantic error: %s is a %s: it takes %zu argument(s), got %zu\n", shown, shown_type(ftype), count, given);
+        s->had_error = 1;
+        return NULL;
+    }
+    for (size_t i = 0; i < count; i++) {
+        const char *a = expr_type_expected(s, n->children[i + 1], params[i]);
+        if (!a || !assignable(params[i], a)) {
+            report("semantic error: argument %zu of %s expects %s, got %s\n", i + 1, shown, shown_type(params[i]),
+                   a ? shown_type(a) : "invalid");
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    free(n->text);
+    n->text = malloc(8);
+    if (!n->text) return NULL;
+    strcpy(n->text, "@fncall");
+    n->kind = AST_CALL;
+    return set_type(n, result) ? n->type_name : NULL;
+}
+
+/* f(x) where f is a variable holding a function: @fncall(f, x) */
+static const char *check_fn_call(Semantic *s, AstNode *n, const char *ftype) {
+    AstNode *callee = new_node(AST_IDENTIFIER, n->text, ftype);
+    if (!callee || !ast_add_child(n, callee)) { ast_free(callee); return NULL; }
+    for (size_t i = n->child_count - 1; i > 0; i--) n->children[i] = n->children[i - 1];
+    n->children[0] = callee;
+    callee->line = n->line;
+    callee->file = n->file;
+    return check_value_call(s, n, ftype, callee->text);
+}
+
+/* numbers, texts and booleans can be sorted, min and max compare them */
+static int orderable(const char *t) {
+    return t && (strcmp(t, "string") == 0 || strcmp(t, "bool") == 0 || (is_numeric(t) && !is_big(t)));
+}
+
+static int to_builtin(AstNode *n, const char *name, AstNode *const *children, size_t count, const char *type) {
+    n->child_count = 0;
+    for (size_t i = 0; i < count; i++) if (!ast_add_child(n, children[i])) return 0;
+    char *text = malloc(strlen(name) + 1);
+    if (!text) return 0;
+    strcpy(text, name);
+    free(n->text);
+    n->text = text;
+    n->kind = AST_CALL;
+    return set_type(n, type);
+}
+
+/*
+ * sorted(xs, key=f, reverse=true), xs.sort(...), min(xs, key=f), max(xs), sum(xs),
+ * map(f, xs), filter(f, xs): as in Python (map and filter give lists).  Return NULL
+ * with *handled 0 when the call is not one of them (min(a, b) of two numbers).
+ */
+static const char *check_list_call(Semantic *s, AstNode *n, int is_method, int *handled) {
+    const char *name = n->text;
+    *handled = 0;
+    int sorted = !strcmp(name, "sorted"), sort = is_method && !strcmp(name, "sort");
+    int is_min = !strcmp(name, "min"), is_max = !strcmp(name, "max"), sum = !strcmp(name, "sum");
+    int map = !strcmp(name, "map"), filter = !strcmp(name, "filter");
+    if (is_method ? !sort : (!(sorted || is_min || is_max || sum || map || filter) || find_function(s, name))) return NULL;
+    AstNode *pos[4] = { 0 }, *key = NULL, *reverse = NULL;
+    size_t npos = 0;
+    for (size_t i = 0; i < n->child_count; i++) {
+        AstNode *c = n->children[i];
+        if (c->kind == AST_KWARG) {
+            if (strcmp(c->text, "key") == 0 && (sorted || sort || is_min || is_max) && !key) key = c;
+            else if (strcmp(c->text, "reverse") == 0 && (sorted || sort) && !reverse) reverse = c;
+            else {
+                *handled = 1;
+                report("semantic error: %s() has no argument %s=\n", name, c->text);
+                s->had_error = 1;
+                return NULL;
+            }
+        } else if (npos < 4) {
+            pos[npos++] = c;
+        } else {
+            npos++;
+        }
+    }
+    if ((is_min || is_max) && npos != 1 && !key) return NULL;          /* min(a, b): the numbers */
+    *handled = 1;
+    size_t want = sort ? 1 : (map || filter) ? 2 : 1;                     /* sort: the receiver */
+    if (npos != want) {
+        report("semantic error: %s() expects %s, got %zu argument(s) without a name\n", name,
+               map || filter ? "a function and a list" : sort ? "nothing but key= and reverse=" : "one list", sort ? npos - 1 : npos);
+        s->had_error = 1;
+        return NULL;
+    }
+    AstNode *list = map || filter ? pos[1] : pos[0];
+    const char *lt = expr_type(s, list);
+    if (!lt) return NULL;
+    if (is_dict_type(lt) && !sort) {
+        /* sorted(d), max(d, key=...): its keys, as in Python */
+        AstNode *keys = new_node(AST_CALL, "@dict_keys", list_type_for_element(dict_key_type(lt)));
+        if (!keys) return NULL;
+        keys->line = list->line;
+        keys->file = list->file;
+        size_t k = 0;
+        while (k < n->child_count && n->children[k] != list) k++;
+        if (k == n->child_count || !ast_add_child(keys, list)) { ast_free(keys); return NULL; }
+        n->children[k] = keys;
+        list = keys;
+        lt = keys->type_name;
+    }
+    const char *element = list_element_type(lt);
+    if (!element) {
+        report("semantic error: %s() works on a list, got %s\n", name, lt);
+        s->had_error = 1;
+        return NULL;
+    }
+    if (sum) {
+        if (!is_numeric(element) && strcmp(element, "bool") != 0) {
+            report("semantic error: sum() adds numbers, got %s\n", lt);
+            s->had_error = 1;
+            return NULL;
+        }
+        const char *type = is_float_type(element) ? "float" : "int";
+        AstNode *kids[1] = { list };
+        return to_builtin(n, "@sum", kids, 1, type) ? n->type_name : NULL;
+    }
+    if (map || filter) {
+        const char *ps[1] = { element };
+        const char *ft = check_fn_value(s, pos[0], fn_type_make(ps, 1, filter ? "bool" : "?"));
+        if (!ft) return NULL;
+        const char *fp[16], *fr;
+        size_t fc;
+        fn_type_parts(ft, fp, 16, &fc, &fr);
+        const char *result = filter ? lt : list_type_for_element(fr);
+        if (!result) {
+            report("semantic error: map() makes a list of what the function gives, and there is no list of %s\n", fr);
+            s->had_error = 1;
+            return NULL;
+        }
+        AstNode *kids[2] = { pos[0], list };
+        return to_builtin(n, map ? "@map" : "@filter", kids, 2, result) ? n->type_name : NULL;
+    }
+    /* sorted, sort, min, max: by the element, or by key(element) */
+    AstNode *key_fn = key ? key->children[0] : NULL;
+    if (key_fn) {
+        const char *ps[1] = { element };
+        const char *ft = check_fn_value(s, key_fn, fn_type_make(ps, 1, "?"));
+        if (!ft) return NULL;
+        const char *fp[16], *fr;
+        size_t fc;
+        fn_type_parts(ft, fp, 16, &fc, &fr);
+        if (!orderable(fr)) {
+            report("semantic error: the key of %s() must give a number, a text or a bool, got %s\n", name, fr);
+            s->had_error = 1;
+            return NULL;
+        }
+    } else if (!orderable(element)) {
+        report("semantic error: %s() compares numbers, texts or booleans; a list of %s needs key= (key=lambda p: p.x)\n",
+               name, element);
+        s->had_error = 1;
+        return NULL;
+    }
+    AstNode *rev = reverse ? reverse->children[0] : new_node(AST_BOOL, "false", NULL);
+    if (!rev) return NULL;
+    if (reverse) {
+        const char *rt = expr_type(s, rev);
+        if (!rt || strcmp(rt, "bool") != 0) {
+            report("semantic error: reverse= expects a bool, got %s\n", rt ? rt : "invalid");
+            s->had_error = 1;
+            return NULL;
+        }
+    } else if (!expr_type(s, rev)) {
+        return NULL;
+    }
+    const char *type = sorted ? lt : sort ? "void" : element;
+    AstNode *kids[3];
+    size_t k = 0;
+    kids[k++] = list;
+    if (sorted || sort) kids[k++] = rev;
+    else ast_free(rev);
+    if (key_fn) kids[k++] = key_fn;
+    if (key) { key->child_count = 0; ast_free(key); }
+    if (reverse) { reverse->child_count = 0; ast_free(reverse); }
+    const char *builtin = sorted ? "@sorted" : sort ? "@sort" : is_min ? "@minl" : "@maxl";
+    return to_builtin(n, builtin, kids, k, type) ? n->type_name : NULL;
 }
 
 static const char *check_comprehension(Semantic *s, AstNode *n) {
@@ -2376,6 +2919,10 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "object equality is not supported in Clair V0.14");
             return NULL;
         }
+        if (is_fn_type(left) || is_fn_type(right)) {                  /* V0.75 */
+            error_type(s, "two functions cannot be compared with == or !=");
+            return NULL;
+        }
         int okay = (is_numeric(left) && is_numeric(right)) || strcmp(left, right) == 0;
         if (!okay) {
             error_type(s, "incompatible operands for equality comparison");
@@ -2491,6 +3038,15 @@ static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expec
 }
 
 static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char *expected) {
+    /* V0.75: lambda x: x * x, or len, where a def(...) -> ... is expected */
+    if (n && is_fn_type(expected) &&
+        (n->kind == AST_LAMBDA ||
+         (n->kind == AST_IDENTIFIER && n->text && !find_var(s, n->text) &&
+          (value_builtin(n->text) || find_function(s, n->text))) ||
+         (n->kind == AST_IDENTIFIER && n->text && is_fn_type(find_var(s, n->text))) ||
+         (n->kind == AST_MEMBER && n->child_count == 1 && n->children[0]->kind == AST_IDENTIFIER &&
+          method_value_params(s, n) > 0)))
+        return check_fn_value(s, n, expected);
     /* V0.46: let xs: list[u8] = [0] * n : the list written gets the expected type */
     if (n && n->kind == AST_BINARY && n->text && strcmp(n->text, "*") == 0 && n->child_count == 2 &&
         is_list_type(expected) && !n->type_name &&
@@ -2650,6 +3206,31 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
         }
         case AST_IDENTIFIER: {
             const char *type = find_var(s, n->text);
+            const AstNode *named = type || !n->text ? NULL : find_function(s, n->text);
+            if (named && strcmp(n->text, "main") != 0 && strncmp(n->text, "__test_", 7) != 0) {
+                /* V0.75: integrer(carre, 0.0, 1.0): the function carre as a value, @fn:carre */
+                const char *params[16];
+                size_t count = 0;
+                for (size_t i = 0; i < named->child_count && count < 16; i++)
+                    if (named->children[i]->kind == AST_PARAM) params[count++] = named->children[i]->type_name;
+                int tentative = s->probe_tentative;
+                s->probe_tentative = 0;
+                const char *result = call_result_type(s, named, NULL);
+                if (s->probing && s->probe_tentative) {
+                    s->probe_blocked = 1;          /* V0.73: wait until it is guessed for good */
+                    result = NULL;
+                }
+                s->probe_tentative |= tentative;
+                if (!result) return NULL;
+                const char *ftype = fn_type_make(params, count, result);
+                char *text = malloc(strlen(n->text) + 5);
+                if (!ftype || !text) { free(text); return NULL; }
+                sprintf(text, "@fn:%s", n->text);
+                free(n->text);
+                n->text = text;
+                n->kind = AST_CALL;
+                return set_type(n, ftype) ? n->type_name : NULL;
+            }
             if (!type) {
                 const char *suggestion = sem_quiet ? NULL : clair_v16_suggest(s, n->text);
                 if (suggestion)
@@ -2667,9 +3248,44 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             return n->type_name;
         }
         case AST_CALL: {
+            /* V0.75: ops[i](x), ajouteur(3)(4): a call of the value before the parentheses */
+            if (n->text && strcmp(n->text, "@call") == 0 && !n->type_name && n->child_count >= 1) {
+                if (n->children[0]->kind == AST_LAMBDA) {
+                    error_type(s, "(lambda ...)(x): call it through a variable, let f: def(int) -> int = lambda ...");
+                    return NULL;
+                }
+                const char *ft = expr_type(s, n->children[0]);
+                if (!ft) return NULL;
+                return check_value_call(s, n, ft, "this value");
+            }
+            /* V0.75: a function value, a call through one, sorted, min... already checked */
+            if (n->text && n->type_name && (strncmp(n->text, "@fn", 3) == 0 || !strcmp(n->text, "@sorted") ||
+                                            !strcmp(n->text, "@dict_keys") ||
+                                            !strcmp(n->text, "@sort") || !strcmp(n->text, "@minl") ||
+                                            !strcmp(n->text, "@maxl") || !strcmp(n->text, "@sum") ||
+                                            !strcmp(n->text, "@map") || !strcmp(n->text, "@filter")))
+                return n->type_name;
             /* V0.72: a text call already checked (s.lower(), s[i], len(s), s * n) */
             if (n->text && strncmp(n->text, "@tx_", 4) == 0 && n->type_name) return n->type_name;
             /* V0.47: m.sqrt(x) after import math as m: the builtin, even if the program has its own sqrt */
+            /* V0.75: f(x) with f a variable holding a function (it hides a function of the same name) */
+            if (n->text && n->text[0] != '@') {
+                const char *vt = find_var(s, n->text);
+                if (vt && is_fn_type(vt)) return check_fn_call(s, n, vt);
+            }
+            if (n->text && n->text[0] != '@') {
+                int handled = 0;
+                const char *lt = check_list_call(s, n, 0, &handled);
+                if (handled) return lt;
+            }
+            for (size_t i = 0; n->text && n->text[0] != '@' && i < n->child_count; i++) {
+                if (n->children[i]->kind == AST_KWARG) {
+                    report("semantic error: %s() has no argument %s= (named arguments work with sorted, sort, min and max)\n",
+                           n->text, n->children[i]->text);
+                    s->had_error = 1;
+                    return NULL;
+                }
+            }
             int from_math = 0;
             if (n->text && strncmp(n->text, "math.", 5) == 0) {
                 char *plain = malloc(strlen(n->text + 5) + 1);
@@ -2796,8 +3412,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     if (!actual || !assignable(expected, actual)) {
                         if (!sem_quiet) fprintf(stderr,
                                 "semantic error: constructor argument %zu for '%s.%s' expects %s, got %s\n",
-                                i + 1, cls->text, field->text, expected ? expected : "?",
-                                actual ? actual : "invalid");
+                                i + 1, cls->text, field->text, expected ? shown_type(expected) : "?",
+                                shown_type(actual));
                         s->had_error = 1;
                         return NULL;
                     }
@@ -2829,7 +3445,9 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     const char *dot = other->kind == AST_FUNCTION && other->text ? strchr(other->text, '.') : NULL;
                     if (dot && strcmp(dot + 1, n->text) == 0) hint = other->text;
                 }
-                if (hint) report("semantic error: undefined function or class '%s' (did you mean %s(...)?)\n", n->text, hint);
+                const char *vt = find_var(s, n->text);
+                if (vt) report("semantic error: %s is a %s, not a function: it cannot be called\n", n->text, shown_type(vt));
+                else if (hint) report("semantic error: undefined function or class '%s' (did you mean %s(...)?)\n", n->text, hint);
                 else report("semantic error: undefined function or class '%s'\n", n->text);
                 s->had_error = 1;
                 return NULL;
@@ -2852,7 +3470,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 const char *actual = expr_type_expected(s, n->children[i], expected);
                 if (!actual || !assignable(expected, actual)) {
                     report("semantic error: argument %zu of '%s' expects %s, got %s\n",
-                            i + 1, n->text, expected ? expected : "?", actual ? actual : "invalid");
+                            i + 1, n->text, expected ? shown_type(expected) : "?", shown_type(actual));
                     s->had_error = 1;
                     return NULL;
                 }
@@ -2871,6 +3489,10 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             if (n->child_count < 1 || !n->text) return NULL;
             const char *receiver = expr_type(s, n->children[0]);
             if (receiver && strcmp(receiver, "string") == 0) return check_text_method(s, n);   /* V0.72 */
+            if (receiver && is_list_type(receiver) && strcmp(n->text, "sort") == 0) {          /* V0.75 */
+                int handled = 0;
+                return check_list_call(s, n, 1, &handled);
+            }
             const AstNode *cls = receiver ? find_class(s, receiver) : NULL;
             if (!cls) {
                 if (receiver && is_list_type(receiver) && strcmp(n->text, "append") == 0) {
@@ -2889,6 +3511,20 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             snprintf(mangled, mangled_len + 1, "%s__%s", cls->text, n->text);
 
             const AstNode *fn = find_function(s, mangled);
+            const AstNode *fn_field = fn ? NULL : find_field(cls, n->text);
+            if (fn_field && is_fn_type(fn_field->type_name)) {
+                /* V0.75: b.action(3), the function kept in the field action */
+                free(mangled);
+                AstNode *member = new_node(AST_MEMBER, n->text, NULL);
+                if (!member || !ast_add_child(member, n->children[0])) { ast_free(member); return NULL; }
+                member->line = n->line;
+                member->file = n->file;
+                n->children[0] = member;
+                if (!expr_type(s, member)) return NULL;
+                char shown[256];
+                snprintf(shown, sizeof(shown), "%s.%s", shown_name(cls->text), n->text);
+                return check_value_call(s, n, fn_field->type_name, shown);
+            }
             if (!fn) {
                 if (find_field(cls, n->text)) {
                     report("semantic error: '%s.%s' is a field, not a method\n",
@@ -2915,8 +3551,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 const char *actual = expr_type_expected(s, n->children[i], expected);
                 if (!actual || !assignable(expected, actual)) {
                     report("semantic error: argument %zu of '%s.%s' expects %s, got %s\n",
-                            i, cls->text, n->text, expected ? expected : "?",
-                            actual ? actual : "invalid");
+                            i, cls->text, n->text, expected ? shown_type(expected) : "?",
+                            shown_type(actual));
                     s->had_error = 1;
                     free(mangled);
                     return NULL;
@@ -2985,6 +3621,15 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             error_type(s, "unknown unary operator");
             return NULL;
         }
+        case AST_LAMBDA:
+            error_type(s, "a lambda needs to know the types of its parameters: give it where a function is "
+                          "expected (a parameter def(float) -> float, key=, map(), filter()), or write "
+                          "let f: def(float) -> float = lambda x: ...");
+            return NULL;
+        case AST_KWARG:
+            report("semantic error: named argument %s= is not allowed here\n", n->text);
+            s->had_error = 1;
+            return NULL;
         default:
             error_type(s, "invalid expression node");
             return NULL;
@@ -3060,7 +3705,7 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
                     return 0;
                 }
                 report("semantic error: cannot initialize %s '%s' with %s%s\n",
-                        n->type_name, n->text, actual,
+                        shown_type(n->type_name), n->text, shown_type(actual),
                         is_measure(actual) && is_numeric(n->type_name) ? ": value(m) gives its value" : "");
                 s->had_error = 1;
                 return 0;
@@ -3110,8 +3755,8 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             const char *actual = expr_type_expected(s, n->children[1], field->type_name);
             if (!actual || !assignable(field->type_name, actual)) {
                 report("semantic error: field '%s.%s' expects %s, got %s\n",
-                        base, n->text, field->type_name,
-                        actual ? actual : "invalid");
+                        base, n->text, shown_type(field->type_name),
+                        shown_type(actual));
                 s->had_error = 1;
                 return 0;
             }
@@ -3302,7 +3947,7 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             const char *actual = expr_type_expected(s, n->children[0], s->return_type);
             if (!actual || !assignable(s->return_type, actual)) {
                 report("semantic error: return expects %s, got %s\n",
-                        s->return_type ? s->return_type : "?", actual ? actual : "invalid");
+                        s->return_type ? shown_type(s->return_type) : "?", shown_type(actual));
                 s->had_error = 1;
                 return 0;
             }
@@ -3735,8 +4380,10 @@ static int collides_with_c(const char *name) {
 static void mangle_node(AstNode *n) {
     if (!n) return;
 
-    /* V0.47: the function f of the module orbite is orbite.f in Clair, orbite__mod__f in C */
-    if ((n->kind == AST_FUNCTION || n->kind == AST_CALL) && n->text && n->text[0] != '@' && strchr(n->text, '.')) {
+    /* V0.47: the function f of the module orbite is orbite.f in Clair, orbite__mod__f in C
+       (V0.75: also given as a value, @fn:orbite.f) */
+    if ((n->kind == AST_FUNCTION || n->kind == AST_CALL) && n->text && strchr(n->text, '.') &&
+        (n->text[0] != '@' || strncmp(n->text, "@fn:", 4) == 0)) {
         size_t dots = 0;
         for (const char *q = n->text; *q; q++) dots += *q == '.';
         char *renamed = malloc(strlen(n->text) + dots * 6 + 1), *w = renamed;

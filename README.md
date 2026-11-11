@@ -2,6 +2,34 @@
 
 Clair est un langage de programmation expérimental.
 Son compilateur est écrit en C et utilise Clang.
+Il s'écrit presque comme Python, avec des accolades et `let`, et Clair le traduit en C.
+
+## Un aperçu
+
+```
+Class Ville {
+    nom: string
+    habitants: int
+}
+
+def densite(v: Ville, surface: float) {
+    return float(v.habitants) / surface
+}
+
+def main {
+    let villes = [Ville("Lyon", 522000), Ville("Paris", 2103000), Ville("Nice", 342000)]
+    for v in sorted(villes, key=lambda v: v.habitants, reverse=true) {
+        print(v.nom.upper())                                      // PARIS, LYON, NICE
+    }
+    print(sum(map(lambda v: v.habitants, villes)))                // 2967000
+    let grandes = filter(lambda v: v.habitants > 400000, villes)
+    print(", ".join(map(lambda v: v.nom, grandes)))               // Lyon, Paris
+    print(int(densite(villes[1], 105.4)))                         // 19952
+}
+```
+
+Les types sont devinés (`let x = 5`, une fonction sans `-> type` rend le type de ses `return`) et vérifiés
+avant de lancer le programme.
 
 ## Démarrer avec Clair Studio (Termux, sur Android)
 
@@ -41,6 +69,11 @@ Le retour à l'emplacement initial reste à fiabiliser.
 
 ## Fonctionnalités
 
+- Squelettes comme Python : `pass`, `def main { }`, parenthèses et `-> type` facultatifs, `return` seul, `else if` ([documentation](docs/README_V0.72.md))
+- Types devinés comme Python : `let x = 5`, `let p = Point(1.0, 2.0)`, `let xs = [1.0, 2.5]`, et le type rendu par une fonction sans `-> type`, même récursive, mutuelle ou méthode ; `let` reste nécessaire pour créer une variable ([documentation](docs/README_V0.73.md))
+- Textes comptés en caractères (`len`, `s[i]`, tranches, `for c in s`) et méthodes de `str` de Python : `lower`, `upper`, `title`, `split`, `join`, `strip`, `find`, `replace`, `startswith`, `isalpha`, `center`…, résultats identiques à ceux de Python, accents et Unicode compris ([documentation](docs/README_V0.72.md))
+- Listes d'objets (`list[Point]`, un arbre `Class Noeud { enfants: list[Noeud] }`), listes de listes à toute profondeur (`grille[i][j] = v`, `grille[i].append(v)`), dictionnaires à clés entières (`dict[int, string]`) et de toutes valeurs (`dict[string, list[int]]`, `dict[string, Ville]`) ([documentation](docs/README_V0.74.md))
+- Fonctions comme valeurs : `integrer(carre, 0.0, 1.0)` avec le type `def(float) -> float`, `lambda`, fonctions qui rendent des fonctions, listes, dictionnaires et champs de fonctions ; `sorted`, `sort`, `min`, `max`, `sum`, `map`, `filter` avec `key=` et `reverse=`, tri stable comme Python ([documentation](docs/README_V0.75.md))
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON
 - Entiers machine `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32` (`i64` = `int`) qui font le tour comme en C et NumPy ; opérations sur les bits `& | ^ ~ << >>` ; nombres `0xFF`, `0b1010`, `0o755`, `1_000_000`
 - Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres) et sans signe `uint128` .. `uint1024`, avec `abs`, `min`, `max`, `pow` exacts ; dépassements détectés
@@ -157,6 +190,10 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
+- [Clair V0.75](docs/README_V0.75.md) : les fonctions comme valeurs (`def(float) -> float`), `lambda`, `sorted`, `sort`, `min`, `max`, `sum`, `map`, `filter` avec `key=` et `reverse=`, comme Python ; correctif de la mémoire des boucles (listes d'objets rangées plus loin)
+- [Clair V0.74](docs/README_V0.74.md) : listes d'objets, listes de listes, dictionnaires à clés entières et de toutes valeurs, comme Python
+- [Clair V0.73](docs/README_V0.73.md) : les types devinés comme Python : `let x = 5`, et le type rendu par une fonction sans `-> type` (récursive, mutuelle, méthodes)
+- [Clair V0.72](docs/README_V0.72.md) : squelettes comme Python (`pass`, `def main { }`, `else if`…) ; les textes comptés en caractères et leurs méthodes (`lower`, `split`, `join`, `find`, `replace`, `isalpha`…), identiques à Python
 - [Clair V0.71.8](docs/README_V0.71.8.md) : l'appli Clair Studio est liée à un petit cadre d'Android construit sur le téléphone (l'`aapt2` de Termux ne lit pas les ressources d'Android 16)
 - [Clair V0.71.7](docs/README_V0.71.7.md) : l'appli Clair Studio se construit sur le téléphone (le `d8` de Termux plantait sur un attribut que Java 21 ajoute aux classes anonymes ; `pm` est refusé sur Android 16, l'appli donne elle-même sa version)
 - [Clair V0.71.6](docs/README_V0.71.6.md) : Clair Studio en application Android, avec son icône : le Studio sans le navigateur (le menu de sélection ne garde que Couper, Copier, Coller, Tout sélectionner), construite et installée par `studio.sh`

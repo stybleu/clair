@@ -28,16 +28,18 @@ static void mark_calls(
 ) {
     if (!node) return;
 
-    if (node->kind == AST_CALL &&
-        node->text &&
-        node->text[0] != '@') {
+    /* V0.75: @fn:carre, the function carre given as a value, is used too */
+    const char *callee = !node->text ? NULL
+                       : node->text[0] != '@' ? node->text
+                       : strncmp(node->text, "@fn:", 4) == 0 ? node->text + 4 : NULL;
+    if (node->kind == AST_CALL && callee) {
 
         for (size_t i = 0; i < program->child_count; ++i) {
             const AstNode *fn = program->children[i];
 
             if (fn->kind == AST_FUNCTION &&
                 fn->text &&
-                strcmp(fn->text, node->text) == 0 &&
+                strcmp(fn->text, callee) == 0 &&
                 !live[i]) {
 
                 live[i] = 1;
