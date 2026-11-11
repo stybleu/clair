@@ -1,0 +1,24 @@
+date : 2026-11-11T06:34:17Z
+titre : mise a jour V0.75 (ok)
+clair : 32f3a6e feat(langage): les fonctions comme valeurs, lambda, sorted/sor
+processeur : aarch64, coeurs : 8
+android : 16
+clang : clang version 21.1.8
+--- resultat
+V0.75 APPLIQUEE, COMPILATION OK
+tests reussis : 306
+fonctions_valeurs.cl : OK -> integrer(carre, ...), lambda qu
+tris.cl : OK -> sorted, sort, min, max, sum, map, filter : e
+regions_listes.cl : OK -> une boucle garde les textes d une 
+ TOUS LES TESTS SONT OK
+ENVOYE SUR GITHUB : 32f3a6e feat(langage): les fonctions comme valeurs, lambda, 
+--- erreurs
+--- compilation
+--- tests
+306
+nbody_relativite.cl : OK -> relativite generale : Mercure tourne de 42.98 secondes d arc par siecle (Einstein), systeme solaire cent ans comme REBOUNDx a 1 km, quantite de mouvement gardee, s.c sauve et relu
+gui_module.cl : OK -> fenetre, rectangle, disque, anneau, ligne, polygone, lettres accentuees, bouton touche, touche espace, copie BMP et PNG, image dessinee et tournee, deuxieme fenetre ; nbody : fenetre, Pause, Lecture, Quitter, systeme solaire avec IAS15 et WHFast, amas de 2 000 etoiles avec l arbre, calcul dans un fil a part (avec MERCURIUS)
+gui_abi.c : OK -> les declarations de SDL3 du module gui sont celles des en-tetes de SDL3
+tools/studio/studio.cl : OK -> jeton et session, fichiers, compiler, lancer et lire la sortie, erreur avec sa ligne, entree, arret, renommer, supprimer, rien hors du dossier, cache de compilation, verification sans compiler, tests, sources des modules, git : depot, differences, versions, historique, restaurer, annuler, envoyer, recuperer, figures de plot, sous-dossiers, reglages, ouverture dans l appli Android ou le navigateur
+ TOUS LES TESTS SONT OK
+==================================================
