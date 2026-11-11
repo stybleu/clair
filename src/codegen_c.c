@@ -42,7 +42,74 @@ static int element_kind_of(const char *type, const char *prefix) {
     return -1;
 }
 
-static int is_list_type(const char *type) { return element_kind_of(type, "list[") >= 0; }
+/* V0.74: list[Point], list[list[int]], dict[int,string]...: these type names live as long as the compiler */
+static const char *cg_intern(const char *text, size_t len) {
+    static char **items = NULL;
+    static size_t count = 0, capacity = 0;
+    for (size_t i = 0; i < count; i++) if (strlen(items[i]) == len && memcmp(items[i], text, len) == 0) return items[i];
+    if (count == capacity) {
+        size_t cap = capacity ? capacity * 2 : 32;
+        char **grown = realloc(items, cap * sizeof(*grown));
+        if (!grown) return NULL;
+        items = grown;
+        capacity = cap;
+    }
+    char *copy = malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+    items[count++] = copy;
+    return copy;
+}
+
+/* X of prefix[X] (brackets balanced), or NULL */
+static const char *bracket_inner(const char *type, const char *prefix, size_t *len) {
+    size_t p = strlen(prefix), n = type ? strlen(type) : 0;
+    if (n <= p + 1 || strncmp(type, prefix, p) != 0 || type[n - 1] != ']') return NULL;
+    int depth = 0;
+    for (size_t i = p; i < n - 1; i++) {
+        if (type[i] == '[') depth++;
+        else if (type[i] == ']' && --depth < 0) return NULL;
+    }
+    if (depth != 0) return NULL;
+    *len = n - 1 - p;
+    return type + p;
+}
+
+/* a class name (the semantic pass checked that it is one) */
+static int class_like(const char *t) {
+    static const char *const builtin[] = { "bigint", "bigfloat", "certfloat", "measure", "void", "ptr", "matrix",
+                                           "list", "dict", "int128", "int256", "int512", "int1024", "uint128",
+                                           "uint256", "uint512", "uint1024", NULL };
+    if (!t || !((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) return 0;
+    for (const char *q = t; *q; q++)
+        if (!((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9') || *q == '_')) return 0;
+    for (size_t i = 0; builtin[i]; i++) if (strcmp(t, builtin[i]) == 0) return 0;
+    for (size_t i = 0; i < ELEMENT_KIND_COUNT; i++) if (strcmp(t, element_kinds[i][0]) == 0) return 0;
+    return 1;
+}
+
+static int is_dict_type(const char *type);
+static const char *list_elem(const char *type);
+
+/* V0.74: objects, lists and dictionaries in a list or a dictionary: held by reference (a pointer) */
+static int is_ref_element(const char *t) { return t && (list_elem(t) || is_dict_type(t) || class_like(t)); }
+
+/* the element type of any list type, or NULL */
+static const char *list_elem(const char *type) {
+    int k = element_kind_of(type, "list[");
+    if (k >= 0) return element_kinds[k][0];
+    size_t len;
+    const char *inner = bracket_inner(type, "list[", &len);
+    if (!inner) return NULL;
+    const char *e = cg_intern(inner, len);
+    return is_ref_element(e) ? e : NULL;
+}
+
+static int is_list_type(const char *type) { return list_elem(type) != NULL; }
+
+/* list[Point], list[list[int]]: elements that are not numbers, booleans or texts */
+static int is_ref_list(const char *type) { return is_list_type(type) && element_kind_of(type, "list[") < 0; }
 
 /* u8 .. u64, i8 .. i32 (not int): their bits, 0 otherwise */
 static int small_machine_bits(const char *t) {
@@ -62,14 +129,23 @@ static int machine_type_bits(const char *t) {
 
 static int machine_is_unsigned(const char *t) { return small_machine_bits(t) && t[0] == 'u'; }
 
-static int is_dict_type(const char *type) {
-    return type && (
-        strcmp(type, "dict[string,int]") == 0 ||
-        strcmp(type, "dict[string,float]") == 0 ||
-        strcmp(type, "dict[string,bool]") == 0 ||
-        strcmp(type, "dict[string,string]") == 0
-    );
+/* V0.74: dict[K,V], K string or int, V int, float, bool, string, an object, a list or a dictionary */
+static const char *dict_value(const char *type) {
+    size_t len;
+    const char *inner = bracket_inner(type, "dict[", &len);
+    if (!inner) return NULL;
+    size_t key = strncmp(inner, "string,", 7) == 0 ? 7 : strncmp(inner, "int,", 4) == 0 ? 4 : 0;
+    if (!key || len <= key) return NULL;
+    const char *v = cg_intern(inner + key, len - key);
+    if (!v) return NULL;
+    if (!strcmp(v, "int") || !strcmp(v, "float") || !strcmp(v, "bool") || !strcmp(v, "string") || is_ref_element(v)) return v;
+    return NULL;
 }
+
+static int is_dict_type(const char *type) { return dict_value(type) != NULL; }
+
+/* dict[int,...]: its keys are kept as decimal texts (clair_rt_ikey) */
+static int dict_int_keys(const char *type) { return is_dict_type(type) && strncmp(type, "dict[int,", 9) == 0; }
 
 
 static int is_matrix_type(const char *type) {
@@ -179,18 +255,26 @@ static const char *c_type_name(const char *clair_type) {
     return class_type;
 }
 
+/* the C type of t, kept (c_type_name answers in one buffer for classes) */
+static const char *c_type_kept(const char *t) {
+    const char *c = c_type_name(t);
+    return c ? cg_intern(c, strlen(c)) : NULL;
+}
+
 static const char *list_element_c_type(const char *list_type) {
     int k = element_kind_of(list_type, "list[");
-    return k >= 0 ? element_kinds[k][1] : NULL;
+    if (k >= 0) return element_kinds[k][1];
+    return is_list_type(list_type) ? c_type_kept(list_elem(list_type)) : NULL;      /* V0.74 */
 }
 
 static const char *dict_value_c_type(const char *dict_type) {
-    if (!dict_type) return NULL;
-    if (strcmp(dict_type, "dict[string,int]") == 0) return "int64_t";
-    if (strcmp(dict_type, "dict[string,float]") == 0) return "double";
-    if (strcmp(dict_type, "dict[string,bool]") == 0) return "bool";
-    if (strcmp(dict_type, "dict[string,string]") == 0) return "const char *";
-    return NULL;
+    const char *v = dict_value(dict_type);
+    if (!v) return NULL;
+    if (strcmp(v, "int") == 0) return "int64_t";
+    if (strcmp(v, "float") == 0) return "double";
+    if (strcmp(v, "bool") == 0) return "bool";
+    if (strcmp(v, "string") == 0) return "const char *";
+    return c_type_kept(v);                                                          /* V0.74 */
 }
 
 
@@ -3984,6 +4068,32 @@ static const char *list_accessor_name(const char *list_type) {
     return name;
 }
 
+/*
+ * xs[i] as a place: *clair_rt_list_at_i64_checked(xs, i, line); V0.74, for objects
+ * and lists: (*(ClairClass_Point **)clair_rt_list_at_any_checked(xs, i, line)).
+ * The caller writes the list, the index and the line between the two.
+ */
+static void emit_list_at_open(FILE *f, const char *list_type) {
+    const char *accessor = list_accessor_name(list_type);
+    if (accessor) fprintf(f, "*%s(", accessor);
+    else fprintf(f, "(*(%s *)clair_rt_list_at_any_checked(", list_element_c_type(list_type));
+}
+
+static void emit_list_at_close(FILE *f, const char *list_type) {
+    if (!list_accessor_name(list_type)) fputc(')', f);
+}
+
+static int emit_expr(FILE *f, const AstNode *n);
+
+/* V0.74: a key of a dictionary; dict[int,...] keeps its keys as decimal texts (clair_rt_ikey) */
+static int emit_dict_key(FILE *f, const char *dict_type, const AstNode *key) {
+    if (!dict_int_keys(dict_type)) return emit_expr(f, key);
+    fputs("clair_rt_ikey((int64_t)(", f);
+    if (!emit_expr(f, key)) return 0;
+    fputs("), (char[24]){0})", f);
+    return 1;
+}
+
 /* name of the checked helper of a machine-integer operator: div, mod, shl, shr */
 static const char *machine_helper(const char *op) {
     if (strcmp(op, "/") == 0) return "div";
@@ -4269,7 +4379,7 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
             fputs("clair_rt_dict_make((const char *[]){", f);
             for (size_t i = 0; i < count; i++) {
                 if (i != 0) fputs(", ", f);
-                if (!emit_expr(f, n->children[i * 2])) return 0;
+                if (!emit_dict_key(f, n->type_name, n->children[i * 2])) return 0;
             }
             fprintf(f, "}, (%s[]){", value_type);
             for (size_t i = 0; i < count; i++) {
@@ -4317,8 +4427,11 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
                 fprintf(f, ", %zu)", n->line);
                 return 1;
             }
-            const char *element_type = c_type_name(n->type_name);
-            if (!element_type || is_list_type(n->type_name) || is_dict_type(n->type_name)) return 0;
+            const char *element_type = c_type_kept(n->type_name);
+            if (!element_type) return 0;
+            /* V0.74: grid[i] is a list, d[k] may be one: only as elements of a list or a dictionary */
+            if ((is_list_type(n->type_name) || is_dict_type(n->type_name)) &&
+                !is_ref_list(n->children[0]->type_name) && !is_dict_type(n->children[0]->type_name)) return 0;
 
             if (is_list_type(n->children[0]->type_name)) {
                 const char *fast_base = fast_access_base(n);
@@ -4329,13 +4442,13 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
                     fputc(']', f);
                     return 1;
                 }
-                const char *accessor = list_accessor_name(n->children[0]->type_name);
-                if (!accessor) return 0;
-                fprintf(f, "*%s(", accessor);
+                if (!list_element_c_type(n->children[0]->type_name)) return 0;
+                emit_list_at_open(f, n->children[0]->type_name);
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
                 if (!emit_expr(f, n->children[1])) return 0;
                 fprintf(f, ", %zu)", n->line);
+                emit_list_at_close(f, n->children[0]->type_name);
                 return 1;
             }
 
@@ -4343,7 +4456,7 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
                 fprintf(f, "(*(%s *)clair_rt_dict_at(", element_type);
                 if (!emit_expr(f, n->children[0])) return 0;
                 fputs(", ", f);
-                if (!emit_expr(f, n->children[1])) return 0;
+                if (!emit_dict_key(f, n->children[0]->type_name, n->children[1])) return 0;
                 fputs("))", f);
                 return 1;
             }
@@ -4792,7 +4905,8 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
                 }
                 if (!emit_expr(f, n->children[1])) return 0;
                 fputs(", ", f);
-                if (!emit_expr(f, n->children[0])) return 0;
+                if (member == 3) { if (!emit_dict_key(f, n->children[1]->type_name, n->children[0])) return 0; }
+                else if (!emit_expr(f, n->children[0])) return 0;
                 fputc(')', f);
                 if (member == 2) fputs(negated ? " == NULL" : " != NULL", f);
                 return 1;
@@ -5174,6 +5288,9 @@ static int emit_write_target(FILE *f, const AstNode *n, size_t plain_children) {
 static int name_mentioned_in(const AstNode *n, const char *name) {
     if (!n) return 0;
     if ((n->kind == AST_IDENTIFIER || n->kind == AST_ASSIGN) && n->text && strcmp(n->text, name) == 0) return 1;
+    /* V0.74: for ligne in grille { ligne.append(0) }: the loop variable is the list written */
+    if ((n->kind == AST_LIST_APPEND || n->kind == AST_INDEX_ASSIGN || n->kind == AST_MATRIX_SET) &&
+        n->text && strcmp(n->text, name) == 0) return 1;
     for (size_t i = 0; i < n->child_count; i++) {
         if (name_mentioned_in(n->children[i], name)) return 1;
     }
@@ -6042,11 +6159,13 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                  * evaluate-value, then check order used below.
                  */
                 if (!node_may_fail(n->children[0]) && !node_may_fail(n->children[1])) {
-                    fprintf(f, "*%s(", list_accessor_name(n->type_name));
+                    emit_list_at_open(f, n->type_name);
                     if (!emit_write_target(f, n, 2)) return 0;
                     fputs(", ", f);
                     if (!emit_expr(f, n->children[0])) return 0;
-                    fprintf(f, ", %zu) = ", n->line);
+                    fprintf(f, ", %zu)", n->line);
+                    emit_list_at_close(f, n->type_name);
+                    fputs(" = ", f);
                     if (!emit_expr(f, n->children[1])) return 0;
                     fputs(";\n", f);
                     return 1;
@@ -6062,9 +6181,11 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 if (!emit_expr(f, n->children[1])) return 0;
                 fputs(";\n", f);
                 indent(f, depth + 1);
-                fprintf(f, "*%s(", list_accessor_name(n->type_name));
+                emit_list_at_open(f, n->type_name);
                 if (!emit_write_target(f, n, 2)) return 0;
-                fprintf(f, ", __clair_list_index_%zu, %zu) = __clair_list_value_%zu;\n", id, n->line, id);
+                fprintf(f, ", __clair_list_index_%zu, %zu)", id, n->line);
+                emit_list_at_close(f, n->type_name);
+                fprintf(f, " = __clair_list_value_%zu;\n", id);
                 indent(f, depth);
                 fputs("}\n", f);
                 return 1;
@@ -6077,7 +6198,7 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                 fputs("{\n", f);
                 indent(f, depth + 1);
                 fprintf(f, "const char *__clair_dict_key_%zu = ", id);
-                if (!emit_expr(f, n->children[0])) return 0;
+                if (!emit_dict_key(f, n->type_name, n->children[0])) return 0;
                 fputs(";\n", f);
                 indent(f, depth + 1);
                 fprintf(f, "%s __clair_dict_value_%zu = ", value_type, id);
@@ -7047,7 +7168,9 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                         k, k, k, k, k);
                 if (name_mentioned_in(n->children[1], k)) {
                     indent(f, depth + 2);
-                    fprintf(f, "const char *%s = clair_dict_%s->keys[clair_k_%s];\n", k, k, k);
+                    if (dict_int_keys(n->type_name))                 /* V0.74: dict[int,...] */
+                        fprintf(f, "int64_t %s = clair_rt_ikey_value(clair_dict_%s->keys[clair_k_%s]);\n", k, k, k);
+                    else fprintf(f, "const char *%s = clair_dict_%s->keys[clair_k_%s];\n", k, k, k);
                 }
                 if (!emit_block(f, n->children[1], depth + 2)) return 0;
                 indent(f, depth + 1);
@@ -7488,6 +7611,16 @@ static int emit_dict_runtime(FILE *f) {
         "    }\n"
         "    return -1;\n"
         "}\n\n"
+        "/* V0.74: dict[int,...] keeps its keys as their decimal texts: v written in buf (24 bytes) */\n"
+        "static const char *clair_rt_ikey(int64_t v, char *buf) {\n"
+        "    char *p = buf + 23;\n"
+        "    uint64_t u = v < 0 ? 0 - (uint64_t)v : (uint64_t)v;\n"
+        "    *p = '\\0';\n"
+        "    do { *--p = (char)('0' + u % 10); u /= 10; } while (u);\n"
+        "    if (v < 0) *--p = '-';\n"
+        "    return p;\n"
+        "}\n\n"
+        "static int64_t clair_rt_ikey_value(const char *key) { return strtoll(key, NULL, 10); }\n\n"
         "static void *clair_rt_dict_at(ClairDict dict, const char *key) {\n"
         "    if (!dict) clair_rt_dict_runtime_error(\"null dictionary\");\n"
         "    if (!key) clair_rt_dict_runtime_error(\"null dictionary key\");\n"
@@ -9926,6 +10059,16 @@ int codegen_c_file(const AstNode *program, const char *path) {
                 "}\n\n",
                 f
             );
+            /* V0.74: lists of objects, of lists, of dictionaries: one accessor for all, cast by the caller */
+            fputs(unchecked_mode ?
+                "static inline void *clair_rt_list_at_any_checked(ClairList list, int64_t index, size_t line) {\n"
+                "    (void)line;\n"
+                "    return (unsigned char *)list->data + (size_t)(index < 0 ? index + (int64_t)list->len : index) * list->elem_size;\n"
+                "}\n\n" :
+                "static inline void *clair_rt_list_at_any_checked(ClairList list, int64_t index, size_t line) {\n"
+                "    if (!list || (uint64_t)index >= list->len) index = clair_rt_index_wrap(list, index, list ? list->len : 0, line);\n"
+                "    return (unsigned char *)list->data + (size_t)index * list->elem_size;\n"
+                "}\n\n", f);
             for (size_t e = 0; e < ELEMENT_KIND_COUNT; e++) {
                 char list_type[32];
                 snprintf(list_type, sizeof(list_type), "list[%s]", element_kinds[e][0]);

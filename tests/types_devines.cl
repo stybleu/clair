@@ -87,6 +87,16 @@ def rien() {
     print("rien")
 }
 
+// V0.74 : une fonction sans valeur qui s'appelle elle-meme (une instruction, pas une valeur)
+def feuilles(n: int, acc: list[int]) {
+    if n == 0 {
+        acc.append(1)
+        return
+    }
+    feuilles(n - 1, acc)
+    feuilles(n - 1, acc)
+}
+
 def main {
     let x = 5
     let f = 2.5
@@ -118,4 +128,7 @@ def main {
     print(len(mots))
     let n = len(s)
     print(n)
+    let acc: list[int] = []
+    feuilles(5, acc)
+    print(len(acc))
 }

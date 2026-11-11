@@ -265,11 +265,11 @@ grep -Fq 'indexing expects a list, a string or a dictionary, got int' build/inva
 printf '%s\n' 'invalid_index_non_list.cl : OK -> indexation reservee aux listes, textes et dictionnaires'
 
 if ./build/clair tests/invalid_list_type.cl -o build/test_invalid_list_type >build/invalid_list_type.stdout 2>build/invalid_list_type.stderr; then
-    printf '%s\n' 'invalid_list_type.cl : ECHEC -> liste imbriquee aurait du etre refusee en V0.13' >&2
+    printf '%s\n' 'invalid_list_type.cl : ECHEC -> une liste d une classe inconnue aurait du etre refusee' >&2
     exit 1
 fi
-grep -Fq 'list element type must be int, float, float32, bool, string or u8 ... u64, i8 ... i32' build/invalid_list_type.stderr
-printf '%s\n' 'invalid_list_type.cl : OK -> listes imbriquees reportees'
+grep -Fq "unknown type 'list[Inconnue]' for variable 'values'" build/invalid_list_type.stderr
+printf '%s\n' 'invalid_list_type.cl : OK -> liste d une classe inconnue refusee (V0.74 : les listes imbriquees et d objets marchent)'
 
 if ./build/clair tests/invalid_list_equality.cl -o build/test_invalid_list_equality >build/invalid_list_equality.stdout 2>build/invalid_list_equality.stderr; then
     printf '%s\n' 'invalid_list_equality.cl : ECHEC -> egalite de listes aurait du etre refusee en V0.14' >&2
@@ -718,10 +718,20 @@ printf '%s\n' 'types_devines.cl : OK -> let x = 5, let p = Point(...), type rend
 expect_compile_error invalid_let_empty "let xs = []: an empty list has no type to guess, write it: let xs: list[int] = []"
 expect_compile_error invalid_return_guess "vide() gives back an empty list, of no known type"
 expect_compile_error invalid_guess_cycle "what b() gives back cannot be guessed, it depends on itself"
+# V0.74 : listes d'objets, listes de listes, dictionnaires a cles entieres ; compares a Python, puis avec ASan et UBSan
+for t in listes_objets dicts_listes; do
+    ./build/clair tests/$t.cl -o build/test_$t
+    [ "$(./build/test_$t)" = "$(cat tests/$t.expected)" ]
+    clang -std=c11 -O1 -g -fwrapv -fsanitize=address,undefined -fno-sanitize-recover=all -w build/test_$t.generated.c -o build/test_${t}_san -lm -pthread
+    [ "$(./build/test_${t}_san)" = "$(cat tests/$t.expected)" ]
+done
+printf '%s\n' 'listes_objets.cl : OK -> list[Point], list[list[int]] a trois niveaux, arbre de Noeud, grille[i][j] = v, comprehensions de listes, identique a Python, sans erreur memoire (ASan)'
+printf '%s\n' 'dicts_listes.cl : OK -> dict[int, ...] (memo de fib, cles negatives et extremes), dict[string, Ville], dict[string, list[int]], dict de dict, identique a Python, sans erreur memoire (ASan)'
+expect_compile_error invalid_in_objects "'in' does not look in a list of P yet: compare with a loop"
 expect_runtime_error dict_changed_runtime 'a' 'Clair runtime error: dictionary changed size during iteration'
 expect_compile_error invalid_in_type "'in' cannot look for float in list[int]: convert it first, e.g. int(x)"
 expect_compile_error invalid_in_right "'in' needs a list, a string or a dictionary on the right, got int"
-expect_compile_error invalid_comprehension_list "[... for ...] makes a list of numbers, bool or strings, got list[int]"
+expect_compile_error invalid_comprehension_list "[... for ...] makes a list of numbers, bool, strings, objects, lists or dictionaries, got bigint"
 expect_compile_error invalid_comprehension_cond "the condition of [... if ...] must be a bool, got int"
 expect_compile_error invalid_load_csv_kind 'argument 2 of load_csv() must be written "float", "float32" or "int"'
 

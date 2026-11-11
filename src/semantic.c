@@ -204,12 +204,72 @@ static const char *const list_elements[][2] = {
     { "u8", "list[u8]" }, { "u16", "list[u16]" }, { "u32", "list[u32]" }, { "u64", "list[u64]" },
 };
 
+/* V0.74: list[Point], list[list[int]], dict[int,string]...: these type names live as long as the compiler */
+static const char *type_intern(const char *text, size_t len) {
+    static char **items = NULL;
+    static size_t count = 0, capacity = 0;
+    for (size_t i = 0; i < count; i++) if (strlen(items[i]) == len && memcmp(items[i], text, len) == 0) return items[i];
+    if (count == capacity) {
+        size_t cap = capacity ? capacity * 2 : 32;
+        char **grown = realloc(items, cap * sizeof(*grown));
+        if (!grown) return NULL;
+        items = grown;
+        capacity = cap;
+    }
+    char *copy = malloc(len + 1);
+    if (!copy) return NULL;
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+    items[count++] = copy;
+    return copy;
+}
+
+/* X of prefix[X] (brackets balanced), or NULL */
+static const char *bracket_inner(const char *type, const char *prefix, size_t *len) {
+    size_t p = strlen(prefix), n = type ? strlen(type) : 0;
+    if (n <= p + 1 || strncmp(type, prefix, p) != 0 || type[n - 1] != ']') return NULL;
+    int depth = 0;
+    for (size_t i = p; i < n - 1; i++) {
+        if (type[i] == '[') depth++;
+        else if (type[i] == ']' && --depth < 0) return NULL;
+    }
+    if (depth != 0) return NULL;
+    *len = n - 1 - p;
+    return type + p;
+}
+
+static int is_dict_type(const char *type);
+static const char *list_element_type(const char *type);
+
+/* a class name (checked later by is_known_type): letters, digits, _, not a type of Clair itself */
+static int class_like(const char *t) {
+    static const char *const builtin[] = { "int", "float", "float32", "bool", "string", "bigint", "bigfloat", "certfloat",
+                                           "measure", "void", "ptr", "matrix", "list", "dict", NULL };
+    if (!t || !((t[0] >= 'a' && t[0] <= 'z') || (t[0] >= 'A' && t[0] <= 'Z') || t[0] == '_')) return 0;
+    for (const char *q = t; *q; q++)
+        if (!((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9') || *q == '_')) return 0;
+    for (size_t i = 0; builtin[i]; i++) if (strcmp(t, builtin[i]) == 0) return 0;
+    for (size_t i = 0; i < sizeof(list_elements) / sizeof(list_elements[0]); i++)
+        if (strcmp(t, list_elements[i][0]) == 0) return 0;
+    if (machine_bits(t) || is_big(t)) return 0;
+    return 1;
+}
+
+/* V0.74: what a list or a dictionary value can also hold: objects, lists, dictionaries (by reference) */
+static int is_ref_element(const char *t) {
+    return t && (list_element_type(t) != NULL || is_dict_type(t) || class_like(t));
+}
+
 static const char *list_element_type(const char *type) {
     if (!type) return NULL;
     for (size_t i = 0; i < sizeof(list_elements) / sizeof(list_elements[0]); i++) {
         if (strcmp(type, list_elements[i][1]) == 0) return list_elements[i][0];
     }
-    return NULL;
+    size_t len;
+    const char *inner = bracket_inner(type, "list[", &len);
+    if (!inner) return NULL;
+    const char *element = type_intern(inner, len);
+    return is_ref_element(element) ? element : NULL;
 }
 
 static int is_list_type(const char *type) { return list_element_type(type) != NULL; }
@@ -219,7 +279,10 @@ static const char *list_type_for_element(const char *type) {
     for (size_t i = 0; i < sizeof(list_elements) / sizeof(list_elements[0]); i++) {
         if (strcmp(type, list_elements[i][0]) == 0) return list_elements[i][1];
     }
-    return NULL;
+    if (!is_ref_element(type)) return NULL;
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf), "list[%s]", type);
+    return n > 0 && (size_t)n < sizeof(buf) ? type_intern(buf, (size_t)n) : NULL;
 }
 
 /* what a matrix can hold: numbers */
@@ -246,32 +309,40 @@ static const char *matrix_element_type(const char *type) {
     return e ? e : matrix_element_of(type, "matrix_row[");
 }
 
-static int is_dict_type(const char *type) {
-    return type && (
-        strcmp(type, "dict[string,int]") == 0 ||
-        strcmp(type, "dict[string,float]") == 0 ||
-        strcmp(type, "dict[string,bool]") == 0 ||
-        strcmp(type, "dict[string,string]") == 0
-    );
-}
-
+/*
+ * V0.74: dict[K,V] with K string or int, V int, float, bool, string, or an
+ * object, a list or a dictionary (by reference, as in Python).
+ */
 static const char *dict_value_type(const char *type) {
-    if (!type) return NULL;
-    if (strcmp(type, "dict[string,int]") == 0) return "int";
-    if (strcmp(type, "dict[string,float]") == 0) return "float";
-    if (strcmp(type, "dict[string,bool]") == 0) return "bool";
-    if (strcmp(type, "dict[string,string]") == 0) return "string";
+    size_t len;
+    const char *inner = bracket_inner(type, "dict[", &len);
+    if (!inner) return NULL;
+    size_t key = strncmp(inner, "string,", 7) == 0 ? 7 : strncmp(inner, "int,", 4) == 0 ? 4 : 0;
+    if (!key || len <= key) return NULL;
+    const char *value = type_intern(inner + key, len - key);
+    if (!value) return NULL;
+    if (strcmp(value, "int") == 0 || strcmp(value, "float") == 0 || strcmp(value, "bool") == 0 ||
+        strcmp(value, "string") == 0 || is_ref_element(value)) return value;
     return NULL;
 }
 
-static const char *dict_type_for_value(const char *type) {
-    if (!type) return NULL;
-    if (strcmp(type, "int") == 0) return "dict[string,int]";
-    if (strcmp(type, "float") == 0) return "dict[string,float]";
-    if (strcmp(type, "bool") == 0) return "dict[string,bool]";
-    if (strcmp(type, "string") == 0) return "dict[string,string]";
-    return NULL;
+static int is_dict_type(const char *type) { return dict_value_type(type) != NULL; }
+
+/* the keys of dict[K,V]: string or int */
+static const char *dict_key_type(const char *type) {
+    if (!is_dict_type(type)) return NULL;
+    return strncmp(type + 5, "int,", 4) == 0 ? "int" : "string";
 }
+
+static const char *dict_type_for(const char *key, const char *value) {
+    if (!key || !value || (strcmp(key, "string") != 0 && strcmp(key, "int") != 0)) return NULL;
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf), "dict[%s,%s]", key, value);
+    if (n <= 0 || (size_t)n >= sizeof(buf)) return NULL;
+    const char *t = type_intern(buf, (size_t)n);
+    return is_dict_type(t) ? t : NULL;
+}
+
 
 
 /* int -> float, int -> float32, float32 -> float, and float -> float32 (rounded, like NumPy) */
@@ -318,10 +389,11 @@ static int is_known_type(const Semantic *s, const char *type) {
     if (strcmp(type, "measure") == 0) return 1;                           /* V0.53 */
     if (is_big(type) || machine_bits(type) || is_ptr_type(type)) return 1;
     if (strcmp(type, "int") == 0 || strcmp(type, "float") == 0 || strcmp(type, "float32") == 0 ||
-        strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 ||
-        (is_list_type(type) || is_dict_type(type) || is_matrix_type(type))) {
+        strcmp(type, "bool") == 0 || strcmp(type, "string") == 0 || is_matrix_type(type)) {
         return 1;
     }
+    if (is_list_type(type)) return is_known_type(s, list_element_type(type));          /* V0.74: list[Point] */
+    if (is_dict_type(type)) return is_known_type(s, dict_value_type(type));
     return find_class(s, type) != NULL;
 }
 
@@ -463,7 +535,7 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
     }
 
     const char *element = expr_type(s, n->children[0]);
-    if (!element || is_list_type(element) || !list_type_for_element(element)) {
+    if (!element || !list_type_for_element(element)) {         /* V0.74: [[1, 2], [3]], [p, q] too */
         report("semantic error: unsupported list element type %s\n",
                 element ? element : "invalid");
         s->had_error = 1;
@@ -499,14 +571,20 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
     return n->type_name;
 }
 
+static int key_fits(const char *key_type, const char *actual) {
+    if (!actual) return 0;
+    return strcmp(key_type, "int") == 0 ? is_index_type(actual) : strcmp(actual, "string") == 0;
+}
+
 static const char *check_dict_literal_as(Semantic *s, AstNode *n, const char *dict_type) {
     const char *value_type = dict_value_type(dict_type);
+    const char *key_type = dict_key_type(dict_type);
     if (!value_type || (n->child_count % 2) != 0) return NULL;
 
     for (size_t i = 0; i < n->child_count; i += 2) {
         const char *key = expr_type(s, n->children[i]);
-        if (!key || strcmp(key, "string") != 0) {
-            report("semantic error: dictionary literal keys must be string, got %s\n",
+        if (!key_fits(key_type, key)) {
+            report("semantic error: dictionary literal keys must be %s, got %s\n", key_type,
                     key ? key : "invalid");
             s->had_error = 1;
             return NULL;
@@ -536,16 +614,16 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
     }
 
     const char *first_key = expr_type(s, n->children[0]);
-    if (!first_key || strcmp(first_key, "string") != 0) {
-        report("semantic error: dictionary literal keys must be string, got %s\n",
+    const char *key_type = first_key && is_index_type(first_key) ? "int" : "string";    /* V0.74: {1: "un"} */
+    if (!key_fits(key_type, first_key)) {
+        report("semantic error: dictionary literal keys must be string or int, got %s\n",
                 first_key ? first_key : "invalid");
         s->had_error = 1;
         return NULL;
     }
 
     const char *value_type = expr_type(s, n->children[1]);
-    if (!value_type || is_list_type(value_type) || is_dict_type(value_type) ||
-        !dict_type_for_value(value_type)) {
+    if (!value_type || !dict_type_for(key_type, value_type)) {
         report("semantic error: unsupported dictionary value type %s\n",
                 value_type ? value_type : "invalid");
         s->had_error = 1;
@@ -555,8 +633,8 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
     int numeric_float = strcmp(value_type, "float") == 0;
     for (size_t i = 2; i < n->child_count; i += 2) {
         const char *key = expr_type(s, n->children[i]);
-        if (!key || strcmp(key, "string") != 0) {
-            report("semantic error: dictionary literal keys must be string, got %s\n",
+        if (!key_fits(key_type, key)) {
+            report("semantic error: dictionary literal keys must be %s, got %s\n", key_type,
                     key ? key : "invalid");
             s->had_error = 1;
             return NULL;
@@ -580,7 +658,7 @@ static const char *infer_dict_literal(Semantic *s, AstNode *n) {
     }
 
     if (is_numeric(value_type) && numeric_float) value_type = "float";
-    const char *dict_type = dict_type_for_value(value_type);
+    const char *dict_type = dict_type_for(key_type, value_type);
     if (!dict_type) return NULL;
     set_type(n, dict_type);
     return n->type_name;
@@ -876,9 +954,11 @@ static int check_format_call(Semantic *s, AstNode *n) {
  * (guess_return_types): while it is not known yet, reading a body that calls it
  * stops there (blocked), or goes on with the guess of the previous round.
  */
-static const char *call_result_type(Semantic *s, const AstNode *fn) {
+static const char *call_result_type(Semantic *s, const AstNode *fn, const AstNode *call) {
     if (!fn->type_name || strcmp(fn->type_name, "@infer") != 0) return fn->type_name;
     if (s->probing) {
+        /* V0.74: f(x) alone on its line needs no type (def feuilles(n: Noeud) { ... feuilles(e) }) */
+        if (call == s->void_ok) return "void";
         for (size_t i = 0; i < s->infer_count; i++) {
             if (s->infer[i].fn == fn && s->infer[i].type) { s->probe_tentative = 1; return s->infer[i].type; }
         }
@@ -1359,7 +1439,7 @@ static const char *check_comprehension(Semantic *s, AstNode *n) {
     } else {
         const char *t = expr_type(s, iter);
         if (!t) return NULL;
-        element = is_dict_type(t) ? "string" : list_element_type(t);
+        element = is_dict_type(t) ? dict_key_type(t) : list_element_type(t);
         if (!element) {
             report("semantic error: [... for %s in ...] needs a list, a dictionary or range(), got %s\n", var, t);
             s->had_error = 1;
@@ -1376,10 +1456,9 @@ static const char *check_comprehension(Semantic *s, AstNode *n) {
         s->had_error = 1;
         return NULL;
     }
-    char list_type[64];
-    snprintf(list_type, sizeof(list_type), "list[%s]", et);
-    if (!is_list_type(list_type)) {
-        report("semantic error: [... for ...] makes a list of numbers, bool or strings, got %s\n", et);
+    const char *list_type = list_type_for_element(et);         /* V0.74: [[x, x * x] for x in xs] too */
+    if (!list_type) {
+        report("semantic error: [... for ...] makes a list of numbers, bool, strings, objects, lists or dictionaries, got %s\n", et);
         s->had_error = 1;
         return NULL;
     }
@@ -2137,6 +2216,12 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         /* x in xs (a list), s in text (a string), key in d (a dictionary), like Python */
         const char *element = list_element_type(right);
         int ok = 0;
+        if (element && is_ref_element(element)) {
+            /* V0.74: Python compares objects and lists with ==, which Clair does not have yet */
+            report("semantic error: '%s' does not look in a list of %s yet: compare with a loop\n", n->text, element);
+            s->had_error = 1;
+            return NULL;
+        }
         if (element) {
             if (strcmp(element, left) == 0) ok = 1;
             else if (is_small_machine(element) && is_int_literal(lhs)) ok = machine_literal(s, lhs, element) != NULL;
@@ -2146,6 +2231,13 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             if (!ok && !s->had_error) {
                 report("semantic error: '%s' cannot look for %s in %s: convert it first, e.g. %s(x)\n",
                         n->text, left, right, element);
+                s->had_error = 1;
+                return NULL;
+            }
+        } else if (is_dict_type(right) && strcmp(dict_key_type(right), "int") == 0) {
+            ok = is_index_type(left);                               /* V0.74: 3 in d, d a dict[int,...] */
+            if (!ok) {
+                report("semantic error: '%s' with a %s expects an int on the left, got %s\n", n->text, right, left);
                 s->had_error = 1;
                 return NULL;
             }
@@ -2513,8 +2605,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             }
 
             if (base && is_dict_type(base)) {
-                if (!index || strcmp(index, "string") != 0) {
-                    report("semantic error: dictionary key must be string, got %s\n",
+                if (!key_fits(dict_key_type(base), index)) {
+                    report("semantic error: dictionary key must be %s, got %s\n", dict_key_type(base),
                             index ? index : "invalid");
                     s->had_error = 1;
                     return NULL;
@@ -2765,7 +2857,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     return NULL;
                 }
             }
-            const char *result = call_result_type(s, fn);       /* V0.73 */
+            const char *result = call_result_type(s, fn, n);    /* V0.73 */
             if (!result) return NULL;
             set_type(n, result);
             return n->type_name;
@@ -2782,7 +2874,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             const AstNode *cls = receiver ? find_class(s, receiver) : NULL;
             if (!cls) {
                 if (receiver && is_list_type(receiver) && strcmp(n->text, "append") == 0) {
-                    error_type(s, "append() needs a list variable or field (v.append(x), obj.items.append(x))");
+                    error_type(s, "append() needs a list variable or field, or a list element (v.append(x), obj.items.append(x), grid[i].append(x))");
                     return NULL;
                 }
                 report("semantic error: method call '%s' expects a class object, got %s\n",
@@ -2834,7 +2926,7 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             free(n->text);
             n->text = mangled;
             n->kind = AST_CALL;
-            const char *result = call_result_type(s, fn);       /* V0.73 */
+            const char *result = call_result_type(s, fn, n);    /* V0.73 */
             if (!result) return NULL;
             set_type(n, result);
             return n->type_name;
@@ -2955,6 +3047,11 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
                 return add_var(s, n->text, n->type_name);
             }
             if (is_ptr_type(n->type_name) && !require_absolue(s, "a ptr variable")) return 0;
+            if (!is_known_type(s, n->type_name)) {                    /* V0.74: list[Inconnue] */
+                report("semantic error: unknown type '%s' for variable '%s'\n", n->type_name, n->text);
+                s->had_error = 1;
+                return 0;
+            }
             const char *actual = expr_type_expected(s, n->children[0], n->type_name);
             if (!actual) return 0;
             if (!assignable(n->type_name, actual)) {
@@ -3071,8 +3168,8 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             }
 
             if (is_dict_type(base)) {
-                if (!index || strcmp(index, "string") != 0) {
-                    report("semantic error: dictionary key must be string, got %s\n",
+                if (!key_fits(dict_key_type(base), index)) {
+                    report("semantic error: dictionary key must be %s, got %s\n", dict_key_type(base),
                             index ? index : "invalid");
                     s->had_error = 1;
                     return 0;
@@ -3097,6 +3194,22 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             if (n->child_count != 3 && n->child_count != 4) return 0;
             const char *base = write_target_type(s, n, 3, "assignment to");
             if (!base) return 0;
+            if (is_list_type(base) || is_dict_type(base)) {
+                /* V0.74: grid[i][j] = v on a list of lists (or d["a"]["b"] = v): (grid[i])[j] = v */
+                AstNode *target = n->text ? ast_new(AST_IDENTIFIER, n->text, strlen(n->text)) : n->children[3];
+                AstNode *row = ast_new(AST_INDEX, NULL, 0);
+                if (!target || !row) { ast_free(row); return 0; }
+                target->line = row->line = n->line;
+                target->file = row->file = n->file;
+                AstNode *i = n->children[0], *j = n->children[1], *value = n->children[2];
+                n->child_count = 0;
+                if (!ast_add_child(row, target) || !ast_add_child(row, i) || !ast_add_child(n, j) ||
+                    !ast_add_child(n, value) || !ast_add_child(n, row)) return 0;
+                free(n->text);
+                n->text = NULL;
+                n->kind = AST_INDEX_ASSIGN;
+                return check_stmt_at(s, n);
+            }
             if (!is_matrix_type(base)) {
                 report("semantic error: '%s[i][j] = ...' needs a matrix, got %s\n",
                         n->text ? n->text : "field", base);
@@ -3248,7 +3361,7 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
             const char *list = expr_type(s, n->children[0]);
             if (!list) return 0;
             const char *element = list_element_type(list);
-            if (is_dict_type(list)) element = "string";             /* for k in d: the keys, in order */
+            if (is_dict_type(list)) element = dict_key_type(list);  /* for k in d: the keys, in order */
             if (strcmp(list, "string") == 0) element = "string";    /* V0.72: for c in s, its characters */
             if (!element) {
                 char message[160];

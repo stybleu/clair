@@ -1106,6 +1106,30 @@ static int parse_unit(Parser *p, AstNode *node) {
     return 1;
 }
 
+static int parse_and_set_type(Parser *p, AstNode *node);
+
+/*
+ * V0.74: the element of list[...] or the value of dict[..., ...] when it is an
+ * object, a list or a dictionary: list[Point], list[list[int]], dict[string,list[int]].
+ * Its type name goes into out; 0 on a parse error.
+ */
+static int parse_inner_type(Parser *p, char *out, size_t size) {
+    AstNode *tmp = ast_new(AST_PARAM, "@type", 5);
+    if (!tmp) return 0;
+    if (!parse_and_set_type(p, tmp)) { ast_free(tmp); return 0; }
+    if (tmp->unit) {
+        fprintf(stderr, "parse error at %zu:%zu: a unit inside a list of lists or a dictionary is not supported\n",
+                p->current.line, p->current.column);
+        p->had_error = 1;
+        ast_free(tmp);
+        return 0;
+    }
+    int ok = tmp->type_name && strlen(tmp->type_name) < size;
+    if (ok) strcpy(out, tmp->type_name);
+    ast_free(tmp);
+    return ok;
+}
+
 static int parse_and_set_type(Parser *p, AstNode *node) {
     Token t = p->current;
 
@@ -1184,6 +1208,16 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         next(p);
         if (!expect(p, TOKEN_LBRACKET, "'['")) return 0;
 
+        /* V0.74: list[Point], list[list[int]], list[dict[string,int]] */
+        if (p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT ||
+            (p->current.kind == TOKEN_IDENTIFIER && !is_float32_token(p->current) && !machine_type_token(p->current))) {
+            char inner[480], full[512];
+            if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
+            if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
+            snprintf(full, sizeof(full), "list[%s]", inner);
+            return ast_set_type(node, full, strlen(full));
+        }
+
         const char *list_type = NULL;
         size_t list_type_len = 0;
         switch (p->current.kind) {
@@ -1205,7 +1239,7 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
                     break;
                 }
                 fprintf(stderr,
-                        "parse error at %zu:%zu: list element type must be int, float, float32, bool, string or u8 ... u64, i8 ... i32\n",
+                        "parse error at %zu:%zu: list element type must be int, float, float32, bool, string, u8 ... u64, i8 ... i32, a class, a list or a dictionary\n",
                         p->current.line, p->current.column);
                 p->had_error = 1;
                 return 0;
@@ -1231,16 +1265,28 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         next(p);
         if (!expect(p, TOKEN_LBRACKET, "'['")) return 0;
 
-        if (p->current.kind != TOKEN_STRING_TYPE) {
+        /* V0.74: int keys too, dict[int, string] */
+        if (p->current.kind != TOKEN_STRING_TYPE && p->current.kind != TOKEN_INT) {
             fprintf(stderr,
-                    "parse error at %zu:%zu: dictionary key type must be string\n",
+                    "parse error at %zu:%zu: dictionary key type must be string or int\n",
                     p->current.line, p->current.column);
             p->had_error = 1;
             return 0;
         }
+        const char *key = p->current.kind == TOKEN_INT ? "int" : "string";
         next(p);
 
         if (!expect(p, TOKEN_COMMA, "','")) return 0;
+
+        /* V0.74: the values may be objects, lists or dictionaries: dict[string, Point], dict[int, list[int]] */
+        if (strcmp(key, "int") == 0 || p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT ||
+            p->current.kind == TOKEN_IDENTIFIER) {
+            char inner[480], full[512];
+            if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
+            if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
+            snprintf(full, sizeof(full), "dict[%s,%s]", key, inner);
+            return ast_set_type(node, full, strlen(full));
+        }
 
         const char *dict_type = NULL;
         size_t dict_type_len = 0;
@@ -1251,7 +1297,7 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
             case TOKEN_STRING_TYPE: dict_type = "dict[string,string]"; dict_type_len = 19; break;
             default:
                 fprintf(stderr,
-                        "parse error at %zu:%zu: dictionary value type must be int, float, bool or string\n",
+                        "parse error at %zu:%zu: dictionary value type must be int, float, bool, string, a class, a list or a dictionary\n",
                         p->current.line, p->current.column);
                 p->had_error = 1;
                 return 0;
@@ -1302,6 +1348,15 @@ static int is_field_chain(const AstNode *n) {
     if (!n || n->kind != AST_MEMBER || n->child_count != 1) return 0;
     const AstNode *base = n->children[0];
     return base->kind == AST_IDENTIFIER || is_field_chain(base);
+}
+
+/* V0.74: grid[i][j][k] = v, noeuds[0].enfants[1] = v: a place made of fields and indexes */
+static int is_place(const AstNode *n) {
+    if (!n) return 0;
+    if (n->kind == AST_IDENTIFIER) return 1;
+    if (n->kind == AST_MEMBER && n->child_count == 1) return is_place(n->children[0]);
+    if (n->kind == AST_INDEX && n->child_count == 2) return is_place(n->children[0]);
+    return 0;
 }
 
 /*
@@ -1372,7 +1427,8 @@ static AstNode *parse_identifier_statement(Parser *p) {
     if (!lhs) return NULL;
 
     if (lhs->kind == AST_METHOD_CALL && lhs->text && strcmp(lhs->text, "append") == 0 &&
-        (lhs->children[0]->kind == AST_IDENTIFIER || is_field_chain(lhs->children[0]))) {
+        (lhs->children[0]->kind == AST_IDENTIFIER || is_field_chain(lhs->children[0]) ||
+         is_place(lhs->children[0]))) {                     /* V0.74: grid[i].append(v) */
         if (lhs->child_count != 2) {
             fprintf(stderr, "parse error at %zu:%zu: append() expects exactly 1 argument\n",
                     start.line, start.column);
@@ -1457,8 +1513,9 @@ static AstNode *parse_identifier_statement(Parser *p) {
                     for (size_t i = 0; i < 4; i++) ast_free(kids[i]);
                     break;
                 }
-                if (is_field_chain(lhs->children[0])) {
-                    /* obj.items[i] = value */
+                if (is_field_chain(lhs->children[0]) ||
+                    (lhs->children[0]->kind != AST_IDENTIFIER && is_place(lhs->children[0]))) {
+                    /* obj.items[i] = value ; V0.74: grid[i][j][k] = value, noeuds[0].enfants[1] = value */
                     AstNode *kids[3] = { take_child(lhs, 1), value, take_child(lhs, 0) };
                     n = make_write(AST_INDEX_ASSIGN, kids[2], kids, 3);
                     for (size_t i = 0; i < 3; i++) ast_free(kids[i]);
