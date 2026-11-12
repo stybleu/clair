@@ -44,7 +44,8 @@ typedef enum {
                            resolved and removed by modules_resolve before the semantic pass */
     AST_LAMBDA,         /* V0.75: lambda x, y: expr ; children: the parameters (AST_PARAM, no type), then expr;
                            the semantic pass turns it into a function of the program and a value @fn:name */
-    AST_KWARG           /* V0.75: key=f in a call (sorted, sort, min, max) ; text: the name ; child: the value */
+    AST_KWARG,          /* V0.75: key=f in a call (sorted, sort, min, max) ; text: the name ; child: the value */
+    AST_TUPLE           /* V0.76: (a, b), return a, b ; children: the elements */
 } AstKind;
 
 typedef struct AstNode {

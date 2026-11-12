@@ -323,8 +323,27 @@ static AstNode *parse_atom(Parser *p) {
 
     if (t.kind == TOKEN_LPAREN) {
         next(p);
+        if (p->current.kind == TOKEN_RPAREN) {
+            fprintf(stderr, "parse error at %zu:%zu: an empty tuple () is not supported\n", t.line, t.column);
+            p->had_error = 1;
+            return NULL;
+        }
         AstNode *e = parse_expression(p);
         if (!e) return NULL;
+        if (p->current.kind == TOKEN_COMMA) {
+            /* V0.76: (a, b), (x,) : a tuple */
+            AstNode *tuple = ast_new(AST_TUPLE, NULL, 0);
+            if (!tuple || !ast_add_child(tuple, e)) { ast_free(tuple); ast_free(e); return NULL; }
+            tuple->line = t.line;
+            while (p->current.kind == TOKEN_COMMA) {
+                next(p);
+                if (p->current.kind == TOKEN_RPAREN) break;
+                AstNode *x = parse_expression(p);
+                if (!x || !ast_add_child(tuple, x)) { ast_free(x); ast_free(tuple); return NULL; }
+            }
+            if (!expect(p, TOKEN_RPAREN, "')'")) { ast_free(tuple); return NULL; }
+            return tuple;
+        }
         if (!expect(p, TOKEN_RPAREN, "')'")) { ast_free(e); return NULL; }
         return e;
     }
@@ -867,6 +886,88 @@ static AstNode *parse_for_statement(Parser *p);
 
 static AstNode *identifier_node(const char *name) { return ast_new(AST_IDENTIFIER, name, strlen(name)); }
 
+/* V0.76: return a, b ; let t = a, b ; x, y = y, x : after the first value, the others (on the same line) */
+static AstNode *parse_tuple_rest(Parser *p, AstNode *first) {
+    if (p->current.kind != TOKEN_COMMA) return first;
+    AstNode *tuple = ast_new(AST_TUPLE, NULL, 0);
+    if (!tuple || !ast_add_child(tuple, first)) { ast_free(tuple); ast_free(first); return NULL; }
+    tuple->line = first->line;
+    while (p->current.kind == TOKEN_COMMA) {
+        size_t line = p->current.line;
+        next(p);
+        if (p->current.kind == TOKEN_RBRACE || p->current.kind == TOKEN_EOF || p->current.line != line) break;
+        AstNode *x = parse_expression(p);
+        if (!x || !ast_add_child(tuple, x)) { ast_free(x); ast_free(tuple); return NULL; }
+    }
+    return tuple;
+}
+
+/* hidden[k] : the k-th element of a hidden tuple (V0.76) */
+static AstNode *hidden_element(const char *hidden, size_t k) {
+    char digits[24];
+    snprintf(digits, sizeof(digits), "%zu", k);
+    AstNode *index = ast_new(AST_INDEX, NULL, 0), *base = identifier_node(hidden),
+            *number = ast_new(AST_INTEGER, digits, strlen(digits));
+    if (!index || !base || !number || !ast_add_child(index, base) || !ast_add_child(index, number)) {
+        fprintf(stderr, "clair: out of memory\n");
+        exit(EXIT_FAILURE);
+    }
+    return index;
+}
+
+/* let a = hidden[k] (V0.76) */
+static AstNode *let_element(Token name, const char *hidden, size_t k) {
+    AstNode *let = ast_new(AST_LET, name.start, name.length);
+    if (!let || !ast_add_child(let, hidden_element(hidden, k))) {
+        fprintf(stderr, "clair: out of memory\n");
+        exit(EXIT_FAILURE);
+    }
+    let->line = name.line;
+    return let;
+}
+
+static int is_underscore(Token t) { return t.kind == TOKEN_IDENTIFIER && t.length == 1 && t.start[0] == '_'; }
+
+/* the loop body reads this name (as a variable, or calls it: a function kept in it) */
+static int body_uses(const AstNode *n, Token name) {
+    if (!n) return 0;
+    if (n->text && strlen(n->text) == name.length && strncmp(n->text, name.start, name.length) == 0 &&
+        (n->kind == AST_IDENTIFIER || n->kind == AST_CALL || n->kind == AST_ASSIGN || n->kind == AST_INDEX_ASSIGN ||
+         n->kind == AST_MATRIX_SET || n->kind == AST_LIST_APPEND)) return 1;
+    for (size_t i = 0; i < n->child_count; i++) if (body_uses(n->children[i], name)) return 1;
+    return 0;
+}
+
+/*
+ * V0.76: for a, b in pairs { body } is
+ *   for @eltN in pairs { let a = @eltN[0] ; let b = @eltN[1] ; body }
+ */
+static AstNode *parse_unpack_for(Parser *p, const Token *names, size_t count) {
+    AstNode *iterable = parse_expression(p);
+    if (!iterable) return NULL;
+    if (!expect(p, TOKEN_LBRACE, "'{'")) { ast_free(iterable); return NULL; }
+    p->loop_depth++;
+    AstNode *body = parse_block(p);
+    p->loop_depth--;
+    if (!body || !expect(p, TOKEN_RBRACE, "'}'")) { ast_free(iterable); ast_free(body); return NULL; }
+    char hidden[48];
+    snprintf(hidden, sizeof(hidden), "@elt%zun%zu", ++p->hidden_count, count);   /* checked: a tuple of count elements */
+    AstNode *loop = ast_new(AST_FOR_EACH, hidden, strlen(hidden)), *inner = ast_new(AST_BLOCK, NULL, 0);
+    int ok = loop && inner;
+    for (size_t k = 0; ok && k < count; k++)               /* a name the body never reads: no variable */
+        if (!is_underscore(names[k]) && body_uses(body, names[k])) ok = ast_add_child(inner, let_element(names[k], hidden, k));
+    for (size_t k = 0; ok && k < body->child_count; k++) ok = ast_add_child(inner, body->children[k]);
+    if (ok) body->child_count = 0;
+    ast_free(body);
+    ok = ok && ast_add_child(loop, iterable) && ast_add_child(loop, inner);
+    if (!ok) {
+        fprintf(stderr, "clair: out of memory\n");
+        exit(EXIT_FAILURE);
+    }
+    loop->line = names[0].line;
+    return loop;
+}
+
 /*
  *   for i, v in enumerate(xs, start) { body }
  * is read as (start evaluated once, 0 when absent):
@@ -894,16 +995,26 @@ static int is_plain_literal(const AstNode *n) {
 }
 
 static AstNode *parse_enumerate_after(Parser *p, Token index) {
-    next(p);                                                    /* , */
-    Token value = p->current;
-    if (!expect(p, TOKEN_IDENTIFIER, "loop variable")) return NULL;
+    Token names[16];
+    size_t count = 1;
+    names[0] = index;
+    while (p->current.kind == TOKEN_COMMA) {                    /* , */
+        next(p);
+        if (count == 16) {
+            fprintf(stderr, "parse error at %zu:%zu: too many loop variables\n", p->current.line, p->current.column);
+            p->had_error = 1;
+            return NULL;
+        }
+        names[count] = p->current;
+        if (!expect(p, TOKEN_IDENTIFIER, "loop variable")) return NULL;
+        count++;
+    }
+    Token value = names[1];
     if (!expect(p, TOKEN_IN, "in")) return NULL;
-    if (p->current.kind != TOKEN_IDENTIFIER || p->current.length != 9 ||
+    if (count != 2 || p->current.kind != TOKEN_IDENTIFIER || p->current.length != 9 ||
         strncmp(p->current.start, "enumerate", 9) != 0) {
-        fprintf(stderr, "parse error at %zu:%zu: for %.*s, %.*s in ... needs enumerate(list)\n",
-                p->current.line, p->current.column, (int)index.length, index.start, (int)value.length, value.start);
-        p->had_error = 1;
-        return NULL;
+        /* V0.76: for a, b in pairs, for k, v in d.items(), for x, y in zip(xs, ys) */
+        return parse_unpack_for(p, names, count);
     }
     next(p);
     if (!expect(p, TOKEN_LPAREN, "'('")) return NULL;
@@ -1218,6 +1329,31 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         return ast_set_type(node, full, strlen(full));
     }
 
+    /* V0.76: tuple[int, string], tuple[float, float, float] */
+    if (t.kind == TOKEN_IDENTIFIER && t.length == 5 && strncmp(t.start, "tuple", 5) == 0) {
+        next(p);
+        if (p->current.kind != TOKEN_LBRACKET) return ast_set_type(node, t.start, t.length);   /* a class named tuple */
+        next(p);
+        char full[512];
+        size_t used = (size_t)snprintf(full, sizeof(full), "tuple[");
+        int first = 1;
+        do {
+            char inner[400];
+            if (!first) next(p);                                                  /* , */
+            if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
+            used += (size_t)snprintf(full + used, used < sizeof(full) ? sizeof(full) - used : 0, "%s%s", first ? "" : ",", inner);
+            first = 0;
+        } while (p->current.kind == TOKEN_COMMA && used < sizeof(full));
+        if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
+        used += (size_t)snprintf(full + used, used < sizeof(full) ? sizeof(full) - used : 0, "]");
+        if (used >= sizeof(full)) {
+            fprintf(stderr, "parse error at %zu:%zu: tuple type too long\n", t.line, t.column);
+            p->had_error = 1;
+            return 0;
+        }
+        return ast_set_type(node, full, strlen(full));
+    }
+
     /* ptr[float32]: the address of numbers in memory (only inside absolue blocks) */
     if (t.kind == TOKEN_IDENTIFIER && t.length == 3 && strncmp(t.start, "ptr", 3) == 0) {
         next(p);
@@ -1350,26 +1486,48 @@ static int parse_and_set_type(Parser *p, AstNode *node) {
         next(p);
         if (!expect(p, TOKEN_LBRACKET, "'['")) return 0;
 
-        /* V0.74: int keys too, dict[int, string] */
-        if (p->current.kind != TOKEN_STRING_TYPE && p->current.kind != TOKEN_INT) {
+        /* V0.74: int keys too, dict[int, string] ; V0.76: tuple keys, dict[tuple[int, int], float] */
+        char tuple_key[400];
+        const char *key = NULL;
+        if (p->current.kind == TOKEN_IDENTIFIER && p->current.length == 5 && strncmp(p->current.start, "tuple", 5) == 0) {
+            Token at = p->current;
+            if (!parse_inner_type(p, tuple_key, sizeof(tuple_key))) return 0;
+            /* the key is kept as a text "x,y": numbers int and booleans only */
+            for (const char *q = tuple_key; *q; ) {
+                if (strncmp(q, "tuple[", 6) == 0) { q += 6; continue; }
+                if (*q == ',' || *q == ']') { q++; continue; }
+                if (strncmp(q, "int", 3) == 0 && (q[3] == ',' || q[3] == ']')) { q += 3; continue; }
+                if (strncmp(q, "bool", 4) == 0 && (q[4] == ',' || q[4] == ']')) { q += 4; continue; }
+                fprintf(stderr, "parse error at %zu:%zu: a tuple key of a dictionary holds int and bool only, "
+                                "like (x, y); got %s\n", at.line, at.column, tuple_key);
+                p->had_error = 1;
+                return 0;
+            }
+            key = tuple_key;
+        } else if (p->current.kind != TOKEN_STRING_TYPE && p->current.kind != TOKEN_INT) {
             fprintf(stderr,
-                    "parse error at %zu:%zu: dictionary key type must be string or int\n",
+                    "parse error at %zu:%zu: dictionary key type must be string, int or a tuple of int\n",
                     p->current.line, p->current.column);
             p->had_error = 1;
             return 0;
+        } else {
+            key = p->current.kind == TOKEN_INT ? "int" : "string";
+            next(p);
         }
-        const char *key = p->current.kind == TOKEN_INT ? "int" : "string";
-        next(p);
 
         if (!expect(p, TOKEN_COMMA, "','")) return 0;
 
         /* V0.74: the values may be objects, lists or dictionaries: dict[string, Point], dict[int, list[int]] */
-        if (strcmp(key, "int") == 0 || p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT ||
+        if (strcmp(key, "string") != 0 || p->current.kind == TOKEN_LIST || p->current.kind == TOKEN_DICT ||
             p->current.kind == TOKEN_IDENTIFIER || p->current.kind == TOKEN_DEF) {          /* V0.75: functions */
-            char inner[480], full[512];
+            char inner[480], full[1024];
             if (!parse_inner_type(p, inner, sizeof(inner))) return 0;
             if (!expect(p, TOKEN_RBRACKET, "']'")) return 0;
-            snprintf(full, sizeof(full), "dict[%s,%s]", key, inner);
+            if ((size_t)snprintf(full, sizeof(full), "dict[%s,%s]", key, inner) >= sizeof(full)) {
+                fprintf(stderr, "parse error at %zu:%zu: dictionary type too long\n", t.line, t.column);
+                p->had_error = 1;
+                return 0;
+            }
             return ast_set_type(node, full, strlen(full));
         }
 
@@ -1506,6 +1664,73 @@ static const AstNode *target_call(const AstNode *n) {
  *   name.append(value)           list append
  *   f(args) / a.b.method(args)   call used as a statement
  */
+/* lhs = value as a statement: x = v, xs[i] = v, m[i][j] = v, obj.f = v ... (lhs is freed) */
+static AstNode *make_assignment(Parser *p, Token start, AstNode *lhs, AstNode *value) {
+    AstNode *n = NULL;
+    switch (lhs->kind) {
+        case AST_IDENTIFIER:
+            n = make_node(AST_ASSIGN, lhs->text, value, NULL);
+            break;
+
+        case AST_INDEX:
+            if (lhs->children[0]->kind == AST_INDEX &&
+                (lhs->children[0]->children[0]->kind == AST_IDENTIFIER ||
+                 is_field_chain(lhs->children[0]->children[0]))) {
+                /* m[i][j] = value  or  obj.m[i][j] = value */
+                AstNode *row = lhs->children[0];
+                AstNode *target = row->children[0];
+                AstNode *kids[4] = { take_child(row, 1), take_child(lhs, 1), value, NULL };
+                size_t count = 3;
+                if (target->kind != AST_IDENTIFIER) { kids[3] = take_child(row, 0); count = 4; }
+                n = make_write(AST_MATRIX_SET, kids[3] ? kids[3] : target, kids, count);
+                for (size_t i = 0; i < 4; i++) ast_free(kids[i]);
+                break;
+            }
+            if (is_field_chain(lhs->children[0]) ||
+                (lhs->children[0]->kind != AST_IDENTIFIER && is_place(lhs->children[0]))) {
+                /* obj.items[i] = value ; V0.74: grid[i][j][k] = value, noeuds[0].enfants[1] = value */
+                AstNode *kids[3] = { take_child(lhs, 1), value, take_child(lhs, 0) };
+                n = make_write(AST_INDEX_ASSIGN, kids[2], kids, 3);
+                for (size_t i = 0; i < 3; i++) ast_free(kids[i]);
+                break;
+            }
+            if (lhs->children[0]->kind != AST_IDENTIFIER) {
+                fprintf(stderr,
+                        "parse error at %zu:%zu: indexed assignment target must be a variable or a field\n",
+                        start.line, start.column);
+                p->had_error = 1;
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+            }
+            n = make_node(AST_INDEX_ASSIGN, lhs->children[0]->text,
+                          take_child(lhs, 1), value);
+            break;
+
+        case AST_MEMBER:
+            n = make_node(AST_MEMBER_ASSIGN, lhs->text, take_child(lhs, 0), value);
+            break;
+
+        default:
+            if (lhs->kind == AST_CALL && lhs->text && strncmp(lhs->text, "@slice", 6) == 0) {
+                fprintf(stderr, "parse error at %zu:%zu: a slice xs[a:b] cannot be assigned: "
+                                "change the elements one by one\n", start.line, start.column);
+                p->had_error = 1;
+                ast_free(value);
+                ast_free(lhs);
+                return NULL;
+            }
+            fprintf(stderr, "parse error at %zu:%zu: invalid assignment target\n",
+                    start.line, start.column);
+            p->had_error = 1;
+            ast_free(value);
+            ast_free(lhs);
+            return NULL;
+    }
+    ast_free(lhs);
+    return n;
+}
+
 static AstNode *parse_identifier_statement(Parser *p) {
     Token start = p->current;
     AstNode *lhs = parse_primary(p);
@@ -1531,11 +1756,64 @@ static AstNode *parse_identifier_statement(Parser *p) {
         return n;
     }
 
+    if (p->current.kind == TOKEN_COMMA) {
+        /* V0.76: a, b = b, a ; xs[i], xs[j] = xs[j], xs[i] : let @tupN = (b, a) ; a = @tupN[0] ; b = @tupN[1] */
+        AstNode *targets[16];
+        size_t count = 1;
+        targets[0] = lhs;
+        while (p->current.kind == TOKEN_COMMA && count < 16) {
+            next(p);
+            targets[count] = parse_primary(p);
+            if (!targets[count]) break;
+            count++;
+        }
+        if (p->current.kind == TOKEN_COMMA || !expect(p, TOKEN_EQUAL, "'='")) {
+            if (p->current.kind == TOKEN_COMMA) {
+                fprintf(stderr, "parse error at %zu:%zu: too many targets\n", p->current.line, p->current.column);
+                p->had_error = 1;
+            }
+            for (size_t k = 0; k < count; k++) ast_free(targets[k]);
+            return NULL;
+        }
+        AstNode *value = parse_expression(p);
+        if (value) value = parse_tuple_rest(p, value);
+        if (!value) {
+            for (size_t k = 0; k < count; k++) ast_free(targets[k]);
+            return NULL;
+        }
+        char hidden[48];
+        snprintf(hidden, sizeof(hidden), "@tup%zun%zu", ++p->hidden_count, count);
+        AstNode *block = ast_new(AST_BLOCK, "@splice", 7), *let = ast_new(AST_LET, hidden, strlen(hidden));
+        if (!block || !let || !ast_add_child(let, value) || !ast_add_child(block, let)) {
+            fprintf(stderr, "clair: out of memory\n");
+            exit(EXIT_FAILURE);
+        }
+        let->line = start.line;
+        for (size_t k = 0; k < count; k++) {
+            if (targets[k]->kind == AST_IDENTIFIER && strcmp(targets[k]->text, "_") == 0) {
+                ast_free(targets[k]);
+                continue;
+            }
+            AstNode *one = make_assignment(p, start, targets[k], hidden_element(hidden, k));
+            if (!one) {
+                for (size_t j = k + 1; j < count; j++) ast_free(targets[j]);
+                ast_free(block);
+                return NULL;
+            }
+            if (!ast_add_child(block, one)) {
+                fprintf(stderr, "clair: out of memory\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+        return block;
+    }
+
     const char *compound = compound_operator(p->current.kind);
     if (p->current.kind == TOKEN_EQUAL || compound) {
         Token op = p->current;
         next(p);
         AstNode *value = parse_expression(p);
+        if (value && !compound) value = parse_tuple_rest(p, value);     /* V0.76: t = a, b */
         if (!value) {
             ast_free(lhs);
             return NULL;
@@ -1578,69 +1856,7 @@ static AstNode *parse_identifier_statement(Parser *p) {
             value = bin;
         }
 
-        AstNode *n = NULL;
-        switch (lhs->kind) {
-            case AST_IDENTIFIER:
-                n = make_node(AST_ASSIGN, lhs->text, value, NULL);
-                break;
-
-            case AST_INDEX:
-                if (lhs->children[0]->kind == AST_INDEX &&
-                    (lhs->children[0]->children[0]->kind == AST_IDENTIFIER ||
-                     is_field_chain(lhs->children[0]->children[0]))) {
-                    /* m[i][j] = value  or  obj.m[i][j] = value */
-                    AstNode *row = lhs->children[0];
-                    AstNode *target = row->children[0];
-                    AstNode *kids[4] = { take_child(row, 1), take_child(lhs, 1), value, NULL };
-                    size_t count = 3;
-                    if (target->kind != AST_IDENTIFIER) { kids[3] = take_child(row, 0); count = 4; }
-                    n = make_write(AST_MATRIX_SET, kids[3] ? kids[3] : target, kids, count);
-                    for (size_t i = 0; i < 4; i++) ast_free(kids[i]);
-                    break;
-                }
-                if (is_field_chain(lhs->children[0]) ||
-                    (lhs->children[0]->kind != AST_IDENTIFIER && is_place(lhs->children[0]))) {
-                    /* obj.items[i] = value ; V0.74: grid[i][j][k] = value, noeuds[0].enfants[1] = value */
-                    AstNode *kids[3] = { take_child(lhs, 1), value, take_child(lhs, 0) };
-                    n = make_write(AST_INDEX_ASSIGN, kids[2], kids, 3);
-                    for (size_t i = 0; i < 3; i++) ast_free(kids[i]);
-                    break;
-                }
-                if (lhs->children[0]->kind != AST_IDENTIFIER) {
-                    fprintf(stderr,
-                            "parse error at %zu:%zu: indexed assignment target must be a variable or a field\n",
-                            start.line, start.column);
-                    p->had_error = 1;
-                    ast_free(value);
-                    ast_free(lhs);
-                    return NULL;
-                }
-                n = make_node(AST_INDEX_ASSIGN, lhs->children[0]->text,
-                              take_child(lhs, 1), value);
-                break;
-
-            case AST_MEMBER:
-                n = make_node(AST_MEMBER_ASSIGN, lhs->text, take_child(lhs, 0), value);
-                break;
-
-            default:
-                if (lhs->kind == AST_CALL && lhs->text && strncmp(lhs->text, "@slice", 6) == 0) {
-                    fprintf(stderr, "parse error at %zu:%zu: a slice xs[a:b] cannot be assigned: "
-                                    "change the elements one by one\n", start.line, start.column);
-                    p->had_error = 1;
-                    ast_free(value);
-                    ast_free(lhs);
-                    return NULL;
-                }
-                fprintf(stderr, "parse error at %zu:%zu: invalid assignment target\n",
-                        start.line, start.column);
-                p->had_error = 1;
-                ast_free(value);
-                ast_free(lhs);
-                return NULL;
-        }
-        ast_free(lhs);
-        return n;
+        return make_assignment(p, start, lhs, value);
     }
 
     if (lhs->kind == AST_CALL || lhs->kind == AST_METHOD_CALL) {
@@ -1686,6 +1902,50 @@ static AstNode *parse_statement(Parser *p) {
     }
     if (p->current.kind == TOKEN_LET) {
         next(p);
+        int paren = p->current.kind == TOKEN_LPAREN;
+        Lexer ahead = p->lexer;
+        if (paren || (p->current.kind == TOKEN_IDENTIFIER && lexer_next(&ahead).kind == TOKEN_COMMA)) {
+            /* V0.76: let a, b = f() and let (a, b) = f() : let @tupN = f() ; let a = @tupN[0] ; let b = @tupN[1] */
+            Token names[16];
+            size_t count = 0;
+            if (paren) next(p);
+            for (;;) {
+                if (count == 16) {
+                    fprintf(stderr, "parse error at %zu:%zu: too many names\n", p->current.line, p->current.column);
+                    p->had_error = 1;
+                    return NULL;
+                }
+                names[count] = p->current;
+                if (!expect(p, TOKEN_IDENTIFIER, "variable name")) return NULL;
+                count++;
+                if (p->current.kind != TOKEN_COMMA) break;
+                next(p);
+                if (paren && p->current.kind == TOKEN_RPAREN) break;
+            }
+            if (paren && !expect(p, TOKEN_RPAREN, "')'")) return NULL;
+            if (p->current.kind == TOKEN_COLON) {
+                fprintf(stderr, "parse error at %zu:%zu: let a, b = ... takes the types of the values: "
+                                "no type here (or let t: tuple[int, float] = ...)\n", p->current.line, p->current.column);
+                p->had_error = 1;
+                return NULL;
+            }
+            if (!expect(p, TOKEN_EQUAL, "'='")) return NULL;
+            AstNode *value = parse_expression(p);
+            if (value) value = parse_tuple_rest(p, value);
+            if (!value) return NULL;
+            char hidden[48];
+            snprintf(hidden, sizeof(hidden), "@tup%zun%zu", ++p->hidden_count, count);
+            AstNode *block = ast_new(AST_BLOCK, "@splice", 7), *let = ast_new(AST_LET, hidden, strlen(hidden));
+            int ok = block && let && ast_add_child(let, value) && ast_add_child(block, let);
+            if (let) let->line = names[0].line;
+            for (size_t k = 0; ok && k < count; k++)
+                if (!is_underscore(names[k])) ok = ast_add_child(block, let_element(names[k], hidden, k));
+            if (!ok) {
+                fprintf(stderr, "clair: out of memory\n");
+                exit(EXIT_FAILURE);
+            }
+            return block;
+        }
         Token name = p->current;
         if (!expect(p, TOKEN_IDENTIFIER, "variable name")) return NULL;
         /* V0.73: let x = 5, the type is the value's, as in Python */
@@ -1697,6 +1957,7 @@ static AstNode *parse_statement(Parser *p) {
         if (!expect(p, TOKEN_EQUAL, "'='")) { ast_free(n); return NULL; }
 
         AstNode *value = parse_expression(p);
+        if (value) value = parse_tuple_rest(p, value);          /* V0.76: let t = 1, 2 */
         if (!value) { ast_free(n); return NULL; }
 
         if (!ast_add_child(n, value)) {
@@ -1725,6 +1986,7 @@ static AstNode *parse_statement(Parser *p) {
             return ast_new(AST_RETURN, NULL, 0);
         }
         AstNode *value = parse_expression(p);
+        if (value) value = parse_tuple_rest(p, value);          /* V0.76: return a, b */
         if (!value) return NULL;
 
         AstNode *n = ast_new(AST_RETURN, NULL, 0);

@@ -94,7 +94,35 @@ static const char *list_elem(const char *type);
 
 /* V0.74: objects, lists and dictionaries in a list or a dictionary: held by reference (a pointer) */
 static int is_fn_type(const char *t);
-static int is_ref_element(const char *t) { return t && (list_elem(t) || is_dict_type(t) || class_like(t) || is_fn_type(t)); }
+
+/* V0.76: tuple[int,string], a C struct copied like a number (ClairTuple_<n>) */
+static int is_tuple_type(const char *t) {
+    size_t n = t ? strlen(t) : 0;
+    return n > 7 && strncmp(t, "tuple[", 6) == 0 && t[n - 1] == ']';
+}
+
+static int cg_tuple_parts(const char *t, const char **parts, size_t max, size_t *count) {
+    if (!is_tuple_type(t)) return 0;
+    const char *inner = t + 6, *end = t + strlen(t) - 1, *start = inner;
+    size_t n = 0;
+    int depth = 0;
+    for (const char *q = inner; q <= end; q++) {
+        char c = q < end ? *q : ',';
+        if (c == '[' || c == '(') depth++;
+        else if (c == ']' || c == ')') depth--;
+        else if (c == ',' && depth == 0) {
+            if (n >= max || q == start) return 0;
+            parts[n++] = cg_intern(start, (size_t)(q - start));
+            start = q + 1;
+        }
+    }
+    *count = n;
+    return n > 0;
+}
+
+static int is_ref_element(const char *t) {
+    return t && (list_elem(t) || is_dict_type(t) || class_like(t) || is_fn_type(t) || is_tuple_type(t));
+}
 
 /* the element type of any list type, or NULL */
 static const char *list_elem(const char *type) {
@@ -131,11 +159,25 @@ static int machine_type_bits(const char *t) {
 static int machine_is_unsigned(const char *t) { return small_machine_bits(t) && t[0] == 'u'; }
 
 /* V0.74: dict[K,V], K string or int, V int, float, bool, string, an object, a list or a dictionary */
+/* V0.76: the length of the key written in dict[K,V] (string, int, or a tuple of int), 0 if none */
+static size_t dict_key_length(const char *inner, size_t len) {
+    if (len > 7 && strncmp(inner, "string,", 7) == 0) return 6;
+    if (len > 4 && strncmp(inner, "int,", 4) == 0) return 3;
+    if (strncmp(inner, "tuple[", 6) != 0) return 0;
+    int depth = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (inner[i] == '[') depth++;
+        else if (inner[i] == ']' && --depth == 0) return i + 2 < len && inner[i + 1] == ',' ? i + 1 : 0;
+    }
+    return 0;
+}
+
 static const char *dict_value(const char *type) {
     size_t len;
     const char *inner = bracket_inner(type, "dict[", &len);
     if (!inner) return NULL;
-    size_t key = strncmp(inner, "string,", 7) == 0 ? 7 : strncmp(inner, "int,", 4) == 0 ? 4 : 0;
+    size_t key = dict_key_length(inner, len);
+    if (key) key++;
     if (!key || len <= key) return NULL;
     const char *v = cg_intern(inner + key, len - key);
     if (!v) return NULL;
@@ -190,8 +232,27 @@ static int fn_type_index(const char *t) {
     return -1;
 }
 
+/* V0.76: the tuple types, registered the same way: ClairTuple_<n> */
+#define TUPLE_TYPE_MAX 256
+static const char *tuple_types[TUPLE_TYPE_MAX];
+static size_t tuple_type_count = 0;
+
+static int tuple_type_index(const char *t) {
+    for (size_t i = 0; t && i < tuple_type_count; i++) if (strcmp(tuple_types[i], t) == 0) return (int)i;
+    return -1;
+}
+
 static void register_fn_types(const char *t, int depth) {
     if (!t || depth > 32) return;
+    if (is_tuple_type(t)) {
+        if (tuple_type_index(t) >= 0) return;
+        const char *parts[16];
+        size_t count;
+        if (!cg_tuple_parts(t, parts, 16, &count)) return;
+        for (size_t i = 0; i < count; i++) register_fn_types(parts[i], depth + 1);
+        if (tuple_type_count < TUPLE_TYPE_MAX) tuple_types[tuple_type_count++] = cg_intern(t, strlen(t));
+        return;
+    }
     if (is_fn_type(t)) {
         if (fn_type_index(t) >= 0) return;
         const char *params[16], *result;
@@ -203,7 +264,11 @@ static void register_fn_types(const char *t, int depth) {
         return;
     }
     if (strncmp(t, "list[", 5) == 0 && list_elem(t)) register_fn_types(list_elem(t), depth + 1);
-    else if (strncmp(t, "dict[", 5) == 0 && dict_value(t)) register_fn_types(dict_value(t), depth + 1);
+    else if (strncmp(t, "dict[", 5) == 0 && dict_value(t)) {
+        if (strncmp(t + 5, "tuple[", 6) == 0)
+            register_fn_types(cg_intern(t + 5, dict_key_length(t + 5, strlen(t) - 6)), depth + 1);
+        register_fn_types(dict_value(t), depth + 1);
+    }
 }
 
 static void collect_fn_types(const AstNode *n) {
@@ -214,6 +279,12 @@ static void collect_fn_types(const AstNode *n) {
 
 /* dict[int,...]: its keys are kept as decimal texts (clair_rt_ikey) */
 static int dict_int_keys(const char *type) { return is_dict_type(type) && strncmp(type, "dict[int,", 9) == 0; }
+
+/* V0.76: dict[tuple[int,int],V]: its key type, kept as the text "x,y" (clair_v_tkey_<n>) ; NULL otherwise */
+static const char *dict_tuple_key(const char *type) {
+    if (!is_dict_type(type) || strncmp(type + 5, "tuple[", 6) != 0) return NULL;
+    return cg_intern(type + 5, dict_key_length(type + 5, strlen(type) - 6));
+}
 
 
 static int is_matrix_type(const char *type) {
@@ -286,6 +357,13 @@ static const char *c_type_name(const char *clair_type) {
 
     if (!clair_type) return NULL;
     if (strcmp(clair_type, "void") == 0) return "void";                           /* V0.72: def f() { } */
+    if (is_tuple_type(clair_type)) {                                                /* V0.76 */
+        int k = tuple_type_index(clair_type);
+        char name[32];
+        if (k < 0) return NULL;
+        snprintf(name, sizeof(name), "ClairTuple_%d", k);
+        return cg_intern(name, strlen(name));
+    }
     if (is_fn_type(clair_type)) {                                                   /* V0.75 */
         int k = fn_type_index(clair_type);
         char name[32];
@@ -460,6 +538,7 @@ static int membership_kind(const AstNode *n) {
     if (!n || n->kind != AST_BINARY || !n->text || n->child_count != 2) return 0;
     if (strcmp(n->text, "in") != 0 && strcmp(n->text, "not in") != 0) return 0;
     const char *t = n->children[1]->type_name;
+    if (is_list_type(t) && is_tuple_type(list_elem(t))) return 4;       /* V0.76: (x, y) in visites */
     if (is_list_type(t)) return 1;
     if (t && strcmp(t, "string") == 0) return 2;
     return is_dict_type(t) ? 3 : 0;
@@ -554,6 +633,9 @@ static int runs_fn_value(const AstNode *n) {
 /* Builtins that can never stop the program (only int(float) and matrix() can). */
 static int builtin_cannot_fail(const AstNode *call) {
     if (!call->text || call->text[0] != '@') return 0;
+    if (!strcmp(call->text, "@tget") || !strcmp(call->text, "@tlen") || !strcmp(call->text, "@zip") ||
+        !strcmp(call->text, "@dict_items") || !strcmp(call->text, "@dict_values") || !strcmp(call->text, "@dict_get"))
+        return 1;                                       /* V0.76 */
     if (is_v075_call(call->text))                       /* V0.75: min([]) stops, a function given can do anything */
         return strncmp(call->text, "@fn:", 4) == 0 || strcmp(call->text, "@sum") == 0 || strcmp(call->text, "@dict_keys") == 0;
     if (strncmp(call->text, "@tx_", 4) == 0) {             /* V0.72: s[i], s.index(x), s.split(""), s.ljust(n, "ab") */
@@ -3343,9 +3425,10 @@ static int fresh_expr(const AstNode *e) {
     if (e->kind == AST_CALL && e->text && (strcmp(e->text, "@tx_split") == 0 || strcmp(e->text, "@tx_rsplit") == 0 ||
                                            strcmp(e->text, "@tx_splitlines") == 0) && is_owned_type(e->type_name))
         return 1;
-    /* V0.75: sorted(xs), map(f, xs), filter(f, xs), the keys of a dictionary */
+    /* V0.75: sorted(xs), map(f, xs), filter(f, xs), the keys of a dictionary ; V0.76: zip, items, values */
     if (e->kind == AST_CALL && e->text && (strcmp(e->text, "@sorted") == 0 || strcmp(e->text, "@map") == 0 ||
-                                           strcmp(e->text, "@dict_keys") == 0 ||
+                                           strcmp(e->text, "@dict_keys") == 0 || strcmp(e->text, "@zip") == 0 ||
+                                           strcmp(e->text, "@dict_items") == 0 || strcmp(e->text, "@dict_values") == 0 ||
                                            strcmp(e->text, "@filter") == 0) && is_list_type(e->type_name))
         return 1;
     if (is_list_repeat(e)) return 1;
@@ -3377,6 +3460,7 @@ static int own_expr_ok(const AstNode *n, const char *name, int visible, const As
             if ((strcmp(callee, "@sorted") == 0 || strcmp(callee, "@sort") == 0 || strcmp(callee, "@minl") == 0 ||
                  strcmp(callee, "@maxl") == 0 || strcmp(callee, "@sum") == 0) && idx == 0) return 1;
             if ((strcmp(callee, "@map") == 0 || strcmp(callee, "@filter") == 0) && idx == 1) return 1;
+            if (strcmp(callee, "@zip") == 0) return 1;                               /* V0.76 */
             if (callee[0] != '@' && find_program_function(callee) && !param_escapes(callee, idx)) return 1;
         }
         return 0;
@@ -3635,6 +3719,7 @@ static int tmp_used_up(const AstNode *parent, size_t idx) {
             if (strcmp(c, "@sorted") == 0 || strcmp(c, "@minl") == 0 || strcmp(c, "@maxl") == 0 || strcmp(c, "@sum") == 0)
                 return idx == 0;
             if (strcmp(c, "@map") == 0 || strcmp(c, "@filter") == 0) return idx == 1;
+            if (strcmp(c, "@zip") == 0) return 1;                                    /* V0.76 */
             return c[0] != '@' && find_program_function(c) && !param_escapes(c, idx);
         }
         default:
@@ -3877,6 +3962,13 @@ static int arena_type(const char *t, int depth) {
     if (depth > 16) return 1;
     if (!strcmp(t, "string") || !strcmp(t, "list[string]") || !strcmp(t, "dict[string,string]")) return 1;
     if (is_fn_type(t)) return 1;                      /* V0.75: what a lambda keeps is in the arena */
+    if (is_tuple_type(t)) {                           /* V0.76: (nom, age) holds a text */
+        const char *parts[16];
+        size_t count = 0;
+        if (!cg_tuple_parts(t, parts, 16, &count)) return 1;
+        for (size_t i = 0; i < count; i++) if (arena_type(parts[i], depth + 1)) return 1;
+        return 0;
+    }
     /* V0.75, correction of V0.74: list[Point], list[list[string]], dict[string,Point] hold arena memory too */
     if (list_elem(t)) return arena_type(list_elem(t), depth + 1);
     if (dict_value(t)) return arena_type(dict_value(t), depth + 1);
@@ -4119,6 +4211,9 @@ static int emit_return_value(FILE *f, const AstNode *value);
 static int clair_num_frame_open;     /* the function being written has a ClairNumFrameGuard */
 static int emit_expr(FILE *f, const AstNode *n);
 static int emit_v075_call(FILE *f, const AstNode *n);    /* V0.75 */
+static int emit_v076_expr(FILE *f, const AstNode *n);    /* V0.76: tuples ; 1 written, 0 failed, -1 not one */
+static long v075_helper(const char *signature, int *fresh);
+static FILE *layer_helpers;
 
 /*
  * A big integer literal: clair_i256_from_i64(-5) when it fits in 64 bits,
@@ -4213,7 +4308,18 @@ static void emit_list_at_close(FILE *f, const char *list_type) {
 static int emit_expr(FILE *f, const AstNode *n);
 
 /* V0.74: a key of a dictionary; dict[int,...] keeps its keys as decimal texts (clair_rt_ikey) */
+static long v076_tkey_helper(const char *tuple_type);
+
 static int emit_dict_key(FILE *f, const char *dict_type, const AstNode *key) {
+    const char *tk = dict_tuple_key(dict_type);
+    if (tk) {                                                     /* V0.76: d[(x, y)], the key "x,y" */
+        long id = v076_tkey_helper(tk);
+        if (id < 0) return 0;
+        fprintf(f, "clair_v_tkey_%ld(", id);
+        if (!emit_expr(f, key)) return 0;
+        fputs(", (char[384]){0})", f);
+        return 1;
+    }
     if (!dict_int_keys(dict_type)) return emit_expr(f, key);
     fputs("clair_rt_ikey((int64_t)(", f);
     if (!emit_expr(f, key)) return 0;
@@ -4425,6 +4531,10 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
     {
         int measure = emit_measure(f, n);                 /* V0.53 */
         if (measure >= 0) return measure;
+    }
+    {
+        int tuple = emit_v076_expr(f, n);                 /* V0.76 */
+        if (tuple >= 0) return tuple;
     }
     switch (n->kind) {
         case AST_INTEGER:
@@ -4698,6 +4808,17 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
             if (n->text && strncmp(n->text, "@tx_", 4) == 0) {
                 /* V0.72: clair_tx_lower(s), clair_tx_find(s, sub, 0, INT64_MAX), clair_tx_at(s, i, line)... */
                 const TextMethod *m = text_method_call(n->text);
+                int three = m && is_tuple_type(m->result);           /* V0.76: partition, rpartition */
+                if (three) {
+                    const char *c = c_type_kept(n->type_name);
+                    int fresh = 0;
+                    long id = v075_helper("tx3", &fresh);
+                    if (!c || id < 0 || !layer_helpers) return 0;
+                    if (fresh)
+                        fprintf(layer_helpers, "static %s clair_v_tx3_%ld(ClairTx3 r) { return (%s){ r.a, r.b, r.c }; }\n\n",
+                                c, id, c);
+                    fprintf(f, "clair_v_tx3_%ld(", id);
+                }
                 fprintf(f, "clair_tx_%s(", n->text + 4);
                 for (size_t i = 0; i < n->child_count; i++) {
                     if (i) fputs(", ", f);
@@ -4706,6 +4827,7 @@ static int emit_expr_node(FILE *f, const AstNode *n) {
                 for (int k = (int)n->child_count - 1; m && k < m->max; k++) fprintf(f, ", %s", m->defaults[k]);
                 if ((m && (m->flags & TX_LINE)) || strcmp(n->text, "@tx_at") == 0) fprintf(f, ", (size_t)%zu", n->line);
                 fputc(')', f);
+                if (three) fputc(')', f);
                 return 1;
             }
             if (n->text && strncmp(n->text, "@slice", 6) == 0) {
@@ -5927,9 +6049,12 @@ static long v075_helper(const char *signature, int *fresh) {
     return (long)v075_helper_count++;
 }
 
-/* a < b for keys of this Clair type (texts: by code point, as UTF-8 bytes keep that order) */
+static long v076_tcmp_helper(const char *t);
+
+/* a < b for keys of this Clair type (texts: by code point, as UTF-8 bytes keep that order ; V0.76: tuples) */
 static void emit_key_less(FILE *h, const char *key_type, const char *a, const char *b) {
     if (strcmp(key_type, "string") == 0) fprintf(h, "strcmp(%s, %s) < 0", a, b);
+    else if (is_tuple_type(key_type)) fprintf(h, "clair_v_tcmp_%ld(%s, %s) == -1", v076_tcmp_helper(key_type), a, b);
     else fprintf(h, "%s < %s", a, b);
 }
 
@@ -5955,6 +6080,7 @@ static long v075_sort_helper(const char *list_type, const char *key_fn_type) {
     if (key_fn_type && !cg_fn_parts(key_fn_type, params, 16, &count, &key_result)) return -1;
     const char *k = c_type_kept(key_result);
     if (!h || !e || !k) return -1;
+    if (is_tuple_type(key_result) && v076_tcmp_helper(key_result) < 0) return -1;     /* V0.76 */
     const char *kf = key_fn_type ? c_type_kept(key_fn_type) : NULL;
     if (key_fn_type && !kf) return -1;
     fprintf(h, "static void clair_v_sort_%ld(ClairList xs, bool rev", id);
@@ -6023,6 +6149,7 @@ static long v075_minmax_helper(const char *list_type, const char *key_fn_type, i
     if (key_fn_type && !cg_fn_parts(key_fn_type, params, 16, &count, &key_result)) return -1;
     const char *k = c_type_kept(key_result);
     if (!h || !e || !k) return -1;
+    if (is_tuple_type(key_result) && v076_tcmp_helper(key_result) < 0) return -1;     /* V0.76 */
     const char *kf = key_fn_type ? c_type_kept(key_fn_type) : NULL;
     if (key_fn_type && !kf) return -1;
     fprintf(h, "static %s clair_v_minmax_%ld(ClairList xs", e, id);
@@ -6170,6 +6297,31 @@ static int emit_v075_call(FILE *f, const AstNode *n) {
         /* sorted(d): the keys of d, in their order, as a new list */
         if (n->child_count != 1) return 0;
         int ints = dict_int_keys(n->children[0]->type_name);
+        const char *tk = dict_tuple_key(n->children[0]->type_name);
+        if (tk) {                                                   /* V0.76: dict[tuple[int,int],...] */
+            long kid = v076_tkey_helper(tk);
+            const char *kt = c_type_name(tk);
+            char sig[512];
+            snprintf(sig, sizeof(sig), "keys|%s", tk);
+            int fresh = 0;
+            long id = v075_helper(sig, &fresh);
+            if (kid < 0 || id < 0 || !kt || !layer_helpers) return 0;
+            if (fresh) {
+                fprintf(layer_helpers, "static ClairList clair_v_keys_%ld(ClairDict d) {\n"
+                                       "    ClairList r = clair_rt_list_make(NULL, 0, sizeof(%s));\n"
+                                       "    if (d->len == 0) return r;\n"
+                                       "    %s *v = malloc(d->len * sizeof(%s));\n", id, kt, kt, kt);
+                emit_oom_check(layer_helpers, "v");
+                fprintf(layer_helpers, "    for (size_t i = 0; i < d->len; i++) v[i] = clair_v_tkey_value_%ld(d->keys[i]);\n"
+                                       "    r->data = v;\n"
+                                       "    r->len = r->capacity = d->len;\n"
+                                       "    return r;\n}\n\n", kid);
+            }
+            fprintf(f, "clair_v_keys_%ld(", id);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputc(')', f);
+            return 1;
+        }
         int fresh = 0;
         long id = v075_helper(ints ? "keys|int" : "keys|string", &fresh);
         if (id < 0 || !layer_helpers) return 0;
@@ -6245,6 +6397,313 @@ static int emit_v075_call(FILE *f, const AstNode *n) {
         return 1;
     }
     return 0;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* V0.76: tuples.  tuple[int,string] is struct ClairTuple_<n> { f0, f1 },  */
+/* copied like a number.  ==, < and the keys of dictionaries are small     */
+/* functions written once per tuple type, before the function using them.  */
+/* ------------------------------------------------------------------ */
+
+static long v076_teq_helper(const char *t);
+
+/* a == b for an element of this type (written after its own helper, when it is a tuple) */
+static void emit_elem_eq(FILE *h, const char *t, const char *a, const char *b) {
+    if (strcmp(t, "string") == 0) fprintf(h, "strcmp(%s, %s) == 0", a, b);
+    else if (is_tuple_type(t)) fprintf(h, "clair_v_teq_%ld(%s, %s)", v076_teq_helper(t), a, b);
+    else fprintf(h, "%s == %s", a, b);
+}
+
+static long v076_teq_helper(const char *t) {
+    char sig[512];
+    snprintf(sig, sizeof(sig), "teq|%s", t);
+    const char *parts[16];
+    size_t count = 0;
+    if (!cg_tuple_parts(t, parts, 16, &count)) return -1;
+    for (size_t i = 0; i < count; i++) if (is_tuple_type(parts[i]) && v076_teq_helper(parts[i]) < 0) return -1;
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *c = c_type_kept(t);
+    if (!h || !c) return -1;
+    fprintf(h, "static bool clair_v_teq_%ld(%s a, %s b) {\n    return ", id, c, c);
+    for (size_t i = 0; i < count; i++) {
+        char x[16], y[16];
+        snprintf(x, sizeof(x), "a.f%zu", i);
+        snprintf(y, sizeof(y), "b.f%zu", i);
+        if (i) fputs(" && ", h);
+        fputc('(', h);
+        emit_elem_eq(h, parts[i], x, y);
+        fputc(')', h);
+    }
+    fputs(";\n}\n\n", h);
+    return id;
+}
+
+/*
+ * a and b compared as Python does: at the first element where they differ (==),
+ * that element decides (<).  -1: a < b, 1: a > b, 0: equal, 2: neither (a NaN).
+ */
+static long v076_tcmp_helper(const char *t) {
+    char sig[512];
+    snprintf(sig, sizeof(sig), "tcmp|%s", t);
+    const char *parts[16];
+    size_t count = 0;
+    if (!cg_tuple_parts(t, parts, 16, &count)) return -1;
+    for (size_t i = 0; i < count; i++) {
+        if (is_tuple_type(parts[i]) && (v076_tcmp_helper(parts[i]) < 0 || v076_teq_helper(parts[i]) < 0)) return -1;
+    }
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *c = c_type_kept(t);
+    if (!h || !c) return -1;
+    fprintf(h, "static int clair_v_tcmp_%ld(%s a, %s b) {\n", id, c, c);
+    for (size_t i = 0; i < count; i++) {
+        char x[16], y[16];
+        snprintf(x, sizeof(x), "a.f%zu", i);
+        snprintf(y, sizeof(y), "b.f%zu", i);
+        fputs("    if (!(", h);
+        emit_elem_eq(h, parts[i], x, y);
+        fputs(")) return (", h);
+        emit_key_less(h, parts[i], x, y);
+        fputs(") ? -1 : (", h);
+        emit_key_less(h, parts[i], y, x);
+        fputs(") ? 1 : 2;\n", h);
+    }
+    fputs("    return 0;\n}\n\n", h);
+    return id;
+}
+
+/* the leaves of a dictionary key tuple[int,tuple[int,bool]]: f0, f1.f0, f1.f1 (int or bool) */
+static int tkey_leaves(const char *t, const char *prefix, char (*paths)[64], int *is_bool, size_t *n, size_t max) {
+    const char *parts[16];
+    size_t count = 0;
+    if (!cg_tuple_parts(t, parts, 16, &count)) return 0;
+    for (size_t i = 0; i < count; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s.f%zu", prefix, i);
+        if (is_tuple_type(parts[i])) {
+            if (!tkey_leaves(parts[i], path, paths, is_bool, n, max)) return 0;
+        } else {
+            if (*n >= max) return 0;
+            snprintf(paths[*n], 64, "%s", path);
+            is_bool[*n] = strcmp(parts[i], "bool") == 0;
+            (*n)++;
+        }
+    }
+    return 1;
+}
+
+/*
+ * dict[tuple[int,int],V]: the key (x, y) is kept as the text "x,y", like the
+ * keys of dict[int,V] (V0.74).  clair_v_tkey_<n>(t, buf) writes it in buf
+ * (384 bytes: 16 numbers), clair_v_tkey_value_<n>(text) reads it back.
+ */
+static long v076_tkey_helper(const char *t) {
+    char sig[512];
+    snprintf(sig, sizeof(sig), "tkey|%s", t);
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (id < 0 || !fresh) return id;
+    FILE *h = layer_helpers;
+    const char *c = c_type_kept(t);
+    char paths[16][64];
+    int is_bool[16];
+    size_t n = 0;
+    if (!h || !c || !tkey_leaves(t, "t", paths, is_bool, &n, 16)) return -1;
+    fprintf(h, "static const char *clair_v_tkey_%ld(%s t, char *buf) {\n    char *p = buf;\n", id, c);
+    for (size_t i = 0; i < n; i++)
+        fprintf(h, "    p += snprintf(p, 24, \"%%s%%lld\", %s, (long long)%s);\n", i ? "\",\"" : "\"\"", paths[i]);
+    fputs("    return buf;\n}\n\n", h);
+    fprintf(h, "static %s clair_v_tkey_value_%ld(const char *key) {\n    %s t;\n    char *end = (char *)key;\n", c, id, c);
+    for (size_t i = 0; i < n; i++) {
+        fprintf(h, "    %s = %sstrtoll(end + %d, &end, 10)%s;\n", paths[i], is_bool[i] ? "(bool)" : "", i ? 1 : 0,
+                is_bool[i] ? "" : "");
+    }
+    fputs("    return t;\n}\n\n", h);
+    return id;
+}
+
+/* (x, y) in pts */
+static long v076_tin_helper(const char *list_type) {
+    const char *t = list_elem(list_type);
+    char sig[512];
+    snprintf(sig, sizeof(sig), "tin|%s", t);
+    long eq = v076_teq_helper(t);
+    int fresh = 0;
+    long id = v075_helper(sig, &fresh);
+    if (eq < 0 || id < 0 || !fresh) return eq < 0 ? -1 : id;
+    FILE *h = layer_helpers;
+    const char *c = c_type_kept(t);
+    if (!h || !c) return -1;
+    fprintf(h, "static bool clair_v_tin_%ld(ClairList xs, %s t) {\n"
+               "    for (size_t i = 0; i < xs->len; i++) if (clair_v_teq_%ld(((%s *)xs->data)[i], t)) return true;\n"
+               "    return false;\n}\n\n", id, c, eq, c);
+    return id;
+}
+
+/* a new list of n elements of C type c, whose buffer is out (allocated with n or 1 elements) */
+static void emit_list_from_buffer(FILE *h, const char *c) {
+    fprintf(h, "    ClairList r = clair_rt_list_make(NULL, 0, sizeof(%s));\n"
+               "    r->data = out;\n"
+               "    r->len = n;\n"
+               "    r->capacity = n ? n : 1;\n"
+               "    return r;\n", c);
+}
+
+static int emit_v076_expr(FILE *f, const AstNode *n) {
+    if (n->kind == AST_TUPLE) {
+        const char *c = c_type_kept(n->type_name);
+        if (!c) return 0;
+        fprintf(f, "((%s){ ", c);
+        for (size_t i = 0; i < n->child_count; i++) {
+            if (i) fputs(", ", f);
+            if (!emit_expr(f, n->children[i])) return 0;
+        }
+        fputs(" })", f);
+        return 1;
+    }
+    if (n->kind == AST_BINARY && n->text && n->child_count == 2) {
+        const char *op = n->text, *lt = n->children[0]->type_name, *rt = n->children[1]->type_name;
+        int eq = !strcmp(op, "==") || !strcmp(op, "!="), order = !strcmp(op, "<") || !strcmp(op, "<=") ||
+                 !strcmp(op, ">") || !strcmp(op, ">=");
+        if (membership_kind(n) == 4) {
+            long id = v076_tin_helper(rt);
+            if (id < 0) return 0;
+            fprintf(f, "%sclair_v_tin_%ld(", op[0] == 'n' ? "!" : "", id);
+            if (!emit_expr(f, n->children[1])) return 0;
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputc(')', f);
+            return 1;
+        }
+        if ((eq || order) && is_tuple_type(lt) && is_tuple_type(rt)) {
+            long id = eq ? v076_teq_helper(lt) : v076_tcmp_helper(lt);
+            if (id < 0) return 0;
+            /* < : -1 ; > : 1 ; <= : -1 or 0 ; >= : 0 or 1 (2, a NaN somewhere, is neither) */
+            int ge = !strcmp(op, ">=");
+            if (eq) fprintf(f, "(%sclair_v_teq_%ld(", !strcmp(op, "!=") ? "!" : "", id);
+            else fprintf(f, "(%sclair_v_tcmp_%ld(", ge ? "(unsigned)" : "", id);
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[1])) return 0;
+            if (eq) fputs("))", f);
+            else if (!strcmp(op, "<")) fputs(") == -1)", f);
+            else if (!strcmp(op, ">")) fputs(") == 1)", f);
+            else if (!strcmp(op, "<=")) fputs(") <= 0)", f);
+            else fputs(") <= 1u)", f);
+            return 1;
+        }
+        if (order && lt && rt && !strcmp(lt, "string") && !strcmp(rt, "string")) {
+            fputs("(strcmp(", f);                               /* V0.76: "a" < "b", by code point */
+            if (!emit_expr(f, n->children[0])) return 0;
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[1])) return 0;
+            fprintf(f, ") %s 0)", op);
+            return 1;
+        }
+        return -1;
+    }
+    if (n->kind != AST_CALL || !n->text || n->text[0] != '@') return -1;
+    const char *name = n->text;
+    if (!strcmp(name, "@tget")) {
+        if (n->child_count != 2) return 0;
+        fputc('(', f);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fprintf(f, ").f%s", n->children[1]->text);
+        return 1;
+    }
+    if (!strcmp(name, "@tlen")) {
+        const char *parts[16];
+        size_t count = 0;
+        if (n->child_count != 1 || !cg_tuple_parts(n->children[0]->type_name, parts, 16, &count)) return 0;
+        fputs("((void)(", f);
+        if (!emit_expr(f, n->children[0])) return 0;
+        fprintf(f, "), (int64_t)%zu)", count);
+        return 1;
+    }
+    if (!strcmp(name, "@zip")) {
+        const char *rt = list_elem(n->type_name), *c = c_type_kept(rt);
+        char sig[512];
+        snprintf(sig, sizeof(sig), "zip|%s", n->type_name);
+        int fresh = 0;
+        long id = v075_helper(sig, &fresh);
+        if (id < 0 || !c || !layer_helpers) return 0;
+        if (fresh) {
+            FILE *h = layer_helpers;
+            fprintf(h, "static ClairList clair_v_zip_%ld(", id);
+            for (size_t i = 0; i < n->child_count; i++) fprintf(h, "%sClairList a%zu", i ? ", " : "", i);
+            fputs(") {\n    size_t n = a0->len;\n", h);
+            for (size_t i = 1; i < n->child_count; i++) fprintf(h, "    if (a%zu->len < n) n = a%zu->len;\n", i, i);
+            fprintf(h, "    %s *out = malloc((n ? n : 1) * sizeof(%s));\n", c, c);
+            emit_oom_check(h, "out");
+            fprintf(h, "    for (size_t i = 0; i < n; i++) out[i] = (%s){ ", c);
+            for (size_t i = 0; i < n->child_count; i++) {
+                const char *e = list_element_c_type(n->children[i]->type_name);
+                if (!e) return 0;
+                fprintf(h, "%s((%s *)a%zu->data)[i]", i ? ", " : "", e, i);
+            }
+            fputs(" };\n", h);
+            emit_list_from_buffer(h, c);
+            fputs("}\n\n", h);
+        }
+        fprintf(f, "clair_v_zip_%ld(", id);
+        for (size_t i = 0; i < n->child_count; i++) {
+            if (i) fputs(", ", f);
+            if (!emit_expr(f, n->children[i])) return 0;
+        }
+        fputc(')', f);
+        return 1;
+    }
+    if (!strcmp(name, "@dict_items") || !strcmp(name, "@dict_values") || !strcmp(name, "@dict_get")) {
+        const char *dt = n->children[0]->type_name, *v = dict_value_c_type(dt);
+        int items = name[6] == 'i', values = name[6] == 'v';
+        char sig[512];
+        snprintf(sig, sizeof(sig), "%s|%s", name, dt);
+        int fresh = 0;
+        long id = v075_helper(sig, &fresh);
+        if (id < 0 || !v || !layer_helpers) return 0;
+        if (fresh) {
+            FILE *h = layer_helpers;
+            if (values) {
+                fprintf(h, "static ClairList clair_v_values_%ld(ClairDict d) {\n"
+                           "    return clair_rt_list_make(d->values, d->len, sizeof(%s));\n}\n\n", id, v);
+            } else if (items) {
+                const char *tt = list_elem(n->type_name), *c = c_type_kept(tt), *tk = dict_tuple_key(dt);
+                long kid = tk ? v076_tkey_helper(tk) : 0;
+                if (!c || kid < 0) return 0;
+                fprintf(h, "static ClairList clair_v_items_%ld(ClairDict d) {\n    size_t n = d->len;\n"
+                           "    %s *out = malloc((n ? n : 1) * sizeof(%s));\n", id, c, c);
+                emit_oom_check(h, "out");
+                fprintf(h, "    for (size_t i = 0; i < n; i++) out[i] = (%s){ ", c);
+                if (tk) fprintf(h, "clair_v_tkey_value_%ld(d->keys[i])", kid);
+                else if (dict_int_keys(dt)) fputs("clair_rt_ikey_value(d->keys[i])", h);
+                else fputs("d->keys[i]", h);
+                fprintf(h, ", ((%s *)d->values)[i] };\n", v);
+                emit_list_from_buffer(h, c);
+                fputs("}\n\n", h);
+            } else {
+                fprintf(h, "static %s clair_v_get_%ld(ClairDict d, const char *key, %s dflt) {\n"
+                           "    int64_t i = clair_rt_dict_find(d, key);\n"
+                           "    return i >= 0 ? ((%s *)d->values)[i] : dflt;\n}\n\n", v, id, v, v);
+            }
+        }
+        fprintf(f, "clair_v_%s_%ld(", values ? "values" : items ? "items" : "get", id);
+        if (!emit_expr(f, n->children[0])) return 0;
+        if (!values && !items) {
+            fputs(", ", f);
+            if (!emit_dict_key(f, dt, n->children[1])) return 0;
+            fputs(", ", f);
+            if (!emit_expr(f, n->children[2])) return 0;
+        }
+        fputc(')', f);
+        return 1;
+    }
+    return -1;
 }
 
 /* the functions given as values (@fn:name), each once, with the number of values its lambda captured */
@@ -7735,6 +8194,12 @@ static int emit_stmt_inner(FILE *f, const AstNode *n, int depth) {
                     indent(f, depth + 2);
                     if (dict_int_keys(n->type_name))                 /* V0.74: dict[int,...] */
                         fprintf(f, "int64_t %s = clair_rt_ikey_value(clair_dict_%s->keys[clair_k_%s]);\n", k, k, k);
+                    else if (dict_tuple_key(n->type_name)) {         /* V0.76: dict[tuple[int,int],...] */
+                        long id = v076_tkey_helper(dict_tuple_key(n->type_name));
+                        if (id < 0) return 0;
+                        fprintf(f, "%s %s = clair_v_tkey_value_%ld(clair_dict_%s->keys[clair_k_%s]);\n",
+                                c_type_name(dict_tuple_key(n->type_name)), k, id, k, k);
+                    }
                     else fprintf(f, "const char *%s = clair_dict_%s->keys[clair_k_%s];\n", k, k, k);
                 }
                 if (!emit_block(f, n->children[1], depth + 2)) return 0;
@@ -8340,6 +8805,9 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
             fprintf(f, "typedef struct ClairClass_%s ClairClass_%s;\n", cls->text, cls->text);
         }
     }
+    /* V0.76: a tuple is a struct: its name now, its fields once what it holds by value is complete */
+    for (size_t k = 0; k < tuple_type_count; k++)
+        fprintf(f, "typedef struct ClairTuple_%zu ClairTuple_%zu;   /* %s */\n", k, k, tuple_types[k]);
     /* V0.75: a function given as a value: its C function (first argument: what its lambda captured) */
     for (size_t k = 0; k < fn_type_count; k++) {
         const char *params[16], *result;
@@ -8359,8 +8827,35 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
     int had_class = 0;
     size_t count = program->child_count;
     unsigned char *done = calloc(count ? count : 1, 1);
+    unsigned char tuple_done[TUPLE_TYPE_MAX] = { 0 };
     if (!done) return 0;
-    for (size_t emitted = 0, round = 0; round <= count; round++) {
+    for (size_t emitted = 0, round = 0; round <= count + tuple_type_count; round++) {
+    /* V0.76: the tuples whose value classes and tuples are complete */
+    for (size_t k = 0; k < tuple_type_count; k++) {
+        if (tuple_done[k]) continue;
+        const char *parts[16];
+        size_t n = 0;
+        if (!cg_tuple_parts(tuple_types[k], parts, 16, &n)) { free(done); return 0; }
+        int ready = 1;
+        for (size_t j = 0; j < n && ready; j++) {
+            if (is_tuple_type(parts[j]) && tuple_type_index(parts[j]) >= 0 && !tuple_done[tuple_type_index(parts[j])])
+                ready = 0;
+            if (!is_value_class(parts[j])) continue;
+            for (size_t c = 0; c < count; c++) {
+                const AstNode *other = program->children[c];
+                if (other->kind == AST_CLASS && !strcmp(other->text, parts[j]) && !done[c]) ready = 0;
+            }
+        }
+        if (!ready) continue;
+        tuple_done[k] = 1;
+        fprintf(f, "struct ClairTuple_%zu {", k);
+        for (size_t j = 0; j < n; j++) {
+            const char *c = c_type_name(parts[j]);
+            if (!c) { free(done); return 0; }
+            fprintf(f, " %s f%zu;", c, j);
+        }
+        fputs(" };\n", f);
+    }
     for (size_t i = 0; i < program->child_count; i++) {
         const AstNode *cls = program->children[i];
         if (cls->kind != AST_CLASS || done[i]) continue;
@@ -8368,6 +8863,7 @@ static int emit_class_declarations(FILE *f, const AstNode *program) {
         int ready = 1;
         for (size_t j = 0; j < cls->child_count && ready; j++) {
             const char *ft = cls->children[j]->type_name;
+            if (is_tuple_type(ft) && tuple_type_index(ft) >= 0 && !tuple_done[tuple_type_index(ft)]) ready = 0;
             if (!is_value_class(ft)) continue;
             for (size_t k = 0; k < count; k++) {
                 const AstNode *other = program->children[k];
@@ -10217,7 +10713,8 @@ static int list_registry_emitted = 0;   /* V0.55: clair_rt_lists exists (the web
 int codegen_c_file(const AstNode *program, const char *path) {
     codegen_program = program;
     fn_type_count = 0;
-    collect_fn_types(program);                      /* V0.75: before any C type is written */
+    tuple_type_count = 0;
+    collect_fn_types(program);                      /* V0.75: before any C type is written (V0.76: tuples too) */
     compute_value_classes(program);
     int has_dynamic = 0, has_dynamic_fields = 0;
     clair_num_scan_ast(program, &has_dynamic, &has_dynamic_fields);
@@ -10492,7 +10989,9 @@ int codegen_c_file(const AstNode *program, const char *path) {
                                 (io_uses(program) & 4) || node_uses_list_repeat(program) || (tx_uses(program) & 4) ||
                                 node_uses_call_named(program, "@sort") || node_uses_call_named(program, "@sorted") ||
                                 node_uses_call_named(program, "@map") || node_uses_call_named(program, "@filter") ||
-                                node_uses_call_named(program, "@dict_keys");   /* V0.75 */
+                                node_uses_call_named(program, "@dict_keys") ||   /* V0.75 */
+                                node_uses_call_named(program, "@zip") || node_uses_call_named(program, "@dict_items") ||
+                                node_uses_call_named(program, "@dict_values");   /* V0.76 */
         int uses_list_at = node_uses_kind(program, AST_INDEX) || node_uses_kind(program, AST_INDEX_ASSIGN);
         int uses_list_append = node_uses_kind(program, AST_LIST_APPEND);
 

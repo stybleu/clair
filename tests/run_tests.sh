@@ -188,11 +188,11 @@ grep -Fq "incompatible types for '+':" build/invalid_string_numeric.stderr
 printf '%s\n' 'invalid_string_numeric.cl : OK -> string + non-string refuse'
 
 if ./build/clair tests/invalid_string_order.cl -o build/test_invalid_string_order >build/invalid_string_order.stdout 2>build/invalid_string_order.stderr; then
-    printf '%s\n' 'invalid_string_order.cl : ECHEC -> comparaison ordonnee string aurait du etre refusee' >&2
+    printf '%s\n' 'invalid_string_order.cl : ECHEC -> un texte compare a un nombre aurait du etre refuse' >&2
     exit 1
 fi
 grep -Fq 'ordered comparisons require int or float operands' build/invalid_string_order.stderr
-printf '%s\n' 'invalid_string_order.cl : OK -> < <= > >= reserves aux nombres'
+printf '%s\n' 'invalid_string_order.cl : OK -> < <= > >= entre un texte et un nombre refuse'
 
 if ./build/clair tests/invalid_len_type.cl -o build/test_invalid_len_type >build/invalid_len_type.stdout 2>build/invalid_len_type.stderr; then
     printf '%s\n' 'invalid_len_type.cl : ECHEC -> len(int) aurait du etre refuse' >&2
@@ -630,7 +630,7 @@ printf '%s\n' 'syntaxe_python.cl : OK -> += -= *= /= %=, enumerate, tranches xs[
 expect_runtime_error slice_step_zero_runtime '2' 'Clair runtime error: slice step cannot be zero'
 expect_compile_error invalid_compound_call "'+=' would call suivant() twice: put its result in a variable first"
 expect_compile_error invalid_slice_assign "a slice xs[a:b] cannot be assigned: change the elements one by one"
-expect_compile_error invalid_enumerate "for i, v in ... needs enumerate(list)"
+expect_compile_error invalid_enumerate "for with 2 names: the elements of list[int] are int, not tuples (for the index, use for i, v in enumerate(xs))"
 expect_compile_error invalid_slice_type "slices [a:b] work on lists and strings, got matrix[float]"
 
 ./build/clair tests/float32.cl -o build/test_float32
@@ -741,11 +741,25 @@ printf '%s\n' 'regions_listes.cl : OK -> une boucle garde les textes d une liste
 expect_compile_error invalid_lambda_type "a lambda needs to know the types of its parameters"
 expect_compile_error invalid_lambda_arity "this lambda takes 2 parameter(s), a function of 1 is expected here (def(float) -> float)"
 expect_compile_error invalid_fn_type "a function def(float) -> float is expected here, got def(string) -> string"
-expect_compile_error invalid_sort_objects "sorted() compares numbers, texts or booleans; a list of Point needs key= (key=lambda p: p.x)"
+expect_compile_error invalid_sort_objects "sorted() compares numbers, texts, booleans or tuples of them; a list of Point needs key= (key=lambda p: p.x)"
 expect_compile_error invalid_sort_kwarg "sorted() has no argument cle="
 expect_compile_error invalid_call_value "xs is a list[int], not a function: it cannot be called"
 expect_compile_error invalid_kwarg_user "aire() has no argument largeur= (named arguments work with sorted, sort, min and max)"
 expect_runtime_error min_empty_runtime '4' 'Clair runtime error: min() iterable argument is empty (line 6)'
+# V0.76 : les tuples ; compares a Python, puis avec ASan et UBSan
+./build/clair tests/tuples.cl -o build/test_tuples
+[ "$(./build/test_tuples)" = "$(cat tests/tuples.expected)" ]
+grep -Fq 'struct ClairTuple_' build/test_tuples.generated.c
+clang -std=c11 -O1 -g -fwrapv -fsanitize=address,undefined -fno-sanitize-recover=all -w build/test_tuples.generated.c -o build/test_tuples_san -lm -pthread
+[ "$(./build/test_tuples_san)" = "$(cat tests/tuples.expected)" ]
+printf '%s\n' 'tuples.cl : OK -> (a, b), return a, b, let a, b = ..., a, b = b, a, for a, b in ..., t[0], == et <, cles de tri, cles (x, y) de dictionnaire, zip, items, get, partition, identique a Python, sans erreur memoire (ASan)'
+expect_compile_error invalid_tuple_index "a tuple is read with a number written in the program, t[0] or t[-1]"
+expect_compile_error invalid_tuple_assign "a tuple cannot be changed, as in Python: build a new one, t = (a, b)"
+expect_compile_error invalid_tuple_unpack "2 names for a tuple of 3 elements (tuple[int,int,int]), as in Python they must be as many"
+expect_compile_error invalid_tuple_compare "'==' compares two tuples of the same types, got tuple[int,string] and tuple[int,int]"
+expect_compile_error invalid_dict_get "get() expects a key and a default value, d.get(k, 0): Clair has no None"
+expect_compile_error invalid_tuple_key "a tuple key of a dictionary holds int and bool only, like (x, y); got tuple[string,int]"
+expect_runtime_error partition_empty_runtime 'b' 'Clair runtime error: empty separator (line 5)'
 expect_runtime_error dict_changed_runtime 'a' 'Clair runtime error: dictionary changed size during iteration'
 expect_compile_error invalid_in_type "'in' cannot look for float in list[int]: convert it first, e.g. int(x)"
 expect_compile_error invalid_in_right "'in' needs a list, a string or a dictionary on the right, got int"

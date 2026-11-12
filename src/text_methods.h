@@ -47,6 +47,8 @@ static const TextMethod text_methods[] = {
     { "index", 1, 3, { "string", "int", "int" }, { 0, "0", "INT64_MAX" }, "int", TX_LINE },
     { "rindex", 1, 3, { "string", "int", "int" }, { 0, "0", "INT64_MAX" }, "int", TX_LINE },
     { "count", 1, 3, { "string", "int", "int" }, { 0, "0", "INT64_MAX" }, "int", 0 },
+    { "partition", 1, 1, { "string" }, { 0 }, "tuple[string,string,string]", TX_LINE },   /* V0.76 */
+    { "rpartition", 1, 1, { "string" }, { 0 }, "tuple[string,string,string]", TX_LINE },
     { "removeprefix", 1, 1, { "string" }, { 0 }, "string", 0 },
     { "removesuffix", 1, 1, { "string" }, { 0 }, "string", 0 },
     { "ljust", 1, 2, { "int", "string" }, { 0, "\" \"" }, "string", TX_LINE },

@@ -258,8 +258,54 @@ static int class_like(const char *t) {
 /* V0.74: what a list or a dictionary value can also hold: objects, lists, dictionaries (by reference) */
 static int is_fn_type(const char *t);
 
+/* V0.76: tuple[int,string] (kept by value, like a number) */
+static int is_tuple_type(const char *t) {
+    size_t n = t ? strlen(t) : 0;
+    return n > 7 && strncmp(t, "tuple[", 6) == 0 && t[n - 1] == ']';
+}
+
+/* its element types (at most max); 0 when t is not one */
+static int tuple_parts(const char *t, const char **parts, size_t max, size_t *count) {
+    if (!is_tuple_type(t)) return 0;
+    const char *inner = t + 6, *end = t + strlen(t) - 1, *start = inner;
+    size_t n = 0;
+    int depth = 0;
+    for (const char *q = inner; q <= end; q++) {
+        char c = q < end ? *q : ',';
+        if (c == '[' || c == '(') depth++;
+        else if (c == ']' || c == ')') depth--;
+        else if (c == ',' && depth == 0) {
+            if (n >= max || q == start) return 0;
+            parts[n++] = type_intern(start, (size_t)(q - start));
+            start = q + 1;
+        }
+    }
+    *count = n;
+    return n > 0;
+}
+
+static const char *tuple_type_make(const char *const *parts, size_t count) {
+    char buf[1024];
+    size_t used = (size_t)snprintf(buf, sizeof(buf), "tuple[");
+    for (size_t i = 0; i < count && used < sizeof(buf); i++)
+        used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s%s", i ? "," : "", parts[i]);
+    if (used < sizeof(buf)) used += (size_t)snprintf(buf + used, sizeof(buf) - used, "]");
+    return used < sizeof(buf) ? type_intern(buf, used) : NULL;
+}
+
+/* a tuple that can be a dictionary key: made of int and bool (grid coordinates, a memo of two arguments) */
+static int tuple_key_ok(const char *t) {
+    const char *parts[16];
+    size_t count;
+    if (!tuple_parts(t, parts, 16, &count)) return 0;
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(parts[i], "int") != 0 && strcmp(parts[i], "bool") != 0 && !tuple_key_ok(parts[i])) return 0;
+    return 1;
+}
+
 static int is_ref_element(const char *t) {
-    return t && (list_element_type(t) != NULL || is_dict_type(t) || class_like(t) || is_fn_type(t));   /* V0.75: functions */
+    return t && (list_element_type(t) != NULL || is_dict_type(t) || class_like(t) || is_fn_type(t) ||   /* V0.75: functions */
+                 is_tuple_type(t));                                                                   /* V0.76: tuples */
 }
 
 static const char *list_element_type(const char *type) {
@@ -315,11 +361,29 @@ static const char *matrix_element_type(const char *type) {
  * V0.74: dict[K,V] with K string or int, V int, float, bool, string, or an
  * object, a list or a dictionary (by reference, as in Python).
  */
+/* V0.76: the length of the key written in dict[K,V] (K: string, int or a tuple of int), 0 if none */
+static size_t dict_key_length(const char *inner, size_t len) {
+    if (len > 7 && strncmp(inner, "string,", 7) == 0) return 6;
+    if (len > 4 && strncmp(inner, "int,", 4) == 0) return 3;
+    if (strncmp(inner, "tuple[", 6) != 0) return 0;
+    int depth = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (inner[i] == '[') depth++;
+        else if (inner[i] == ']' && --depth == 0) {
+            if (i + 2 >= len || inner[i + 1] != ',') return 0;
+            const char *key = type_intern(inner, i + 1);
+            return key && tuple_key_ok(key) ? i + 1 : 0;
+        }
+    }
+    return 0;
+}
+
 static const char *dict_value_type(const char *type) {
     size_t len;
     const char *inner = bracket_inner(type, "dict[", &len);
     if (!inner) return NULL;
-    size_t key = strncmp(inner, "string,", 7) == 0 ? 7 : strncmp(inner, "int,", 4) == 0 ? 4 : 0;
+    size_t key = dict_key_length(inner, len);
+    if (key) key++;                                                 /* the comma */
     if (!key || len <= key) return NULL;
     const char *value = type_intern(inner + key, len - key);
     if (!value) return NULL;
@@ -330,9 +394,10 @@ static const char *dict_value_type(const char *type) {
 
 static int is_dict_type(const char *type) { return dict_value_type(type) != NULL; }
 
-/* the keys of dict[K,V]: string or int */
+/* the keys of dict[K,V]: string, int, or a tuple of int (V0.76) */
 static const char *dict_key_type(const char *type) {
     if (!is_dict_type(type)) return NULL;
+    if (strncmp(type + 5, "tuple[", 6) == 0) return type_intern(type + 5, dict_key_length(type + 5, strlen(type) - 6));
     return strncmp(type + 5, "int,", 4) == 0 ? "int" : "string";
 }
 
@@ -394,7 +459,7 @@ static const char *fn_type_make(const char *const *params, size_t count, const c
 }
 
 static const char *dict_type_for(const char *key, const char *value) {
-    if (!key || !value || (strcmp(key, "string") != 0 && strcmp(key, "int") != 0)) return NULL;
+    if (!key || !value || (strcmp(key, "string") != 0 && strcmp(key, "int") != 0 && !tuple_key_ok(key))) return NULL;
     char buf[512];
     int n = snprintf(buf, sizeof(buf), "dict[%s,%s]", key, value);
     if (n <= 0 || (size_t)n >= sizeof(buf)) return NULL;
@@ -459,8 +524,50 @@ static int is_known_type(const Semantic *s, const char *type) {
         for (size_t i = 0; i < count; i++) if (!is_known_type(s, params[i])) return 0;
         return strcmp(result, "void") == 0 || is_known_type(s, result);
     }
+    if (is_tuple_type(type)) {                                                         /* V0.76: tuple[int, string] */
+        const char *parts[16];
+        size_t count;
+        if (!tuple_parts(type, parts, 16, &count)) return 0;
+        for (size_t i = 0; i < count; i++) if (strcmp(parts[i], "void") == 0 || !is_known_type(s, parts[i])) return 0;
+        return 1;
+    }
     if (is_dict_type(type)) return is_known_type(s, dict_value_type(type));
     return find_class(s, type) != NULL;
+}
+
+/* V0.76: (1, 2) where a tuple[float, float] is expected; return (1, 2) and return (1.5, 2.0) give tuple[float, float] */
+static int tuple_converts(const char *dst, const char *src) {
+    const char *a[16], *b[16];
+    size_t na, nb;
+    if (!tuple_parts(dst, a, 16, &na) || !tuple_parts(src, b, 16, &nb) || na != nb) return 0;
+    for (size_t i = 0; i < na; i++) if (!assignable(a[i], b[i]) && !tuple_converts(a[i], b[i])) return 0;
+    return 1;
+}
+
+/* < and > : numbers, booleans, texts, and tuples of them, element by element */
+static int tuple_orderable(const char *t) {
+    const char *parts[16];
+    size_t count;
+    if (!tuple_parts(t, parts, 16, &count)) return 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *x = parts[i];
+        if (!(strcmp(x, "string") == 0 || strcmp(x, "bool") == 0 || (is_numeric(x) && !is_big(x)) ||
+              tuple_orderable(x))) return 0;
+    }
+    return 1;
+}
+
+/* == and != : numbers, booleans, texts, and tuples of them */
+static int tuple_equality_ok(const char *t) {
+    const char *parts[16];
+    size_t count;
+    if (!tuple_parts(t, parts, 16, &count)) return 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *x = parts[i];
+        if (!(strcmp(x, "string") == 0 || strcmp(x, "bool") == 0 || (is_numeric(x) && !is_big(x)) ||
+              tuple_equality_ok(x))) return 0;
+    }
+    return 1;
 }
 
 
@@ -639,6 +746,7 @@ static const char *infer_list_literal(Semantic *s, AstNode *n) {
 
 static int key_fits(const char *key_type, const char *actual) {
     if (!actual) return 0;
+    if (is_tuple_type(key_type)) return strcmp(actual, key_type) == 0;            /* V0.76: d[(x, y)] */
     return strcmp(key_type, "int") == 0 ? is_index_type(actual) : strcmp(actual, "string") == 0;
 }
 
@@ -1480,6 +1588,200 @@ static void collect_captures(Semantic *s, const AstNode *n, const char *var, con
     for (size_t i = 0; i < n->child_count; i++) collect_captures(s, n->children[i], var, names, types, count);
 }
 
+/* ===== V0.76: tuples ===== */
+
+/*
+ * let a, b = v and for a, b in xs (the parser's hidden @tup3n2 and @elt4n2: two
+ * names): v, or the elements of xs, must be tuples of that many elements.
+ */
+static int check_unpacked(Semantic *s, const char *hidden, const char *type, const char *where) {
+    const char *n = strrchr(hidden, 'n');
+    size_t names = n ? (size_t)strtoul(n + 1, NULL, 10) : 0;
+    const char *parts[16];
+    size_t count = 0;
+    int loop = strncmp(hidden, "@elt", 4) == 0;
+    if (!tuple_parts(type, parts, 16, &count)) {
+        if (loop)
+            report("semantic error: for with %zu names: the elements of %s are %s, not tuples "
+                   "(for the index, use for i, v in enumerate(xs))\n", names, where, type);
+        else report("semantic error: %zu names on the left of =, but the value is not a tuple: it is %s\n", names, type);
+        s->had_error = 1;
+        return 0;
+    }
+    if (count != names) {
+        report("semantic error: %zu names for a tuple of %zu elements (%s), as in Python they must be as many\n",
+               names, count, type);
+        s->had_error = 1;
+        return 0;
+    }
+    return 1;
+}
+
+/* t[0], t[-1]: the index is a number written in the program (the elements have their own types) */
+static const char *check_tuple_index(Semantic *s, AstNode *n, const char *base) {
+    const char *parts[16];
+    size_t count;
+    if (!tuple_parts(base, parts, 16, &count)) return NULL;
+    AstNode *ix = n->children[1];
+    int negative = 0;
+    if (ix->kind == AST_UNARY && ix->text && strcmp(ix->text, "-") == 0 && ix->child_count == 1) {
+        negative = 1;
+        ix = ix->children[0];
+    }
+    if (ix->kind != AST_INTEGER || !ix->text) {
+        report("semantic error: a tuple is read with a number written in the program, t[0] or t[-1] "
+               "(its elements may have different types); got an index computed while running\n");
+        s->had_error = 1;
+        return NULL;
+    }
+    long long k = strtoll(ix->text, NULL, 0);
+    if (negative) k = -k;
+    if (k < 0) k += (long long)count;
+    if (k < 0 || k >= (long long)count) {
+        report("semantic error: tuple index out of range: a %s has %zu elements\n", base, count);
+        s->had_error = 1;
+        return NULL;
+    }
+    char digits[24];
+    snprintf(digits, sizeof(digits), "%lld", k);
+    AstNode *number = new_node(AST_INTEGER, digits, "int");
+    if (!number) return NULL;
+    number->line = n->line;
+    ast_free(n->children[1]);
+    n->children[1] = number;
+    free(n->text);
+    n->text = malloc(6);
+    if (!n->text) return NULL;
+    strcpy(n->text, "@tget");
+    n->kind = AST_CALL;
+    return set_type(n, parts[k]) ? n->type_name : NULL;
+}
+
+/* (a, b): the tuple of their types ; expected: where a tuple[float, float] is wanted, (1, 2) is one */
+static const char *check_tuple_literal(Semantic *s, AstNode *n, const char *expected) {
+    const char *want[16], *parts[16];
+    size_t want_count = 0;
+    if (n->child_count > 16) {
+        error_type(s, "a tuple has at most 16 elements");
+        return NULL;
+    }
+    int typed = expected && tuple_parts(expected, want, 16, &want_count) && want_count == n->child_count;
+    for (size_t i = 0; i < n->child_count; i++) {
+        const char *t = typed ? expr_type_expected(s, n->children[i], want[i]) : expr_type(s, n->children[i]);
+        if (!t) return NULL;
+        if (strcmp(t, "void") == 0 || is_matrix_row_type(t)) {
+            report("semantic error: element %zu of the tuple gives no value\n", i + 1);
+            s->had_error = 1;
+            return NULL;
+        }
+        if (typed && !assignable(want[i], t) && !tuple_converts(want[i], t)) {
+            report("semantic error: element %zu of the tuple should be %s, got %s\n", i + 1, want[i], t);
+            s->had_error = 1;
+            return NULL;
+        }
+        parts[i] = typed ? want[i] : t;
+    }
+    const char *type = typed ? expected : tuple_type_make(parts, n->child_count);
+    if (!type) {
+        error_type(s, "tuple type too long");
+        return NULL;
+    }
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
+/* d.keys(), d.values(), d.items(), d.get(k, default) */
+static const char *check_dict_method(Semantic *s, AstNode *n, const char *dict, int *handled) {
+    *handled = 0;
+    const char *name = n->text, *key = dict_key_type(dict), *value = dict_value_type(dict);
+    int keys = !strcmp(name, "keys"), values = !strcmp(name, "values"), items = !strcmp(name, "items");
+    int get = !strcmp(name, "get");
+    if (!keys && !values && !items && !get) return NULL;
+    *handled = 1;
+    size_t want = get ? 3 : 1;
+    if (n->child_count != want) {
+        if (get) report("semantic error: get() expects a key and a default value, d.get(k, 0): "
+                        "Clair has no None (got %zu argument(s))\n", n->child_count - 1);
+        else report("semantic error: %s() expects no argument, got %zu\n", name, n->child_count - 1);
+        s->had_error = 1;
+        return NULL;
+    }
+    for (size_t i = 1; i < n->child_count; i++) {
+        if (n->children[i]->kind == AST_KWARG) {
+            report("semantic error: %s() has no argument %s=\n", name, n->children[i]->text);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    const char *type = NULL, *builtin = NULL;
+    if (keys) { builtin = "@dict_keys"; type = list_type_for_element(key); }
+    else if (values) { builtin = "@dict_values"; type = list_type_for_element(value); }
+    else if (items) {
+        const char *kv[2] = { key, value };
+        builtin = "@dict_items";
+        type = list_type_for_element(tuple_type_make(kv, 2));
+    } else {
+        builtin = "@dict_get";
+        const char *k = expr_type(s, n->children[1]);
+        if (!k) return NULL;
+        if (!key_fits(key, k)) {
+            report("semantic error: dictionary key must be %s, got %s\n", key, k);
+            s->had_error = 1;
+            return NULL;
+        }
+        const char *d = expr_type_expected(s, n->children[2], value);
+        if (!d || !assignable(value, d)) {
+            report("semantic error: the default value of get() must be %s, like the values, got %s\n", value,
+                   d ? d : "invalid");
+            s->had_error = 1;
+            return NULL;
+        }
+        type = value;
+    }
+    if (!type) {
+        report("semantic error: %s() of a %s is not supported\n", name, dict);
+        s->had_error = 1;
+        return NULL;
+    }
+    free(n->text);
+    n->text = malloc(strlen(builtin) + 1);
+    if (!n->text) return NULL;
+    strcpy(n->text, builtin);
+    n->kind = AST_CALL;
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
+/* zip(xs, ys): the list of the tuples (xs[i], ys[i]), as long as the shortest (in Python: list(zip(xs, ys))) */
+static const char *check_zip(Semantic *s, AstNode *n) {
+    const char *parts[16];
+    if (n->child_count < 2 || n->child_count > 16) {
+        report("semantic error: zip() expects 2 to 16 lists, got %zu\n", n->child_count);
+        s->had_error = 1;
+        return NULL;
+    }
+    for (size_t i = 0; i < n->child_count; i++) {
+        if (n->children[i]->kind == AST_KWARG) {
+            report("semantic error: zip() has no argument %s=\n", n->children[i]->text);
+            s->had_error = 1;
+            return NULL;
+        }
+        const char *t = expr_type(s, n->children[i]);
+        if (!t) return NULL;
+        parts[i] = list_element_type(t);
+        if (!parts[i]) {
+            report("semantic error: zip() works on lists, argument %zu is a %s\n", i + 1, t);
+            s->had_error = 1;
+            return NULL;
+        }
+    }
+    const char *type = list_type_for_element(tuple_type_make(parts, n->child_count));
+    if (!type) return NULL;
+    free(n->text);
+    n->text = malloc(5);
+    if (!n->text) return NULL;
+    strcpy(n->text, "@zip");
+    return set_type(n, type) ? n->type_name : NULL;
+}
+
 /* ===== V0.75: functions as values, lambda, sorted, min, max, sum, map, filter ===== */
 
 static int lambda_count = 0;
@@ -1807,7 +2109,8 @@ static const char *check_fn_call(Semantic *s, AstNode *n, const char *ftype) {
 
 /* numbers, texts and booleans can be sorted, min and max compare them */
 static int orderable(const char *t) {
-    return t && (strcmp(t, "string") == 0 || strcmp(t, "bool") == 0 || (is_numeric(t) && !is_big(t)));
+    return t && (strcmp(t, "string") == 0 || strcmp(t, "bool") == 0 || (is_numeric(t) && !is_big(t)) ||
+                 tuple_orderable(t));                     /* V0.76: key=lambda p: (p.nom, p.age) */
 }
 
 static int to_builtin(AstNode *n, const char *name, AstNode *const *children, size_t count, const char *type) {
@@ -1920,13 +2223,13 @@ static const char *check_list_call(Semantic *s, AstNode *n, int is_method, int *
         size_t fc;
         fn_type_parts(ft, fp, 16, &fc, &fr);
         if (!orderable(fr)) {
-            report("semantic error: the key of %s() must give a number, a text or a bool, got %s\n", name, fr);
+            report("semantic error: the key of %s() must give a number, a text, a bool or a tuple of them, got %s\n", name, fr);
             s->had_error = 1;
             return NULL;
         }
     } else if (!orderable(element)) {
-        report("semantic error: %s() compares numbers, texts or booleans; a list of %s needs key= (key=lambda p: p.x)\n",
-               name, element);
+        report("semantic error: %s() compares numbers, texts, booleans or tuples of them; a list of %s needs key= "
+               "(key=lambda p: p.x)\n", name, element);
         s->had_error = 1;
         return NULL;
     }
@@ -2759,6 +3062,9 @@ static const char *binary_type(Semantic *s, AstNode *n) {
         /* x in xs (a list), s in text (a string), key in d (a dictionary), like Python */
         const char *element = list_element_type(right);
         int ok = 0;
+        if (element && is_tuple_type(element) && strcmp(element, left) == 0 && tuple_equality_ok(element)) {
+            return set_type(n, "bool") ? n->type_name : NULL;           /* V0.76: (x, y) in visites */
+        }
         if (element && is_ref_element(element)) {
             /* V0.74: Python compares objects and lists with ==, which Clair does not have yet */
             report("semantic error: '%s' does not look in a list of %s yet: compare with a loop\n", n->text, element);
@@ -2774,6 +3080,14 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             if (!ok && !s->had_error) {
                 report("semantic error: '%s' cannot look for %s in %s: convert it first, e.g. %s(x)\n",
                         n->text, left, right, element);
+                s->had_error = 1;
+                return NULL;
+            }
+        } else if (is_dict_type(right) && is_tuple_type(dict_key_type(right))) {
+            ok = strcmp(left, dict_key_type(right)) == 0;                 /* V0.76: (x, y) in d */
+            if (!ok) {
+                report("semantic error: '%s' with a %s expects a %s on the left, got %s\n", n->text, right,
+                       dict_key_type(right), left);
                 s->had_error = 1;
                 return NULL;
             }
@@ -2923,6 +3237,19 @@ static const char *binary_type(Semantic *s, AstNode *n) {
             error_type(s, "two functions cannot be compared with == or !=");
             return NULL;
         }
+        if (is_tuple_type(left) || is_tuple_type(right)) {            /* V0.76: (x, y) == (0, 0) */
+            if (strcmp(left, right) != 0) {
+                report("semantic error: '%s' compares two tuples of the same types, got %s and %s\n", n->text, left, right);
+                s->had_error = 1;
+                return NULL;
+            }
+            if (!tuple_equality_ok(left)) {
+                report("semantic error: '%s' compares tuples of numbers, booleans and texts, not %s\n", n->text, left);
+                s->had_error = 1;
+                return NULL;
+            }
+            return set_type(n, "bool") ? n->type_name : NULL;
+        }
         int okay = (is_numeric(left) && is_numeric(right)) || strcmp(left, right) == 0;
         if (!okay) {
             error_type(s, "incompatible operands for equality comparison");
@@ -2938,6 +3265,19 @@ static const char *binary_type(Semantic *s, AstNode *n) {
 
     if (strcmp(n->text, "<") == 0 || strcmp(n->text, "<=") == 0 ||
         strcmp(n->text, ">") == 0 || strcmp(n->text, ">=") == 0) {
+        /* V0.76: texts by code point, booleans, and tuples element by element, as in Python */
+        if ((strcmp(left, "string") == 0 && strcmp(right, "string") == 0) ||
+            (strcmp(left, "bool") == 0 && strcmp(right, "bool") == 0))
+            return set_type(n, "bool") ? n->type_name : NULL;
+        if (is_tuple_type(left) || is_tuple_type(right)) {
+            if (strcmp(left, right) != 0 || !tuple_orderable(left)) {
+                report("semantic error: '%s' compares two tuples of the same types, made of numbers, booleans and texts; "
+                       "got %s and %s\n", n->text, left, right);
+                s->had_error = 1;
+                return NULL;
+            }
+            return set_type(n, "bool") ? n->type_name : NULL;
+        }
         if (!is_numeric(left) || !is_numeric(right)) {
             error_type(s, "ordered comparisons require int or float operands");
             return NULL;
@@ -3038,6 +3378,7 @@ static const char *expr_type_expected(Semantic *s, AstNode *n, const char *expec
 }
 
 static const char *expr_type_expected_plain(Semantic *s, AstNode *n, const char *expected) {
+    if (n && n->kind == AST_TUPLE && is_tuple_type(expected)) return check_tuple_literal(s, n, expected);   /* V0.76 */
     /* V0.75: lambda x: x * x, or len, where a def(...) -> ... is expected */
     if (n && is_fn_type(expected) &&
         (n->kind == AST_LAMBDA ||
@@ -3120,6 +3461,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             if (n->child_count != 2) return NULL;
             const char *base = expr_type(s, n->children[0]);
             const char *index = expr_type(s, n->children[1]);
+
+            if (base && is_tuple_type(base)) return check_tuple_index(s, n, base);          /* V0.76 */
 
             if (base && is_ptr_type(base)) {           /* p[i]: no check at all */
                 if (!require_absolue(s, "reading p[i] through a ptr")) return NULL;
@@ -3278,6 +3621,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                 const char *lt = check_list_call(s, n, 0, &handled);
                 if (handled) return lt;
             }
+            if (n->text && strcmp(n->text, "zip") == 0 && !find_function(s, "zip") && !find_var(s, "zip"))
+                return check_zip(s, n);                                       /* V0.76 */
             for (size_t i = 0; n->text && n->text[0] != '@' && i < n->child_count; i++) {
                 if (n->children[i]->kind == AST_KWARG) {
                     report("semantic error: %s() has no argument %s= (named arguments work with sorted, sort, min and max)\n",
@@ -3387,6 +3732,13 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
                     error_type(s, "len() of a matrix is ambiguous: use rows(m) or cols(m)");
                     return NULL;
                 }
+                if (arg && is_tuple_type(arg)) {                    /* V0.76: its number of elements */
+                    free(n->text);
+                    n->text = malloc(6);
+                    if (!n->text) return NULL;
+                    strcpy(n->text, "@tlen");
+                    return set_type(n, "int") ? n->type_name : NULL;
+                }
                 if (!arg || (strcmp(arg, "string") != 0 && !is_list_type(arg) && !is_dict_type(arg))) {
                     report("semantic error: len() expects string, list or dictionary, got %s\n", arg ? arg : "invalid");
                     s->had_error = 1;
@@ -3489,6 +3841,11 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             if (n->child_count < 1 || !n->text) return NULL;
             const char *receiver = expr_type(s, n->children[0]);
             if (receiver && strcmp(receiver, "string") == 0) return check_text_method(s, n);   /* V0.72 */
+            if (receiver && is_dict_type(receiver)) {                                          /* V0.76 */
+                int handled = 0;
+                const char *dt = check_dict_method(s, n, receiver, &handled);
+                if (handled) return dt;
+            }
             if (receiver && is_list_type(receiver) && strcmp(n->text, "sort") == 0) {          /* V0.75 */
                 int handled = 0;
                 return check_list_call(s, n, 1, &handled);
@@ -3621,6 +3978,8 @@ static const char *expr_type_at(Semantic *s, AstNode *n) {
             error_type(s, "unknown unary operator");
             return NULL;
         }
+        case AST_TUPLE:
+            return check_tuple_literal(s, n, NULL);                /* V0.76 */
         case AST_LAMBDA:
             error_type(s, "a lambda needs to know the types of its parameters: give it where a function is "
                           "expected (a parameter def(float) -> float, key=, map(), filter()), or write "
@@ -3687,6 +4046,8 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
                     error_type(s, "m[i] alone is a matrix row: write m[i][j]");
                     return 0;
                 }
+                if (n->text && strncmp(n->text, "@tup", 4) == 0 &&                      /* V0.76: let a, b = v */
+                    !check_unpacked(s, n->text, actual, NULL)) return 0;
                 if (!set_type(n, actual)) return 0;
                 if (is_ptr_type(n->type_name) && !require_absolue(s, "a ptr variable")) return 0;
                 return add_var(s, n->text, n->type_name);
@@ -3766,6 +4127,10 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
         case AST_INDEX_ASSIGN: {
             const char *base = write_target_type(s, n, 2, "assignment to");
             if (!base) return 0;
+            if (is_tuple_type(base)) {                               /* V0.76 */
+                error_type(s, "a tuple cannot be changed, as in Python: build a new one, t = (a, b)");
+                return 0;
+            }
             if (strcmp(base, "string") == 0) {                     /* V0.72 */
                 error_type(s, "a string cannot be changed in place, as in Python: build a new one, "
                               "s[0:i] + c + s[i + 1:]");
@@ -3929,6 +4294,8 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
                 if (!s->probe_type) s->probe_type = t;
                 else if (strcmp(t, s->probe_type) != 0 && assignable(t, s->probe_type) && !assignable(s->probe_type, t))
                     s->probe_type = t;          /* return 1 here, return 2.5 there: float */
+                else if (strcmp(t, s->probe_type) != 0 && tuple_converts(t, s->probe_type))
+                    s->probe_type = t;          /* V0.76: return (1, 2) here, return (1.5, 2.0) there */
                 return 1;
             }
             if (s->return_type && strcmp(s->return_type, "void") == 0) {
@@ -4020,6 +4387,8 @@ static int check_stmt_at(Semantic *s, AstNode *n) {
                 return 0;
             }
             if (!set_type(n, list)) return 0;
+            if (n->text && strncmp(n->text, "@elt", 4) == 0 &&                         /* V0.76: for a, b in pairs */
+                !check_unpacked(s, n->text, element, list)) return 0;
             enter_scope(s);
             int ok = add_var(s, n->text, element) && check_block(s, n->children[1], 0);
             leave_scope(s);

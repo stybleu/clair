@@ -608,6 +608,18 @@ static Unit unit_of_at(const AstNode *e) {
             }
             return all;
         }
+        case AST_TUPLE: {
+            /* V0.76: a tuple keeps no units (tuple[float, float]): refused rather than lost */
+            for (size_t i = 0; i < e->child_count; i++) {
+                Unit u = unit_of(e->children[i]);
+                if (u.kind == U_KNOWN && u.d.n != 0) {
+                    unit_error("a value in %s cannot go in a tuple: a tuple does not keep units yet, "
+                               "use a variable or a class field float[%s]", show(&u.d), show(&u.d));
+                    return none();
+                }
+            }
+            return none();
+        }
         case AST_CALL: {
             if (!e->text) return none();
             if (e->text[0] == '@') return builtin_unit(e);

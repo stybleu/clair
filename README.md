@@ -74,6 +74,7 @@ Le retour à l'emplacement initial reste à fiabiliser.
 - Textes comptés en caractères (`len`, `s[i]`, tranches, `for c in s`) et méthodes de `str` de Python : `lower`, `upper`, `title`, `split`, `join`, `strip`, `find`, `replace`, `startswith`, `isalpha`, `center`…, résultats identiques à ceux de Python, accents et Unicode compris ([documentation](docs/README_V0.72.md))
 - Listes d'objets (`list[Point]`, un arbre `Class Noeud { enfants: list[Noeud] }`), listes de listes à toute profondeur (`grille[i][j] = v`, `grille[i].append(v)`), dictionnaires à clés entières (`dict[int, string]`) et de toutes valeurs (`dict[string, list[int]]`, `dict[string, Ville]`) ([documentation](docs/README_V0.74.md))
 - Fonctions comme valeurs : `integrer(carre, 0.0, 1.0)` avec le type `def(float) -> float`, `lambda`, fonctions qui rendent des fonctions, listes, dictionnaires et champs de fonctions ; `sorted`, `sort`, `min`, `max`, `sum`, `map`, `filter` avec `key=` et `reverse=`, tri stable comme Python ([documentation](docs/README_V0.75.md))
+- Tuples comme Python : `(a, b)`, `return x, y`, `let a, b = f()`, `a, b = b, a`, `for k, v in d.items()`, comparaison et tri (`key=lambda p: (p.nom, p.age)`), clés de dictionnaire `memo[(i, j)]`, `zip`, `d.get(k, 0)`, `s.partition(sep)` ; les textes se comparent avec `<` ([documentation](docs/README_V0.76.md))
 - Types int, float, bool et string ; `float32` comme en IA (NumPy), deux fois moins de mémoire et 4 nombres par instruction NEON
 - Entiers machine `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32` (`i64` = `int`) qui font le tour comme en C et NumPy ; opérations sur les bits `& | ^ ~ << >>` ; nombres `0xFF`, `0b1010`, `0o755`, `1_000_000`
 - Grands entiers exacts `int128`, `int256`, `int512`, `int1024` (jusqu'à 308 chiffres) et sans signe `uint128` .. `uint1024`, avec `abs`, `min`, `max`, `pow` exacts ; dépassements détectés
@@ -190,6 +191,7 @@ Le test SIMD V4 (assembleur NEON) est ignoré automatiquement hors ARM64.
 - [Différentiation automatique](docs/README_AD_V4_25.md) : option --ad.
 - [Optimisation DCE](docs/README_DCE.md) : option --dce.
 
+- [Clair V0.76](docs/README_V0.76.md) : les tuples comme Python (`return x, y`, `let a, b = f()`, `a, b = b, a`, `for k, v in d.items()`, tri par `(nom, âge)`, clés `memo[(i, j)]`), `d.get()`, `d.items()`, `zip`, `partition` ; les textes se comparent avec `<`
 - [Clair V0.75](docs/README_V0.75.md) : les fonctions comme valeurs (`def(float) -> float`), `lambda`, `sorted`, `sort`, `min`, `max`, `sum`, `map`, `filter` avec `key=` et `reverse=`, comme Python ; correctif de la mémoire des boucles (listes d'objets rangées plus loin)
 - [Clair V0.74](docs/README_V0.74.md) : listes d'objets, listes de listes, dictionnaires à clés entières et de toutes valeurs, comme Python
 - [Clair V0.73](docs/README_V0.73.md) : les types devinés comme Python : `let x = 5`, et le type rendu par une fonction sans `-> type` (récursive, mutuelle, méthodes)

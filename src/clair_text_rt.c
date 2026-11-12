@@ -363,6 +363,26 @@ static bool clair_tx_endswith(const char *s, const char *sub, int64_t start, int
     return clair_tx_tailmatch(s, sub, start, end, 1);
 }
 
+/* ---- V0.76: partition and rpartition, three texts: before, the separator, after ---- */
+typedef struct { const char *a, *b, *c; } ClairTx3;
+
+static ClairTx3 clair_tx_partition_any(const char *s, const char *sep, size_t line, int backward) {
+    size_t n = strlen(s), m = strlen(sep);
+    if (m == 0) clair_tx_fail("empty separator", line);
+    int64_t at = clair_tx_search((const unsigned char *)s, 0, n, sep, m, backward);
+    if (at < 0) return backward ? (ClairTx3){ "", "", s } : (ClairTx3){ s, "", "" };
+    return (ClairTx3){ clair_tx_copy(s, (size_t)at), clair_tx_copy(sep, m),
+                       clair_tx_copy(s + at + (int64_t)m, n - (size_t)at - m) };
+}
+
+static ClairTx3 clair_tx_partition(const char *s, const char *sep, size_t line) {
+    return clair_tx_partition_any(s, sep, line, 0);
+}
+
+static ClairTx3 clair_tx_rpartition(const char *s, const char *sep, size_t line) {
+    return clair_tx_partition_any(s, sep, line, 1);
+}
+
 static const char *clair_tx_removeprefix(const char *s, const char *prefix) {
     size_t m = strlen(prefix);
     return strncmp(s, prefix, m) == 0 ? s + m : s;
